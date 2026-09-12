@@ -55,15 +55,15 @@ const CONFIG = {
   },
 
   risk: {
-    // Daily limits
-    dailyMaxLossPct: 0.05,  // Reduced from 8% to 5%
+    // Daily limits (env-driven)
+    dailyMaxLossPct: parseFloat(process.env.DAILY_MAX_LOSS_PCT || '0.05'),
     maxConsecutiveLosses: 6,
     pauseOnBreachMinutes: 60,
 
-    // 🔴 NEW: Monthly and cumulative limits
-    monthlyMaxLossPct: 0.15,  // 15% monthly limit
-    maxDrawdownFromPeak: 0.25,  // 25% drawdown from peak
-    totalMaxLossPct: 0.40,  // 40% total loss - stop trading entirely
+    // Monthly and cumulative limits (env-driven)
+    monthlyMaxLossPct: parseFloat(process.env.MONTHLY_MAX_LOSS_PCT || '0.15'),
+    maxDrawdownFromPeak: parseFloat(process.env.MAX_DRAWDOWN_PCT || '0.25'),
+    totalMaxLossPct: parseFloat(process.env.TOTAL_MAX_LOSS_PCT || '0.40'),
 
     // 🔴 NEW: Dynamic position sizing
     enableDynamicSizing: true,
@@ -116,8 +116,8 @@ const CONFIG = {
   },
 
   dipArb: {
-    enabled: true,
-    coins: ['BTC', 'ETH', 'SOL'] as const,
+    enabled: process.env.DIPARB_ENABLED !== 'false',
+    coins: ['BTC', 'ETH'] as const,
     shares: 10,
     sumTarget: 0.92,
     autoRotate: true,

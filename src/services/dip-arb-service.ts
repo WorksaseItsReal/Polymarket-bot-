@@ -154,7 +154,7 @@ export class DipArbService extends EventEmitter {
     if (privateKey) {
       this.ctf = new CTFClient({
         privateKey,
-        rpcUrl: 'https://polygon-rpc.com',
+        rpcUrl: 'https://1rpc.io/matic',
         chainId,
       });
     }

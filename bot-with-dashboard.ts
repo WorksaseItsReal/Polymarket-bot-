@@ -10,6 +10,7 @@
 
 import 'dotenv/config';
 import { ethers } from 'ethers';
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import {
   PolymarketSDK,
   ArbitrageService,
@@ -21,6 +22,7 @@ import { CTFClient } from './src/clients/ctf-client.js';
 import { startDashboard, dashboardEmitter } from './src/dashboard/index.js';
 import type { BotState, BotConfig, LogLevel, DipArbSignal, SmartMoneySignal } from './src/dashboard/types.js';
 import { addSession, createSessionFromState, type TradeRecord } from './src/dashboard/session-history.js';
+import { analyzeMarket, isEnabled } from './src/deepseek-analyzer.js';
 
 // ============================================================================
 // CONFIGURATION (same as bot-config.ts)
@@ -336,6 +338,17 @@ function recordTrade(profit: number, strategy: string) {
   updateDashboard();
 }
 
+function logLearning(e: { roundId?: string; market?: string; side: string; price: number; estGain: number; conf: number; coin?: string; winProb?: number; conditionId?: string }) {
+  try {
+    const PATH = (process.env.HOME || '/root') + '/.polymarket/history.json';
+    const h: any[] = existsSync(PATH) ? JSON.parse(readFileSync(PATH, 'utf-8')) : [];
+    h.push({ ...e, ts: new Date().toISOString(), realized: 0 });
+    if (h.length > 300) h.splice(0, h.length - 300);
+    mkdirSync((process.env.HOME || '/root') + '/.polymarket', { recursive: true });
+    writeFileSync(PATH, JSON.stringify(h, null, 2));
+  } catch (err) { log('WARN', `learning store: ${(err as Error).message}`); }
+}
+
 function simulateTrade(profit: number, strategy: string, description: string) {
   if (!CONFIG.dryRun || !state.paper) return;
 
@@ -581,6 +594,7 @@ async function setupDipArb(sdk: PolymarketSDK) {
 
   // Listen to newRound for round changes
   sdk.dipArb.on('newRound', (round: { roundId: string; priceToBeat: number }) => {
+    currentRoundId = round.roundId;
     log('ARB', `New round: ${round.roundId}, Price to Beat: ${round.priceToBeat}`);
     updateDashboard();
   });
@@ -610,8 +624,24 @@ async function setupDipArb(sdk: PolymarketSDK) {
     }
     log('SIGNAL', `DipArb: ${s.type} ${side} @ ${s.currentPrice?.toFixed(3)}`);
 
-    // NO SIMULATION on signal anymore - signals are not trades!
-    // We only want to track actual executions (which will fire the 'execution' event)
+    // === PAPER SIMULATION: chaque décision = mise simulée de 1€ ===
+    // Le bot RÉFLÉCHIT et DÉCIDE, mais n'envoie JAMAIS d'ordre réel.
+    // On simule comme s'il misait 1€ pour voir le gain potentiel.
+    if (CONFIG.dryRun && state.paper) {
+      const stake = 1.0; // 1€ simulé par décision
+      // Taux de profit estimé du signal (leg1: estimatedProfitRate, leg2: expectedProfitRate)
+      const profitRate = (s as any).estimatedProfitRate ?? (s as any).expectedProfitRate;
+      let estProfit = 0;
+      if (typeof profitRate === 'number' && Number.isFinite(profitRate)) {
+        estProfit = stake * (profitRate - 1);  // profitRate en ratio (ex 1.08 -> +8%)
+      } else if ((s.currentPrice || 0) > 0) {
+        // rendement d'une mise de 1€ sur un up/down: si le bon côté gagne, retour = 1/prix
+        const p = s.currentPrice || 1;
+        estProfit = stake * ((1 / p) - 1);
+      }
+      const pStr = (s.currentPrice || 0).toFixed(3);
+      simulateTrade(estProfit, 'dipArb', `Décision ${s.type} ${side} @ $${pStr} — mise simulée 1€, gain est. $${estProfit.toFixed(4)} si ${side} gagne (x${((1 / (s.currentPrice || 1))).toFixed(2)})`);
+    }
 
     updateDashboard();
   });
@@ -655,8 +685,8 @@ async function setupDipArb(sdk: PolymarketSDK) {
   if (CONFIG.dipArb.autoRotate) {
     sdk.dipArb.enableAutoRotate({
       enabled: true,
-      underlyings: ['ETH', 'BTC', 'SOL'],
-      duration: '15m',
+      underlyings: ['BTC', 'ETH'],
+      duration: '5m',
       settleStrategy: 'redeem',
       redeemWaitMinutes: 5,
     });
@@ -665,7 +695,7 @@ async function setupDipArb(sdk: PolymarketSDK) {
   // Find and start monitoring a market
   if (CONFIG.dipArb.enabled) {
     try {
-      const market = await sdk.dipArb.findAndStart({ coin: 'ETH', preferDuration: '15m' });
+      const market = await sdk.dipArb.findAndStart({ coin: 'BTC', preferDuration: '5m' });
       if (market) {
         state.activeDipArbMarket = market.name;
         state.dipArb.marketName = market.name;
@@ -686,6 +716,7 @@ async function setupDipArb(sdk: PolymarketSDK) {
 }
 
 let swapService: SwapService | null = null;
+let currentRoundId: string = '';
 
 async function updateBalances() {
   if (CONFIG.dryRun) {
@@ -740,7 +771,7 @@ async function setupSwap() {
     if (!process.env.POLYMARKET_PRIVATE_KEY) return;
 
     // Create SwapService with signer
-    const provider = new ethers.providers.JsonRpcProvider('https://polygon-rpc.com');
+    const provider = new ethers.providers.JsonRpcProvider(process.env.POLYGON_RPC_URL || 'https://1rpc.io/matic');
     const signer = new ethers.Wallet(process.env.POLYMARKET_PRIVATE_KEY, provider);
     swapService = new SwapService(signer);
 
@@ -776,7 +807,7 @@ async function setupOnchain() {
 
     const onchain = new OnchainService({
       privateKey: process.env.POLYMARKET_PRIVATE_KEY,
-      rpcUrl: 'https://polygon-rpc.com',
+      rpcUrl: process.env.POLYGON_RPC_URL || 'https://1rpc.io/matic',
     });
 
     if (CONFIG.onchain.autoApprove) {
@@ -807,6 +838,131 @@ async function setupOnchain() {
   } catch (err) {
     log('WARN', `Onchain setup error: ${(err as Error).message}`);
   }
+}
+
+async function setupLLMAnalysis(sdk: PolymarketSDK) {
+  const enabled = isEnabled();
+  log('INFO', `🤖 DeepSeek LLM analysis module: ${enabled ? 'ENABLED (remote analysis)' : 'DEGRADED (local HOLD — no API key / not enabled)'}`);
+
+  async function runAnalysisLoop() {
+    // Respect multi-layer risk gate: no trade activity if broker is halted/paused
+    if (!canTrade()) return;
+
+    try {
+      // Analyser TUNIQUEMENT les marchés BTC & ETH Up/Down 5m (ceux demandés),
+      // pas les "trending" globaux (Fed/ATP).
+      const upcoming = (await sdk.dipArb.scanUpcomingMarkets({
+        coin: 'all',
+        duration: '5m',
+        minMinutesUntilEnd: 0,
+        maxMinutesUntilEnd: 6,
+        limit: 8,
+      }) as Array<{ conditionId: string; name: string; underlying: string; durationMinutes: number; slug: string; endTime: Date } | undefined>)
+        .filter((m): m is NonNullable<typeof m> => !!m)
+        .filter(m => m.underlying === 'BTC' || m.underlying === 'ETH');
+
+      for (const market of upcoming) {
+        if (!market.conditionId) continue;
+
+        try {
+          const orderbook = await sdk.getOrderbook(market.conditionId);
+
+          // --- Filtrage en amont (avant tout appel LLM) ---
+          const yes = orderbook.yes;
+          const spreadPct = yes.bid > 0 ? (yes.ask - yes.bid) / yes.bid : 1;
+          const liquidity = Math.max(
+            orderbook.yes.bidDepth,
+            orderbook.yes.askDepth,
+            orderbook.no.bidDepth,
+            orderbook.no.askDepth
+          );
+
+          // spread < 5% ET liquidité > 1000$, sinon HOLD direct sans appel réseau
+          if (!(spreadPct < 0.05) || !(liquidity > 1000)) continue;
+
+          // === ÉCONOMIE D'APPELS LLM (budget 30/jour) ===
+          // N'appeler le modèle QUE si l'ordre montre déjà un favori net (edge ≥ seuil).
+          // Sinon marché ~50/50 → HOLD direct SANS dépenser un appel (le LLM dirait HOLD de toute façon).
+          const _yesAsk = orderbook.yes?.ask || 0.5;
+          const _noAsk = orderbook.no?.ask ?? Math.min(1 - _yesAsk, 0.99);
+          const _yesImp = 1 - _yesAsk;
+          const _noImp = 1 - _noAsk;
+          const STRONG_MIN2 = Number(process.env.P_STRONG_MIN ?? '') || 0.58;
+          const MIN_PRICE2 = Number(process.env.P_MIN_PRICE ?? '') || 0.15;
+          const hasEdge = (_yesImp >= STRONG_MIN2 && _yesAsk >= MIN_PRICE2) ||
+                          (_noImp >= STRONG_MIN2 && _noAsk >= MIN_PRICE2);
+          if (!hasEdge) {
+            // ~50/50 → pas d'edge → HOLD sans appeler le LLM (économie d'appels)
+            log('SIGNAL',   `   ↳ ${market.name?.slice(0, 30)} ~50/50 (UP ${(_yesImp*100).toFixed(0)}% / DOWN ${(_noImp*100).toFixed(0)}%) → HOLD (pas de LLM)`);
+            logLearning({ roundId: market.slug || currentRoundId, market: market.name?.slice(0, 40), side: 'HOLD', price: 0, estGain: 0, conf: 0, coin: market.underlying, conditionId: market.conditionId });
+            continue;
+          }
+
+          const result = await analyzeMarket({
+            marketId: market.conditionId,
+            question: market.name,
+            orderbook: orderbook as unknown as Record<string, unknown>,
+            priceHistory: [],
+            news: undefined,
+            liquidityUsd: liquidity,
+            spreadPct,
+          });
+
+          const tag = result.degraded ? ' [LOCAL HOLD]' : '';
+          log('SIGNAL', `🧠 DeepSeek ${market.name?.slice(0, 40) ?? market.conditionId} → ${result.recommendation} (conf ${result.confidence.toFixed(2)})${tag}`);
+
+          // === PAPER SIMULATION: vraie logique de décision — mettre 1€ seulement si fort edge ===
+          // Le bot RÉFLÉCHIT (deepseek-v4-flash) et DÉCIDE, n'envoie JAMAIS d'ordre.
+          if (CONFIG.dryRun && state.paper && !result.degraded) {
+            const yesAsk = orderbook.yes?.ask || 0.5;
+            const noAsk = orderbook.no?.ask ?? Math.min(1 - yesAsk, 0.99);
+            const yesImp = 1 - yesAsk;   // probabilité implicite UP
+            const noImp = 1 - noAsk;     // probabilité implicite DOWN
+
+            // Ne parier que sur un fort edge de probabilité (≥ 58%) ET éviter les cotes extrêmes
+            // (prix < 0.15 → mauvais ratio, souvent manipulées). Sinon : HOLD = PAS de mise.
+            let side: 'YES' | 'NO' | null = null;
+            let reason = '';
+            const STRONG_MIN = Number(process.env.P_STRONG_MIN ?? '') || 0.58;
+            const MIN_PRICE = Number(process.env.P_MIN_PRICE ?? '') || 0.15;
+
+            if (result.recommendation === 'BUY_YES' && yesImp >= STRONG_MIN && yesAsk >= MIN_PRICE) {
+              side = 'YES'; reason = ' strong';
+            } else if (result.recommendation === 'BUY_NO' && noImp >= STRONG_MIN && noAsk >= MIN_PRICE) {
+              side = 'NO'; reason = ' strong';
+            } else if (yesImp >= STRONG_MIN && yesAsk >= MIN_PRICE) {
+              // pas de reco forte, mais l'ordre montre un gros favori UP → suivre
+              side = 'YES'; reason = ' (edge ordre)';
+            } else if (noImp >= STRONG_MIN && noAsk >= MIN_PRICE) {
+              side = 'NO'; reason = ' (edge ordre)';
+            } else {
+              // Pas d'edge fort → HOLD, AUCUNE mise (on ne veut pas perdre sur du 50/50)
+              log('SIGNAL', `   ↳ ${market.name?.slice(0, 30)} ~50/50 (UP ${(yesImp*100).toFixed(0)}% / DOWN ${(noImp*100).toFixed(0)}%) → PAS de mise`);
+              logLearning({ roundId: market.slug || currentRoundId, market: market.name?.slice(0, 40), side: 'HOLD', price: 0, estGain: 0, conf: result.confidence, coin: market.underlying, conditionId: market.conditionId });
+            }
+            if (side) {
+              const buyPrice = side === 'YES' ? yesAsk : noAsk;
+              // gain si le côté choisi gagne sur une mise de 1€: retour = 1/prix, gain = 1/prix - 1
+              const estProfit = (1 / buyPrice) - 1;
+              simulateTrade(estProfit, 'dipArb', `Décision-LLM ${side} @ $${buyPrice.toFixed(3)} (round ${market.slug || market.name?.slice(-22)}, conf ${result.confidence.toFixed(2)})${reason} — mise simulée 1€, gain est. $${estProfit.toFixed(4)} si ${side} gagne (x${(1 / buyPrice).toFixed(2)})`);
+              logLearning({ roundId: market.slug || currentRoundId, market: market.name?.slice(0, 40), side, price: buyPrice, estGain: estProfit, conf: result.confidence, coin: market.underlying, conditionId: market.conditionId, winProb: side === 'YES' ? yesImp : noImp });
+            }
+          }
+          if (!result.degraded && result.recommendation !== 'HOLD') {
+            log('SIGNAL', `   Reasoning: ${result.reasoning}`);
+          }
+          updateDashboard();
+        } catch {
+          /* skip market — analyse non bloquante */
+        }
+      }
+    } catch {
+      /* trending markets indisponibles — on retente au prochain tick */
+    }
+  }
+
+  await runAnalysisLoop();
+  setInterval(runAnalysisLoop, 5 * 60 * 1000);
 }
 
 async function setupBinanceAnalysis(sdk: PolymarketSDK) {
@@ -1139,6 +1295,7 @@ async function main() {
   await setupSmartMoney(sdk);
   await setupArbitrage(sdk);
   await setupDipArb(sdk);
+  await setupLLMAnalysis(sdk);
 
   // Periodic state update
   setInterval(() => {

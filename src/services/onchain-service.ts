@@ -14,7 +14,7 @@
  * ```typescript
  * const onchain = new OnchainService({
  *   privateKey: '0x...',
- *   rpcUrl: 'https://polygon-rpc.com', // optional
+ *   rpcUrl: process.env.POLYGON_RPC_URL || 'https://1rpc.io/matic', // optional
  * });
  *
  * // Check if ready for trading
@@ -144,7 +144,7 @@ export class OnchainService {
   private swapService: SwapService;
 
   constructor(config: OnchainServiceConfig) {
-    const rpcUrl = config.rpcUrl || 'https://polygon-rpc.com';
+    const rpcUrl = config.rpcUrl || process.env.POLYGON_RPC_URL || 'https://1rpc.io/matic';
 
     // Create shared provider and wallet
     this.provider = new ethers.providers.JsonRpcProvider(rpcUrl);

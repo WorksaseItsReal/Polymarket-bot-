@@ -191,7 +191,8 @@ export class CTFClient {
   private maticPriceLastUpdated: number = 0;
 
   constructor(config: CTFConfig) {
-    const rpcUrl = config.rpcUrl || 'https://polygon-rpc.com';
+    // RPC Polygon fiable en fallback (polygon-rpc.com est souvent "API key disabled").
+    const rpcUrl = config.rpcUrl || process.env.POLYGON_RPC_URL || 'https://1rpc.io/matic';
     this.provider = new ethers.providers.JsonRpcProvider(rpcUrl);
     this.wallet = new Wallet(config.privateKey, this.provider);
     this.ctfContract = new Contract(CTF_CONTRACT, CTF_ABI, this.wallet);
