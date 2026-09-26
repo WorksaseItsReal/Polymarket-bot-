@@ -38,6 +38,7 @@ import {
 } from './realtime-service-v2.js';
 import { TradingService, type MarketOrderParams } from './trading-service.js';
 import { MarketService } from './market-service.js';
+import { getSpotPrice, primeSpotPrice, formatSpotPrice, isSpotCoin, type SpotCoin } from './spot-price-service.js';
 import { CTFClient } from '../clients/ctf-client.js';
 import type { Side } from '../core/types.js';
 import {
@@ -102,6 +103,16 @@ export class DipArbService extends EventEmitter {
   private rotateCheckInterval: ReturnType<typeof setInterval> | null = null;
   private nextMarket: DipArbMarketConfig | null = null;
 
+  // Heartbeat + flux de prix REST (le WebSocket Polymarket est mort : cf.
+  // spot-price-service.ts). Les deux handles DOIVENT être stockés et nettoyés
+  // dans stop(), sinon chaque rotation empile un nouvel interval qui continue
+  // de logger — cause du spam historique (6,8 M de lignes « Monitoring active »).
+  private heartbeatInterval: ReturnType<typeof setInterval> | null = null;
+  private restPriceInterval: ReturnType<typeof setInterval> | null = null;
+  private lastRestPriceWarn = 0;
+  private lastHeartbeatAt = 0;
+  private lastRotateLogAt = 0;
+
   // Pending redemption state (for background redemption after market resolution)
   private pendingRedemptions: DipArbPendingRedemption[] = [];
   private redeemCheckInterval: ReturnType<typeof setInterval> | null = null;
@@ -154,7 +165,7 @@ export class DipArbService extends EventEmitter {
     if (privateKey) {
       this.ctf = new CTFClient({
         privateKey,
-        rpcUrl: 'https://1rpc.io/matic',
+        rpcUrl: 'https://polygon.drpc.org',
         chainId,
       });
     }
@@ -321,21 +332,23 @@ export class DipArbService extends EventEmitter {
         await this.tradingService.initialize();
         this.log(`Wallet: ${this.ctf?.getAddress()}`);
       } catch (error) {
-        this.log(`Warning: Trading service init failed: ${error}`);
+        this.log(`Warning: Trading service init failed: ${this.errStr(error)}`);
       }
     } else {
       this.log('No wallet configured - monitoring only');
     }
 
-    // Connect realtime service and wait for connection
+    // Connect realtime service and wait for connection.
+    // Le WebSocket Polymarket est actuellement MORT côté serveur (tous les
+    // topics renvoient 0 message) : il est donc purement OPTIONNEL et ne doit
+    // JAMAIS bloquer le démarrage. On attend au maximum 3 s puis on continue.
     this.realtimeService.connect();
 
-    // Wait for WebSocket connection (with timeout)
     await new Promise<void>((resolve) => {
       const timeout = setTimeout(() => {
-        this.log('Warning: WebSocket connection timeout, proceeding anyway');
+        this.log('Warning: WebSocket connection timeout (non bloquant, prix via REST)');
         resolve();
-      }, 10000);
+      }, 3000);
 
       // Check if already connected
       if (this.realtimeService.isConnected?.()) {
@@ -370,28 +383,51 @@ export class DipArbService extends EventEmitter {
       }
     );
 
-    // Subscribe to Chainlink prices for the underlying asset
-    // Format: ETH -> ETH/USD
+    // Subscribe to Chainlink prices for the underlying asset (OPTIONNEL).
+    // Le WS est mort côté serveur → cette souscription ne reçoit rien, ce qui
+    // est toléré : le prix vient du polling REST ci-dessous. Si le WS revient,
+    // `handleChainlinkPriceUpdate` alimente aussi le cache (source primaire).
     const chainlinkSymbol = `${market.underlying}/USD`;
-    console.log(`[DipArb] Subscribing to Chainlink prices: ${chainlinkSymbol}`);
-    this.chainlinkSubscription = this.realtimeService.subscribeCryptoChainlinkPrices(
-      [chainlinkSymbol],
-      {
-        onPrice: (price: CryptoPrice) => {
-          this.log(`Received ${price.symbol} Price: $${price.price.toFixed(2)}`); // Use this.log for consistency
-          this.handleChainlinkPriceUpdate(price);
-        },
-      }
-    );
+    console.log(`[DipArb] Subscribing to Chainlink prices (WS optionnel): ${chainlinkSymbol}`);
+    try {
+      this.chainlinkSubscription = this.realtimeService.subscribeCryptoChainlinkPrices(
+        [chainlinkSymbol],
+        {
+          onPrice: (price: CryptoPrice) => {
+            this.log(`Received ${price.symbol} Price: $${price.price.toFixed(2)}`);
+            this.handleChainlinkPriceUpdate(price);
+          },
+        }
+      );
+    } catch (err) {
+      this.log(`Warning: Chainlink WS subscription failed (non bloquant): ${this.errStr(err)}`);
+    }
 
-    // Heartbeat to reassure user
-    setInterval(() => {
-      if (this.isRunning) {
-        const lastPrice = this.currentUnderlyingPrice > 0 ? this.currentUnderlyingPrice.toFixed(2) : 'Waiting';
-        const timeSinceUpdate = this.lastPriceUpdate > 0 ? Math.round((Date.now() - this.lastPriceUpdate) / 1000) + 's ago' : 'Never';
-        this.log(`💓 Monitoring active. Last Price: $${lastPrice} (${timeSinceUpdate})`);
+    // ✅ FIX PRINCIPAL : flux de prix REST (Binance → Coinbase → Kraken).
+    // Le bot ne doit JAMAIS rester bloqué en `Waiting (Never)` : s'il n'a pas
+    // de prix, il logue un WARN throttlé et continue à scanner.
+    this.startRestPriceFeed();
+
+    // Heartbeat (1 ligne / minute MAX, en debug) — handle stocké pour être
+    // nettoyé dans stop(). Ne jamais logger à chaque tick par market.
+    this.heartbeatInterval = setInterval(() => {
+      if (!this.isRunning) return;
+      // garde-fou supplémentaire : jamais plus d'une ligne par minute
+      if (Date.now() - this.lastHeartbeatAt < 55_000) return;
+      this.lastHeartbeatAt = Date.now();
+
+      const coin = (this.market?.underlying as SpotCoin | undefined) ?? 'BTC';
+      const price = this.currentUnderlyingPrice;
+      const hasPrice = price > 0;
+      const ageS = this.lastPriceUpdate > 0 ? Math.round((Date.now() - this.lastPriceUpdate) / 1000) : -1;
+
+      if (!hasPrice) {
+        // WARN throttlé (déjà ≤ 1/min) : le bot continue, il ne bloque pas.
+        this.log(`⚠️ WARN: aucun prix ${coin}/USD disponible (REST+WS muets) — scan poursuivi, dernière maj: ${ageS < 0 ? 'jamais' : ageS + 's'}`);
+        return;
       }
-    }, 60000);
+      this.log(`💓 Monitoring active. ${coin}/USD ${formatSpotPrice(coin, price)} (maj il y a ${ageS}s)`);
+    }, 60_000);
 
     // ✅ FIX: Check and merge existing pairs at startup
     if (this.ctf && this.config.autoMerge) {
@@ -446,14 +482,14 @@ export class DipArbService extends EventEmitter {
             this.log(`❌ Startup merge failed`);
           }
         } catch (mergeError) {
-          this.log(`❌ Startup merge error: ${mergeError instanceof Error ? mergeError.message : String(mergeError)}`);
+          this.log(`❌ Startup merge error: ${this.errStr(mergeError)}`);
         }
       } else if (upBalance > 0 || downBalance > 0) {
         // Has tokens but not enough pairs to merge
         this.log(`📊 Existing positions: UP=${upBalance.toFixed(2)}, DOWN=${downBalance.toFixed(2)} (no pairs to merge)`);
       }
     } catch (error) {
-      this.log(`Warning: Failed to scan existing pairs: ${error instanceof Error ? error.message : String(error)}`);
+      this.log(`Warning: Failed to scan existing pairs: ${this.errStr(error)}`);
     }
   }
 
@@ -467,6 +503,20 @@ export class DipArbService extends EventEmitter {
 
     // Stop rotate check
     this.stopRotateCheck();
+
+    // ⚠️ FIX spam logs : nettoyer les intervals créés par start(), sinon chaque
+    // rotation en empile un nouveau et ils continuent de logger (cause des
+    // 6,8 M de lignes « Monitoring active »). `isRunning=false` ne suffit pas :
+    // la rotation repasse `isRunning` à true et tous les anciens intervals
+    // repartent.
+    if (this.heartbeatInterval) {
+      clearInterval(this.heartbeatInterval);
+      this.heartbeatInterval = null;
+    }
+    if (this.restPriceInterval) {
+      clearInterval(this.restPriceInterval);
+      this.restPriceInterval = null;
+    }
 
     // Unsubscribe
     if (this.marketSubscription) {
@@ -483,8 +533,13 @@ export class DipArbService extends EventEmitter {
     this.stats.runningTimeMs = Date.now() - this.stats.startTime;
 
     this.log('Stopped');
+    // ✅ FIX 2026-09-26 : « Rounds completed » affichait `roundsSuccessful`
+    // (rounds à double jambe exécutée) au lieu de `roundsCompleted` (rounds
+    // réellement terminés). En simple surveillance, un round terminé n'est
+    // jamais « successful » → le libellé était trompeur. On distingue les deux.
     this.log(`Rounds monitored: ${this.stats.roundsMonitored}`);
-    this.log(`Rounds completed: ${this.stats.roundsSuccessful}`);
+    this.log(`Rounds completed: ${this.stats.roundsCompleted}`);
+    this.log(`Rounds successful (Leg2 filled): ${this.stats.roundsSuccessful}`);
     this.log(`Total profit: $${this.stats.totalProfit.toFixed(2)}`);
 
     this.emit('stopped');
@@ -1029,6 +1084,12 @@ export class DipArbService extends EventEmitter {
     this.currentUnderlyingPrice = price.price;
     this.lastPriceUpdate = Date.now();
 
+    // Alimente aussi le cache REST partagé (le WS devient une source primaire
+    // quand il fonctionne, avec le REST en filet de sécurité).
+    if (isSpotCoin(this.market.underlying)) {
+      primeSpotPrice(this.market.underlying as SpotCoin, price.price, 'chainlink-ws');
+    }
+
     // Emit price update event
     if (this.currentRound) {
       const event: DipArbPriceUpdateEvent = {
@@ -1043,10 +1104,103 @@ export class DipArbService extends EventEmitter {
     }
   }
 
+  /**
+   * ✅ FIX 2026-09-25 : flux de prix REST (le WebSocket Polymarket est mort).
+   *
+   * Poll Binance (primaire) puis Coinbase/Kraken (fallback) toutes les 5 s via
+   * `getSpotPrice()` (cache court ~1 s → pas de spam d'API). La valeur est
+   * poussée dans le même état que celui alimenté par le WS
+   * (`currentUnderlyingPrice`/`lastPriceUpdate`), donc tout le reste du service
+   * (heartbeat, priceToBeat des rounds, events priceUpdate) fonctionne sans
+   * changer.
+   *
+   * En cas d'échec total : WARN throttlé (≤ 1/min) et on CONTINUE à scanner —
+   * le bot ne reste jamais bloqué en `Waiting (Never)`.
+   */
+  private startRestPriceFeed(): void {
+    if (this.restPriceInterval) {
+      clearInterval(this.restPriceInterval);
+      this.restPriceInterval = null;
+    }
+
+    const tick = async () => {
+      if (!this.isRunning || !this.market) return;
+
+      // ✅ FIX 2026-09-26 : le cycle de vie des rounds était déclenché
+      // UNIQUEMENT par `handleOrderbookUpdate()` (événement WS `clob_market`),
+      // canal DÉPRÉCIÉ côté Polymarket (réponse serveur 400 « CLOB messages are
+      // not supported anymore ») qui ne délivre plus AUCUN message. Résultat :
+      // `checkAndStartNewRound()` n'était jamais appelé → compteurs
+      // `Rounds monitored`/`Rounds completed` figés à 0 alors que le service
+      // tournait. On pilote désormais le cycle depuis le flux REST (vivant,
+      // tick 5 s), indépendamment du WS mort. On LOGGE l'erreur (et on n'utilise
+      // PAS emit('error') : aucun listener 'error' n'est enregistré → Node
+      // lancerait « Unhandled 'error' event » et tuerait le process).
+      this.checkAndStartNewRound().catch(err => {
+        this.log(`Round lifecycle error: ${this.errStr(err)}`);
+      });
+
+      const coin = this.market.underlying.toUpperCase();
+      if (!isSpotCoin(coin)) return;
+
+      const spot = await getSpotPrice(coin as SpotCoin);
+      if (spot && spot.price > 0) {
+        this.currentUnderlyingPrice = spot.price;
+        this.lastPriceUpdate = Date.now();
+        if (this.currentRound) {
+          const event: DipArbPriceUpdateEvent = {
+            underlying: this.market.underlying,
+            value: spot.price,
+            priceToBeat: this.currentRound.priceToBeat,
+            changePercent: this.currentRound.priceToBeat > 0
+              ? ((spot.price - this.currentRound.priceToBeat) / this.currentRound.priceToBeat) * 100
+              : 0,
+          };
+          this.emit('priceUpdate', event);
+        }
+        return;
+      }
+
+      // Aucun prix : WARN throttlé, on ne bloque pas le scan.
+      if (Date.now() - this.lastRestPriceWarn > 60_000) {
+        this.lastRestPriceWarn = Date.now();
+        this.log(`⚠️ WARN: prix REST indisponible pour ${coin}/USD (Binance/Coinbase/Kraken) — scan poursuivi sans prix`);
+      }
+    };
+
+    // Première valeur immédiatement (ne pas attendre 5 s).
+    void tick();
+    this.restPriceInterval = setInterval(() => { void tick(); }, 5_000);
+  }
+
   // ===== Private: Round Management =====
 
   private async checkAndStartNewRound(): Promise<void> {
     if (!this.market) return;
+
+    // ✅ FIX 2026-09-26 : clôturer le round « waiting » quand le marché est
+    // terminé. Auparavant un round ne se terminait QUE via l'exécution Leg2 ou
+    // le timeout Leg1 — deux chemins alimentés par l'orderbook WS
+    // (`clob_market`, canal DÉPRÉCIÉ/mort). En simple surveillance
+    // (autoExecute=false) le round restait donc bloqué en 'waiting' à vie et
+    // `roundsCompleted` ne quittait jamais 0. On le clôt explicitement ici.
+    if (
+      this.currentRound &&
+      this.currentRound.phase === 'waiting' &&
+      new Date() >= this.market.endTime
+    ) {
+      this.currentRound.phase = 'completed';
+      this.stats.roundsCompleted++;
+
+      const completedRound: DipArbRoundResult = {
+        roundId: this.currentRound.roundId,
+        status: 'completed',
+        leg1: this.currentRound.leg1,
+        merged: false,
+      };
+      this.emit('roundComplete', completedRound);
+      this.log(`Round completed (market ended, no position): ${this.currentRound.roundId}`);
+    }
 
     // If no current round or current round is completed/expired, start new round
     if (!this.currentRound || this.currentRound.phase === 'completed' || this.currentRound.phase === 'expired') {
@@ -1197,7 +1351,7 @@ export class DipArbService extends EventEmitter {
         };
       }
     } catch (error) {
-      this.log(`❌ Leg1 exit error: ${error instanceof Error ? error.message : String(error)}`);
+      this.log(`❌ Leg1 exit error: ${this.errStr(error)}`);
       return {
         success: false,
         leg: 'exit',
@@ -1578,7 +1732,7 @@ export class DipArbService extends EventEmitter {
 
       // ✅ FIX: Scan for existing redeemable positions at startup
       this.scanAndQueueRedeemablePositions().catch(err => {
-        this.log(`Warning: Failed to scan redeemable positions: ${err instanceof Error ? err.message : String(err)}`);
+        this.log(`Warning: Failed to scan redeemable positions: ${this.errStr(err)}`);
       });
     }
   }
@@ -1675,7 +1829,7 @@ export class DipArbService extends EventEmitter {
                   this.log(`✅ Merged ${pairsToMerge.toFixed(2)} pairs from ${market.slug}`);
                 }
               } catch (mergeErr) {
-                this.log(`⚠️ Failed to merge ${market.slug}: ${mergeErr instanceof Error ? mergeErr.message : String(mergeErr)}`);
+                this.log(`⚠️ Failed to merge ${market.slug}: ${this.errStr(mergeErr)}`);
               }
             }
           }
@@ -1690,7 +1844,7 @@ export class DipArbService extends EventEmitter {
         this.log('No redeemable positions found');
       }
     } catch (error) {
-      this.log(`Error scanning redeemable positions: ${error instanceof Error ? error.message : String(error)}`);
+      this.log(`Error scanning redeemable positions: ${this.errStr(error)}`);
     }
   }
 
@@ -1930,7 +2084,7 @@ export class DipArbService extends EventEmitter {
           this.stats.totalProfit += settleResult.amountReceived;
         }
       } catch (error) {
-        this.log(`Redemption error for ${pending.market.slug}: ${error instanceof Error ? error.message : String(error)}`);
+        this.log(`Redemption error for ${pending.market.slug}: ${this.errStr(error)}`);
 
         // Give up after too many retries
         if (pending.retryCount > 20) {
@@ -1968,7 +2122,8 @@ export class DipArbService extends EventEmitter {
     const timeUntilEnd = endTime - now;
     const preloadMs = (this.autoRotateConfig.preloadMinutes || 2) * 60 * 1000;
 
-    if (this.config.debug) {
+    if (this.config.debug && now - this.lastRotateLogAt > 60_000) {
+      this.lastRotateLogAt = now;
       const timeLeftSec = Math.round(timeUntilEnd / 1000);
       this.log(`checkRotation: timeUntilEnd=${timeLeftSec}s, preloadMs=${preloadMs / 1000}s, nextMarket=${this.nextMarket?.slug || 'none'}`);
     }
@@ -2267,6 +2422,21 @@ export class DipArbService extends EventEmitter {
     const upChange = ((last.upAsk - first.upAsk) / first.upAsk * 100).toFixed(2);
     const downChange = ((last.downAsk - first.downAsk) / first.downAsk * 100).toFixed(2);
     this.log(`   Change: UP ${upChange}% | DOWN ${downChange}%`);
+  }
+
+  /**
+   * ✅ AUDIT 2026-09-26 (hygiène de log) : formate une erreur en UNE ligne
+   * bornée. Les erreurs ethers v5 embarquent `transaction={…}` / `error={…}`
+   * (avec en-têtes HTTP complets) → jusqu'à ~7 Ko PAR ligne dans le log, cf.
+   * « Failed to scan existing pairs: missing revert data in call exception;
+   * Transaction reverted without a reason string (data=…, transaction={…}) ».
+   * On aplatit les espaces et on tronque pour ne garder que la cause utile.
+   */
+  private errStr(err: unknown, maxLen = 240): string {
+    const raw = (err instanceof Error ? err.message : String(err)).replace(/\s+/g, ' ').trim();
+    if (raw.length <= maxLen) return raw;
+    const suffix = `…[+${raw.length - maxLen}]`;
+    return raw.slice(0, Math.max(0, maxLen - suffix.length)) + suffix;
   }
 
   private log(message: string): void {

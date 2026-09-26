@@ -1,0 +1,16 @@
+cumulative.pnl officiel                  : +3.0276
+  = valeur du repair 2026-09-25 (63 tr.) : -2.0737  (wins 41 / losses 22)
+  + realized stockés des 37 trades suiv. : +5.1013
+  = +3.0276   (écart avec l'officiel : -0.0000)
+
+recalcul indépendant sur l'issue réelle :
+  les 63 premiers, base sorties réelles  : +0.6191
+  les 63 premiers, base tenu au round    : +0.7434
+  les 37 suivants, sorties TP du bot     : +5.1010
+  total 100 trades, base sorties réelles : +5.7201
+  total 100 trades, base tenu au round   : +6.2649
+  total 100 trades, somme des realized   : +5.7202
+
+wins/losses : officiel 68/32 | recalculé (round) 70/30
+
+-> data/reconciliation.json

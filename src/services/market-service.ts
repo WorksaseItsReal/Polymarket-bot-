@@ -330,7 +330,21 @@ export class MarketService {
   async getTokenOrderbook(tokenId: string): Promise<Orderbook> {
     const client = await this.ensureInitialized();
     return this.rateLimiter.execute(ApiType.CLOB_API, async () => {
-      const book = await client.getOrderBook(tokenId) as OrderBookSummary;
+      const book = await client.getOrderBook(tokenId) as OrderBookSummary & { error?: unknown; status?: number };
+
+      // ⚠️ FIX 2026-09-25 : le clob-client ne `throw` pas sur une erreur HTTP — il
+      // logue `[CLOB Client] request error {...}` sur stderr puis retourne
+      // `{ error, status }`. Sans ce test, on renvoyait un orderbook VIDE (bids
+      // et asks à 0) qui faisait passer le marché pour un ~50/50 → HOLD fantôme.
+      // Un token id périmé (round terminé) donne `404 No orderbook exists for the
+      // requested token id` : on le remonte explicitement pour que l'appelant
+      // marque le marché périmé et passe au round suivant, sans boucler.
+      if ((book as { status?: number } | null)?.status === 404 || (book as { error?: unknown } | null)?.error || !book?.asset_id) {
+        throw new PolymarketError(
+          ErrorCode.MARKET_NOT_FOUND,
+          `Orderbook indisponible (token id périmé ou inconnu): ${tokenId.slice(0, 18)}…`
+        );
+      }
 
       const bids = (book.bids || [])
         .map((l: { price: string; size: string }) => ({
@@ -422,9 +436,41 @@ export class MarketService {
     const [yesBook, noBook] = await Promise.all([
       this.getTokenOrderbook(yesToken.tokenId),
       this.getTokenOrderbook(noToken.tokenId),
-    ]);
+    ]).catch(async (err) => {
+      // ⚠️ FIX 2026-09-25 : un token id périmé (round terminé) donne
+      // `404 No orderbook exists for the requested token id`. On marque le
+      // marché comme périmé POUR DE BON (plus aucune requête réseau dessus),
+      // on purge le cache du marché et on remonte l'erreur : l'appelant passe
+      // au round courant sans boucler ni logger une erreur utilisateur.
+      this.markStale(conditionId);
+      try { await this.cache.invalidate(`clob:market:${conditionId}`); } catch { /* non bloquant */ }
+      throw err;
+    });
 
     return this.processOrderbooks(yesBook, noBook, yesToken.tokenId, noToken.tokenId);
+  }
+
+  // ============================================================================
+  // Stale market tracking (rounds terminés → token ids périmés)
+  // ============================================================================
+
+  /** Marchés dont les token ids ne sont plus valides (round terminé). */
+  private staleMarkets = new Set<string>();
+
+  /** Nombre maximal de marchés périmés mémorisés (borne mémoire). */
+  private readonly MAX_STALE_MARKETS = 500;
+
+  private markStale(conditionId: string): void {
+    if (this.staleMarkets.size >= this.MAX_STALE_MARKETS) {
+      const first = this.staleMarkets.values().next().value;
+      if (first) this.staleMarkets.delete(first);
+    }
+    this.staleMarkets.add(conditionId);
+  }
+
+  /** Vrai si le marché a déjà été constaté périmé (orderbook indisponible). */
+  isStaleMarket(conditionId: string): boolean {
+    return this.staleMarkets.has(conditionId);
   }
 
   /**
@@ -1228,7 +1274,7 @@ export class MarketService {
     limit?: number;
     sortBy?: 'endDate' | 'volume' | 'liquidity';
     duration?: '5m' | '15m' | 'all';
-    coin?: 'BTC' | 'ETH' | 'SOL' | 'XRP' | 'all';
+    coin?: 'BTC' | 'ETH' | 'SOL' | 'XRP' | 'DOGE' | 'all';
   }): Promise<GammaMarket[]> {
     if (!this.gammaApi) {
       throw new PolymarketError(ErrorCode.INVALID_CONFIG, 'GammaApiClient is required for market scanning');
@@ -1250,7 +1296,7 @@ export class MarketService {
     };
 
     // Supported coins
-    const allCoins = ['btc', 'eth', 'sol', 'xrp'] as const;
+    const allCoins = ['btc', 'eth', 'sol', 'xrp', 'doge'] as const;
     const targetCoins = coin === 'all' ? allCoins : [coin.toLowerCase()];
 
     // Target durations

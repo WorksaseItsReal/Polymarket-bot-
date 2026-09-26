@@ -1,0 +1,40 @@
+{
+  "decisions": {
+    "total": 1412,
+    "resolues": 1411,
+    "periode": [
+      "2026-09-12T20:12:30",
+      "2026-09-26T09:59:27"
+    ],
+    "pnl_round_total": -35.7136,
+    "wins": 892,
+    "losses": 519
+  },
+  "executed": {
+    "total": 101,
+    "resolues": 100,
+    "periode": [
+      "2026-09-18T13:41:17",
+      "2026-09-26T09:59:27"
+    ],
+    "pnl_round_total": 6.2649,
+    "pnl_tp_total": 5.7201,
+    "wins": 70,
+    "losses": 30
+  },
+  "cumulative_officiel": {
+    "total_trades": 100,
+    "wins": 68,
+    "losses": 32,
+    "pnl": 3.0276,
+    "cles": 100
+  },
+  "couverture_cles_cumulative": {
+    "manquantes": 0,
+    "en_plus": 1,
+    "exemples_manquantes": [],
+    "exemples_en_plus": [
+      "0x520dcb3ec57b112c8f3408192c19bb89bfe13c2fcf829bf77952ac0e656497d7|YES|0.64"
+    ]
+  }
+}

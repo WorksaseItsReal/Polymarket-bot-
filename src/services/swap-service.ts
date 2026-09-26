@@ -156,7 +156,7 @@ export class SwapService {
 
   constructor(signer: ethers.Wallet) {
     // Use signer's provider if available, otherwise create a default Polygon provider
-    this.provider = signer.provider || new ethers.providers.JsonRpcProvider(process.env.POLYGON_RPC_URL || 'https://1rpc.io/matic');
+    this.provider = signer.provider || new ethers.providers.JsonRpcProvider(process.env.POLYGON_RPC_URL || 'https://polygon.drpc.org');
     // Ensure signer is connected to the provider
     this.signer = signer.provider ? signer : signer.connect(this.provider);
     this.router = new Contract(QUICKSWAP_ROUTER, QUICKSWAP_ROUTER_ABI, this.signer);
@@ -721,7 +721,7 @@ export class SwapService {
     address: string,
     provider?: ethers.providers.Provider
   ): Promise<TokenBalance[]> {
-    const rpcProvider = provider || new ethers.providers.JsonRpcProvider(process.env.POLYGON_RPC_URL || 'https://1rpc.io/matic');
+    const rpcProvider = provider || new ethers.providers.JsonRpcProvider(process.env.POLYGON_RPC_URL || 'https://polygon.drpc.org');
     const balances: TokenBalance[] = [];
 
     // Get native MATIC balance
@@ -763,7 +763,7 @@ export class SwapService {
     token: string,
     provider?: ethers.providers.Provider
   ): Promise<string> {
-    const rpcProvider = provider || new ethers.providers.JsonRpcProvider(process.env.POLYGON_RPC_URL || 'https://1rpc.io/matic');
+    const rpcProvider = provider || new ethers.providers.JsonRpcProvider(process.env.POLYGON_RPC_URL || 'https://polygon.drpc.org');
     const upperToken = token.toUpperCase();
 
     if (upperToken === 'MATIC') {

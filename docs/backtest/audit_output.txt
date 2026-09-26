@@ -1,0 +1,30 @@
+clés cumulative résolues en slug : 100 (inconnues: 0)
+trades comptés retrouvés comme décision du log : 87/100
+  ... même côté : 87 | même prix : 87
+décisions jamais comptées : 1325/1412 (93.8%)
+  par jour (non comptées) : {'2026-09-12': 70, '2026-09-13': 213, '2026-09-14': 47, '2026-09-15': 49, '2026-09-16': 116, '2026-09-17': 476, '2026-09-18': 353, '2026-09-26': 1}
+
+  jour         décisions  comptées  ratio
+   2026-09-12       70        0     0.0%
+   2026-09-13      213        0     0.0%
+   2026-09-14       47        0     0.0%
+   2026-09-15       49        0     0.0%
+   2026-09-16      116        0     0.0%
+   2026-09-17      476        0     0.0%
+   2026-09-18      405       52    12.8%
+   2026-09-19        6        6   100.0%
+   2026-09-20        5        5   100.0%
+   2026-09-26       25       24    96.0%
+  -> première décision comptée : 2026-09-18T13:41:17
+     lecture : si le ratio passe de 0 %% à 100 %% à une date, la coupure est
+     TEMPORELLE (store cumulatif remis à zéro), pas un filtrage sur le résultat.
+     trades comptés dont le round est ABSENT du log : 13
+
+PnL round (base round, mise 1) :
+  décisions NON comptées : (-42.3355, 1324, -0.032)
+  décisions comptées     : (6.6218, 87, 0.0761)
+
+prix — décisions comptées   : {'0.55-0.60': 15, '0.60-0.65': 17, '0.65-0.70': 19, '0.70-0.75': 28, '0.75-0.80': 8}
+prix — décisions non comptées: {'0.55-0.60': 266, '0.60-0.65': 448, '0.65-0.70': 297, '0.70-0.75': 272, '0.75-0.80': 42}
+
+PnL moyen comptées=0.0761 (n=87) vs non comptées=-0.0320 (n=1324) -> t=1.40

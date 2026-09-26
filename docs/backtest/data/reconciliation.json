@@ -1,0 +1,13 @@
+{
+  "cumulative_pnl": 3.0275999999999996,
+  "decomposition": {
+    "repair_63": -2.0737,
+    "realized_37": 5.1013,
+    "somme": 3.0276,
+    "ecart": -0.0
+  },
+  "recalcule_100_sorties_reelles": 5.7201,
+  "recalcule_100_tenu_au_round": 6.2649,
+  "somme_realized_stockes": 5.7202,
+  "ecart_officiel_vs_stockes": -2.6926
+}

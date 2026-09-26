@@ -1,0 +1,156 @@
+[
+ {
+  "slug": "how-many-tropical-cyclones-will-make-landfall-in-china-during-2026-20260805184236864",
+  "n": 6,
+  "gross_sum": 0.929,
+  "q": 358.34,
+  "net_total": 12.0018,
+  "net_unit": 0.03349,
+  "exhaustive": true,
+  "tte_j": 277,
+  "ann": 4.44
+ },
+ {
+  "slug": "which-millennium-prize-problem-will-ai-solve-next",
+  "n": 6,
+  "gross_sum": 0.879,
+  "q": 216.59,
+  "net_total": 10.6021,
+  "net_unit": 0.04895,
+  "exhaustive": false,
+  "tte_j": 461,
+  "ann": 3.86
+ },
+ {
+  "slug": "maduro-prison-time-527",
+  "n": 5,
+  "gross_sum": 0.948,
+  "q": 110.2,
+  "net_total": 1.1419,
+  "net_unit": 0.01036,
+  "exhaustive": true,
+  "tte_j": 461,
+  "ann": 0.82
+ },
+ {
+  "slug": "us-tariff-rate-on-china-on-december-31-2026",
+  "n": 5,
+  "gross_sum": 0.965,
+  "q": 9.34,
+  "net_total": 0.0317,
+  "net_unit": 0.0034,
+  "exhaustive": true,
+  "tte_j": 95,
+  "ann": 1.31
+ },
+ {
+  "slug": "argentina-annual-inflation-2026",
+  "n": 7,
+  "gross_sum": 0.972,
+  "q": 0.0,
+  "net_total": 0.0,
+  "net_unit": 0,
+  "exhaustive": true,
+  "tte_j": 106,
+  "ann": null
+ },
+ {
+  "slug": "china-annual-inflation-2026",
+  "n": 9,
+  "gross_sum": 0.974,
+  "q": 0.0,
+  "net_total": 0.0,
+  "net_unit": 0,
+  "exhaustive": true,
+  "tte_j": 106,
+  "ann": null
+ },
+ {
+  "slug": "reserve-bank-of-new-zealand-decision-in-october-20260729164521631",
+  "n": 5,
+  "gross_sum": 0.982,
+  "q": 0.0,
+  "net_total": 0.0,
+  "net_unit": 0,
+  "exhaustive": true,
+  "tte_j": 32,
+  "ann": null
+ },
+ {
+  "slug": "bank-of-japan-decision-in-october-20260731151537",
+  "n": 5,
+  "gross_sum": 0.99,
+  "q": 0.0,
+  "net_total": 0.0,
+  "net_unit": 0,
+  "exhaustive": true,
+  "tte_j": 33,
+  "ann": null
+ },
+ {
+  "slug": "of-chatgpt-outage-days-in-september-2026",
+  "n": 6,
+  "gross_sum": 0.992,
+  "q": 0.0,
+  "net_total": 0.0,
+  "net_unit": 0,
+  "exhaustive": true,
+  "tte_j": 4,
+  "ann": null
+ },
+ {
+  "slug": "fed-decision-in-january-20260729233815502",
+  "n": 5,
+  "gross_sum": 0.995,
+  "q": 0.0,
+  "net_total": 0.0,
+  "net_unit": 0,
+  "exhaustive": true,
+  "tte_j": 123,
+  "ann": null
+ },
+ {
+  "slug": "israel-election-likud-of-seats",
+  "n": 5,
+  "gross_sum": 0.995,
+  "q": 0.0,
+  "net_total": 0.0,
+  "net_unit": 0,
+  "exhaustive": true,
+  "tte_j": 31,
+  "ann": null
+ },
+ {
+  "slug": "republican-senate-seats-after-the-2026-midterm-elections-927",
+  "n": 11,
+  "gross_sum": 0.997,
+  "q": 0.0,
+  "net_total": 0.0,
+  "net_unit": 0,
+  "exhaustive": true,
+  "tte_j": 38,
+  "ann": null
+ },
+ {
+  "slug": "which-month-will-strait-of-hormuz-traffic-return-to-normal-20260702155718114",
+  "n": 6,
+  "gross_sum": 0.997,
+  "q": 0.0,
+  "net_total": 0.0,
+  "net_unit": 0,
+  "exhaustive": false,
+  "tte_j": 127,
+  "ann": null
+ },
+ {
+  "slug": "how-many-ships-transit-bab-el-mandeb-strait-week-of-september-21",
+  "n": 5,
+  "gross_sum": 0.998,
+  "q": 0.0,
+  "net_total": 0.0,
+  "net_unit": 0,
+  "exhaustive": true,
+  "tte_j": 1,
+  "ann": null
+ }
+]

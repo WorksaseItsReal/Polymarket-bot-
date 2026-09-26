@@ -1,0 +1,29 @@
+Trades résolus : 167
+
+======================================================================
+1. VALIDATION CROISÉE (re-résolution vs realized enregistré)
+======================================================================
+  DISCORDANT eth-updown-5m-1789743600 ETH NO p=0.63 bot=-0.8984 hold-to-expiry_win=True soldTp=True sl=True
+  DISCORDANT xrp-updown-5m-1789748700 XRP NO p=0.75 bot=-0.9733 hold-to-expiry_win=True soldTp=True sl=True
+  167 comparables | 165 concordants | 2 discordants (1.2%)
+
+======================================================================
+2. SPLIT DE RÉGIME TEMPOREL (correctif de résolution 2026-09-25T21:31)
+======================================================================
+  AVANT correctif  n=106 WR= 67.9% mean=+0.0233€ sd=0.7136 t=+0.34 total=+2.468€
+  APRÈS correctif  n= 61 WR= 72.1% mean=+0.1501€ sd=0.7272 t=+1.61 total=+9.158€
+
+======================================================================
+3. MULTIPLE-COMPARAISONS (faux positifs attendus à |t|>2)
+======================================================================
+  5 coins                  : P(>=1 faux positif à |t|>2) = 20.8%
+  5 tranches               : P(>=1 faux positif à |t|>2) = 20.8%
+  5 coins + 5 tranches     : P(>=1 faux positif à |t|>2) = 37.2%
+
+======================================================================
+4. COHÉRENCE AVEC pnl.json (chiffre revendiqué par le bot)
+======================================================================
+  pnl.json : trades=127 wins=87 losses=40 win_rate=68.5% pnl=6.79€ pending=0
+  hold-to-expiry recalculé : n=167 pnl_total=+11.626€ t=+1.25
+  as-executed recalculé    : n=167 pnl_total=+8.194€
+  Écart pnl.json(total) vs hold-to-expiry : -4.836€

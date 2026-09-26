@@ -323,6 +323,21 @@ export class RealtimeServiceV2 extends EventEmitter {
 
   // ============================================================================
   // Market Data Subscriptions (clob_market)
+  //
+  // ⚠️ AUDIT 2026-09-26 — topic DÉPRÉCIÉ côté Polymarket.
+  // Le serveur `wss://ws-live-data.polymarket.com/` rejette les souscriptions
+  // `clob_market` avec `{"message":"CLOB messages are not supported anymore..."}`
+  // (statusCode 400, mesuré 128×/h à 274×/h) et ne délivre plus AUCUN message :
+  // `emit('orderbook', …)` (et priceChange/lastTrade/tickSizeChange) ne se
+  // déclenche donc jamais.
+  //
+  // NON RETIRÉ (décision d'audit) : des consommateurs RÉELS sont encore
+  // enregistrés sur ces événements —
+  //   • DipArbService.start()  → subscribeMarkets(..., { onOrderbook })  (dip-arb-service.ts)
+  //   • ArbitrageService.start() → subscribeMarkets(..., { onOrderbook }) (arbitrage-service.ts)
+  // Retirer les topics casserait la réception des orderbooks si le serveur les
+  // réactivait un jour. À supprimer seulement quand ces deux consommateurs
+  // auront migré vers une source REST/autre canal. Voir docs/rebuild/code/REPORT.md.
   // ============================================================================
 
   /**

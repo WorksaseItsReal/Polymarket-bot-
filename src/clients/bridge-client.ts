@@ -139,7 +139,7 @@ export const SUPPORTED_CHAINS = {
   POLYGON: {
     chainId: 137,
     name: 'Polygon',
-    rpcUrl: process.env.POLYGON_RPC_URL || 'https://1rpc.io/matic',
+    rpcUrl: process.env.POLYGON_RPC_URL || 'https://polygon.drpc.org',
   },
 } as const;
 

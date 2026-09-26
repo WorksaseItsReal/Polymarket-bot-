@@ -1,0 +1,70 @@
+{
+  "cles_cumulative_mappees": 100,
+  "cles_non_mappees": 0,
+  "trades_comptes_retrouves_dans_log": 87,
+  "meme_cote": 87,
+  "meme_prix": 87,
+  "decisions_total": 1412,
+  "decisions_non_comptees": 1325,
+  "premiere_decision_comptee": "2026-09-18T13:41:17",
+  "ratio_compte_par_jour": {
+    "2026-09-12": [
+      70,
+      0
+    ],
+    "2026-09-13": [
+      213,
+      0
+    ],
+    "2026-09-14": [
+      47,
+      0
+    ],
+    "2026-09-15": [
+      49,
+      0
+    ],
+    "2026-09-16": [
+      116,
+      0
+    ],
+    "2026-09-17": [
+      476,
+      0
+    ],
+    "2026-09-18": [
+      405,
+      52
+    ],
+    "2026-09-19": [
+      6,
+      6
+    ],
+    "2026-09-20": [
+      5,
+      5
+    ],
+    "2026-09-26": [
+      25,
+      24
+    ]
+  },
+  "pnl_round_decisions_non_comptees": -42.3355,
+  "pnl_round_decisions_comptees": 6.6218,
+  "t_test_comptees_vs_non_comptees": 1.396,
+  "slugs_comptes_absents_du_log": [
+    "btc-updown-5m-1790371500",
+    "btc-updown-5m-1790372100",
+    "btc-updown-5m-1790375700",
+    "btc-updown-5m-1790378700",
+    "doge-updown-5m-1790371500",
+    "eth-updown-5m-1790371500",
+    "eth-updown-5m-1790372700",
+    "eth-updown-5m-1790376300",
+    "eth-updown-5m-1790377500",
+    "eth-updown-5m-1790380500",
+    "sol-updown-5m-1790378700",
+    "xrp-updown-5m-1790374800",
+    "xrp-updown-5m-1790378700"
+  ]
+}

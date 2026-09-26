@@ -5,9 +5,23 @@ node_modules/
 dist/
 
 # Environment variables
+# NOTE SECURITE : `.env` ET `.env.*` (sauvegardes .env.bak-*, .env.local, ...) peuvent
+# contenir de VRAIES cles (Polymarket private key, tokens Discord, API keys).
+# Seul `.env.example` (placeholders) est versionne. Ne jamais retirer ces regles.
 .env
-.env.local
-.env.*.local
+.env.*
+!.env.example
+
+# Logs applicatifs (peuvent contenir des dumps d'objets et des donnees de session)
+*.log
+logs/
+paperbot.log
+paperbot.error.log
+
+# Sauvegardes locales de donnees (historique de trades, registre PnL)
+*.bak
+*.bak-*
+~/.polymarket/
 
 # IDE
 .idea/

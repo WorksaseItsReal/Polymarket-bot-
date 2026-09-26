@@ -1,0 +1,72 @@
+{
+  "test_binomial": {
+    "tests": [
+      {
+        "jeu": "décisions du log (n=745)",
+        "n": 745,
+        "gagnants": 440,
+        "prix_implicite": 0.6057,
+        "wr_observe": 59.1,
+        "p_value_binomiale": 0.8112
+      },
+      {
+        "jeu": "100 trades comptés (n=39)",
+        "n": 39,
+        "gagnants": 29,
+        "prix_implicite": 0.6033,
+        "wr_observe": 74.4,
+        "p_value_binomiale": 0.0491
+      }
+    ],
+    "nb_fenetres_balayees": 29,
+    "p_corrigee_bonferroni_meilleure": 1.0
+  },
+  "placebo_monte_carlo": {
+    "iters": 2000,
+    "meilleure_ev_is_mediane": 0.0495,
+    "meilleure_ev_is_q95": 0.1118,
+    "meilleure_ev_is_max": 0.1833,
+    "ev_is_observee": 0.0252,
+    "ev_oos_observee": -0.0842,
+    "p_meilleure_ev_is_ge_observee": 0.776,
+    "part_oos_negative_pct": 51.5
+  },
+  "clustering": {
+    "tailles": {
+      "décisions (n=1411)": {
+        "par round": {
+          "n": 1411,
+          "n_grappes": 1411,
+          "ev": -0.0253,
+          "se_cluster": 0.02,
+          "t_cluster": -1.267
+        },
+        "par jour": {
+          "n": 1411,
+          "n_grappes": 10,
+          "ev": -0.0253,
+          "se_cluster": 0.033,
+          "t_cluster": -0.766
+        }
+      },
+      "trades comptés (base round)": {
+        "par round": {
+          "n": 100,
+          "n_grappes": 100,
+          "ev": 0.0626,
+          "se_cluster": 0.0708,
+          "t_cluster": 0.885
+        },
+        "par jour": {
+          "n": 100,
+          "n_grappes": 5,
+          "ev": 0.0626,
+          "se_cluster": 0.0538,
+          "t_cluster": 1.163
+        }
+      }
+    },
+    "n_rounds_distincts": 1412,
+    "max_par_round": 1
+  }
+}

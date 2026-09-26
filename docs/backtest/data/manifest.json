@@ -1,0 +1,77 @@
+{
+  "snapshot_at": "2026-09-26T10:00:45+0000",
+  "files": {
+    "/root/.polymarket/cumulative.json": {
+      "copied_to": "data/polymarket__cumulative.json",
+      "size": 9180,
+      "mtime": "2026-09-26T09:56:44",
+      "sha256": "f8067cf15880fd1166f6e3a547aefcc825f2566c3d0d4156e3ee060e2fc4ef40"
+    },
+    "/root/.polymarket/pnl.json": {
+      "copied_to": "data/polymarket__pnl.json",
+      "size": 125,
+      "mtime": "2026-09-26T09:56:44",
+      "sha256": "f2e490f1da2dea45a7bc43f90aea5a90348b266f41f71ac8c3a8cea850fba934"
+    },
+    "/root/.polymarket/history.json": {
+      "copied_to": "data/polymarket__history.json",
+      "size": 105309,
+      "mtime": "2026-09-26T09:59:27",
+      "sha256": "1237c4582802e8f7cad593940bcc2e18f3516977aa3e20c9ea0a5499ccd67091"
+    },
+    "/root/.polymarket/cumulative.json.bak-20260925-213149": {
+      "copied_to": "data/polymarket__cumulative.json.bak-20260925-213149",
+      "size": 5393,
+      "mtime": "2026-09-20T14:26:56",
+      "sha256": "8d9009371dcea92cfa14f259f0bc6596a7139574acedef6c3c2c8e91a89e527e"
+    },
+    "/root/.polymarket/repair-20260925-213149.json": {
+      "copied_to": "data/polymarket__repair-20260925-213149.json",
+      "size": 23434,
+      "mtime": "2026-09-25T21:31:54",
+      "sha256": "747bf36bb92aab9674150acc8b960bbeaff1c373f61a1255ebd48d5ea943e71f"
+    },
+    "/root/.polymarket/archive/2026-09-18/history.json": {
+      "copied_to": "data/polymarket__archive__2026-09-18__history.json",
+      "size": 114696,
+      "mtime": "2026-09-25T21:31:54",
+      "sha256": "d823b548eff43d1dd1b9c0b9ee46c5593b926af65775e03a53407b40a4b0a02f"
+    },
+    "/root/.polymarket/archive/2026-09-18/pnl.json": {
+      "copied_to": "data/polymarket__archive__2026-09-18__pnl.json",
+      "size": 82,
+      "mtime": "2026-09-25T21:31:54",
+      "sha256": "5d35565f1b4dadb4d0690e6590ac5b7275cc6966e5421900173e1ed99eeb998e"
+    },
+    "/root/.polymarket/archive/2026-09-25/history.json": {
+      "copied_to": "data/polymarket__archive__2026-09-25__history.json",
+      "size": 89889,
+      "mtime": "2026-09-25T23:50:44",
+      "sha256": "2bcb15e83175ce8b7bae2d530dd4be86e8b36a6d9f26b08055aebd121e9cdc29"
+    },
+    "/root/.polymarket/archive/2026-09-25/pnl.json": {
+      "copied_to": "data/polymarket__archive__2026-09-25__pnl.json",
+      "size": 127,
+      "mtime": "2026-09-25T23:50:44",
+      "sha256": "ad185e733418af868182e14469447fbb7122adfb29f98cdfb55b1408725781dc"
+    },
+    "/root/clawd/Polymarket-bot/docs/data/recon_trades.csv": {
+      "copied_to": "data/bot__docs__data__recon_trades.csv",
+      "size": 4766,
+      "mtime": "2026-09-25T21:14:15",
+      "sha256": "00956a4b0cbd610e6041f968ce14d9b4482901aa6e458358f55f2048a46d772e"
+    },
+    "/root/clawd/Polymarket-bot/docs/data/_rec.json": {
+      "copied_to": "data/bot__docs__data___rec.json",
+      "size": 228257,
+      "mtime": "2026-09-25T21:11:59",
+      "sha256": "6bf3fd91f79d364ba8878758b40f97ce2ec381e5f0054ceb169c1b71591dacbe"
+    },
+    "/root/clawd/Polymarket-bot/paperbot.log": {
+      "copied_to": "data/bot__paperbot.log",
+      "size": 1414087,
+      "mtime": "2026-09-26T10:00:18",
+      "sha256": "bfc9434573dabea14abfddbcfedc42c43925dbc7277b876c8aa3566db31e5e55"
+    }
+  }
+}

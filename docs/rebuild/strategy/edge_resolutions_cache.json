@@ -1,0 +1,1678 @@
+{
+ "btc-updown-5m-1790371500": {
+  "slug": "btc-updown-5m-1790371500",
+  "status": "resolved",
+  "up": true,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "eth-updown-5m-1790371500": {
+  "slug": "eth-updown-5m-1790371500",
+  "status": "resolved",
+  "up": true,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "doge-updown-5m-1790371500": {
+  "slug": "doge-updown-5m-1790371500",
+  "status": "resolved",
+  "up": true,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "btc-updown-5m-1790372100": {
+  "slug": "btc-updown-5m-1790372100",
+  "status": "resolved",
+  "up": true,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "eth-updown-5m-1790372700": {
+  "slug": "eth-updown-5m-1790372700",
+  "status": "resolved",
+  "up": false,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "xrp-updown-5m-1790374800": {
+  "slug": "xrp-updown-5m-1790374800",
+  "status": "resolved",
+  "up": true,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "btc-updown-5m-1790375700": {
+  "slug": "btc-updown-5m-1790375700",
+  "status": "resolved",
+  "up": true,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "eth-updown-5m-1790376300": {
+  "slug": "eth-updown-5m-1790376300",
+  "status": "resolved",
+  "up": false,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "eth-updown-5m-1790377500": {
+  "slug": "eth-updown-5m-1790377500",
+  "status": "resolved",
+  "up": true,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "btc-updown-5m-1790378700": {
+  "slug": "btc-updown-5m-1790378700",
+  "status": "resolved",
+  "up": true,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "sol-updown-5m-1790378700": {
+  "slug": "sol-updown-5m-1790378700",
+  "status": "resolved",
+  "up": false,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "xrp-updown-5m-1790378700": {
+  "slug": "xrp-updown-5m-1790378700",
+  "status": "resolved",
+  "up": false,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "eth-updown-5m-1790380500": {
+  "slug": "eth-updown-5m-1790380500",
+  "status": "resolved",
+  "up": true,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "eth-updown-5m-1790382900": {
+  "slug": "eth-updown-5m-1790382900",
+  "status": "resolved",
+  "up": false,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "eth-updown-5m-1790383800": {
+  "slug": "eth-updown-5m-1790383800",
+  "status": "resolved",
+  "up": true,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "btc-updown-5m-1790388900": {
+  "slug": "btc-updown-5m-1790388900",
+  "status": "resolved",
+  "up": true,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "btc-updown-5m-1790390400": {
+  "slug": "btc-updown-5m-1790390400",
+  "status": "resolved",
+  "up": true,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "sol-updown-5m-1790391300": {
+  "slug": "sol-updown-5m-1790391300",
+  "status": "resolved",
+  "up": false,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "btc-updown-5m-1790391600": {
+  "slug": "btc-updown-5m-1790391600",
+  "status": "resolved",
+  "up": false,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "btc-updown-5m-1790394900": {
+  "slug": "btc-updown-5m-1790394900",
+  "status": "resolved",
+  "up": false,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "btc-updown-5m-1790399400": {
+  "slug": "btc-updown-5m-1790399400",
+  "status": "resolved",
+  "up": false,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "btc-updown-5m-1790400000": {
+  "slug": "btc-updown-5m-1790400000",
+  "status": "resolved",
+  "up": true,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "sol-updown-5m-1790400900": {
+  "slug": "sol-updown-5m-1790400900",
+  "status": "resolved",
+  "up": true,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "sol-updown-5m-1790401200": {
+  "slug": "sol-updown-5m-1790401200",
+  "status": "resolved",
+  "up": true,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "btc-updown-5m-1790401200": {
+  "slug": "btc-updown-5m-1790401200",
+  "status": "resolved",
+  "up": false,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "xrp-updown-5m-1790403600": {
+  "slug": "xrp-updown-5m-1790403600",
+  "status": "resolved",
+  "up": true,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "btc-updown-5m-1790404500": {
+  "slug": "btc-updown-5m-1790404500",
+  "status": "resolved",
+  "up": false,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "btc-updown-5m-1790404800": {
+  "slug": "btc-updown-5m-1790404800",
+  "status": "resolved",
+  "up": false,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "btc-updown-5m-1790406300": {
+  "slug": "btc-updown-5m-1790406300",
+  "status": "resolved",
+  "up": true,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "btc-updown-5m-1790407500": {
+  "slug": "btc-updown-5m-1790407500",
+  "status": "resolved",
+  "up": false,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "doge-updown-5m-1790410800": {
+  "slug": "doge-updown-5m-1790410800",
+  "status": "resolved",
+  "up": true,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "btc-updown-5m-1790412000": {
+  "slug": "btc-updown-5m-1790412000",
+  "status": "resolved",
+  "up": false,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "btc-updown-5m-1790414100": {
+  "slug": "btc-updown-5m-1790414100",
+  "status": "resolved",
+  "up": false,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "doge-updown-5m-1790414100": {
+  "slug": "doge-updown-5m-1790414100",
+  "status": "resolved",
+  "up": true,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "btc-updown-5m-1790414400": {
+  "slug": "btc-updown-5m-1790414400",
+  "status": "resolved",
+  "up": true,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "sol-updown-5m-1790415000": {
+  "slug": "sol-updown-5m-1790415000",
+  "status": "resolved",
+  "up": true,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "sol-updown-5m-1790415900": {
+  "slug": "sol-updown-5m-1790415900",
+  "status": "resolved",
+  "up": true,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "btc-updown-5m-1790416800": {
+  "slug": "btc-updown-5m-1790416800",
+  "status": "resolved",
+  "up": true,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "sol-updown-5m-1790417100": {
+  "slug": "sol-updown-5m-1790417100",
+  "status": "resolved",
+  "up": true,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "sol-updown-5m-1790418900": {
+  "slug": "sol-updown-5m-1790418900",
+  "status": "resolved",
+  "up": true,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "xrp-updown-5m-1790419200": {
+  "slug": "xrp-updown-5m-1790419200",
+  "status": "resolved",
+  "up": true,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "sol-updown-5m-1790419500": {
+  "slug": "sol-updown-5m-1790419500",
+  "status": "resolved",
+  "up": true,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "btc-updown-5m-1790421000": {
+  "slug": "btc-updown-5m-1790421000",
+  "status": "resolved",
+  "up": true,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "sol-updown-5m-1790423400": {
+  "slug": "sol-updown-5m-1790423400",
+  "status": "resolved",
+  "up": true,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "xrp-updown-5m-1790423400": {
+  "slug": "xrp-updown-5m-1790423400",
+  "status": "resolved",
+  "up": false,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "doge-updown-5m-1790427000": {
+  "slug": "doge-updown-5m-1790427000",
+  "status": "resolved",
+  "up": false,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "btc-updown-5m-1790427600": {
+  "slug": "btc-updown-5m-1790427600",
+  "status": "resolved",
+  "up": true,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "btc-updown-5m-1790429400": {
+  "slug": "btc-updown-5m-1790429400",
+  "status": "resolved",
+  "up": false,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "doge-updown-5m-1790439000": {
+  "slug": "doge-updown-5m-1790439000",
+  "status": "resolved",
+  "up": true,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "btc-updown-5m-1790446200": {
+  "slug": "btc-updown-5m-1790446200",
+  "status": "resolved",
+  "up": false,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "sol-updown-5m-1790448600": {
+  "slug": "sol-updown-5m-1790448600",
+  "status": "resolved",
+  "up": true,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "btc-updown-5m-1790448900": {
+  "slug": "btc-updown-5m-1790448900",
+  "status": "resolved",
+  "up": false,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "sol-updown-5m-1790449800": {
+  "slug": "sol-updown-5m-1790449800",
+  "status": "resolved",
+  "up": false,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "btc-updown-5m-1790453100": {
+  "slug": "btc-updown-5m-1790453100",
+  "status": "resolved",
+  "up": false,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "btc-updown-5m-1790454000": {
+  "slug": "btc-updown-5m-1790454000",
+  "status": "resolved",
+  "up": true,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "btc-updown-5m-1790456700": {
+  "slug": "btc-updown-5m-1790456700",
+  "status": "resolved",
+  "up": true,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "sol-updown-5m-1790456700": {
+  "slug": "sol-updown-5m-1790456700",
+  "status": "resolved",
+  "up": false,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "btc-updown-5m-1790460000": {
+  "slug": "btc-updown-5m-1790460000",
+  "status": "resolved",
+  "up": true,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "btc-updown-5m-1790460600": {
+  "slug": "btc-updown-5m-1790460600",
+  "status": "resolved",
+  "up": true,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "btc-updown-5m-1790460900": {
+  "slug": "btc-updown-5m-1790460900",
+  "status": "resolved",
+  "up": false,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "sol-updown-5m-1790461200": {
+  "slug": "sol-updown-5m-1790461200",
+  "status": "resolved",
+  "up": false,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "btc-updown-5m-1790462100": {
+  "slug": "btc-updown-5m-1790462100",
+  "status": "resolved",
+  "up": false,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "sol-updown-5m-1790462100": {
+  "slug": "sol-updown-5m-1790462100",
+  "status": "resolved",
+  "up": false,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "sol-updown-5m-1790462700": {
+  "slug": "sol-updown-5m-1790462700",
+  "status": "resolved",
+  "up": true,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "doge-updown-5m-1789729800": {
+  "slug": "doge-updown-5m-1789729800",
+  "status": "resolved",
+  "up": false,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "doge-updown-5m-1789730100": {
+  "slug": "doge-updown-5m-1789730100",
+  "status": "resolved",
+  "up": true,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "btc-updown-5m-1789730400": {
+  "slug": "btc-updown-5m-1789730400",
+  "status": "resolved",
+  "up": false,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "sol-updown-5m-1789730400": {
+  "slug": "sol-updown-5m-1789730400",
+  "status": "resolved",
+  "up": false,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "xrp-updown-5m-1789730400": {
+  "slug": "xrp-updown-5m-1789730400",
+  "status": "resolved",
+  "up": false,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "doge-updown-5m-1789730400": {
+  "slug": "doge-updown-5m-1789730400",
+  "status": "resolved",
+  "up": false,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "btc-updown-5m-1789730700": {
+  "slug": "btc-updown-5m-1789730700",
+  "status": "resolved",
+  "up": false,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "eth-updown-5m-1789730700": {
+  "slug": "eth-updown-5m-1789730700",
+  "status": "resolved",
+  "up": true,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "sol-updown-5m-1789730700": {
+  "slug": "sol-updown-5m-1789730700",
+  "status": "resolved",
+  "up": false,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "doge-updown-5m-1789730700": {
+  "slug": "doge-updown-5m-1789730700",
+  "status": "resolved",
+  "up": false,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "btc-updown-5m-1789731000": {
+  "slug": "btc-updown-5m-1789731000",
+  "status": "resolved",
+  "up": true,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "eth-updown-5m-1789731000": {
+  "slug": "eth-updown-5m-1789731000",
+  "status": "resolved",
+  "up": true,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "sol-updown-5m-1789731000": {
+  "slug": "sol-updown-5m-1789731000",
+  "status": "resolved",
+  "up": true,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "doge-updown-5m-1789731000": {
+  "slug": "doge-updown-5m-1789731000",
+  "status": "resolved",
+  "up": true,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "btc-updown-5m-1789731300": {
+  "slug": "btc-updown-5m-1789731300",
+  "status": "resolved",
+  "up": true,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "sol-updown-5m-1789731300": {
+  "slug": "sol-updown-5m-1789731300",
+  "status": "resolved",
+  "up": true,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "sol-updown-5m-1789732200": {
+  "slug": "sol-updown-5m-1789732200",
+  "status": "resolved",
+  "up": true,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "sol-updown-5m-1789732500": {
+  "slug": "sol-updown-5m-1789732500",
+  "status": "resolved",
+  "up": false,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "sol-updown-5m-1789733100": {
+  "slug": "sol-updown-5m-1789733100",
+  "status": "resolved",
+  "up": false,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "xrp-updown-5m-1789733100": {
+  "slug": "xrp-updown-5m-1789733100",
+  "status": "resolved",
+  "up": false,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "doge-updown-5m-1789733100": {
+  "slug": "doge-updown-5m-1789733100",
+  "status": "resolved",
+  "up": false,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "xrp-updown-5m-1789733700": {
+  "slug": "xrp-updown-5m-1789733700",
+  "status": "resolved",
+  "up": true,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "btc-updown-5m-1789734000": {
+  "slug": "btc-updown-5m-1789734000",
+  "status": "resolved",
+  "up": false,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "sol-updown-5m-1789734000": {
+  "slug": "sol-updown-5m-1789734000",
+  "status": "resolved",
+  "up": true,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "xrp-updown-5m-1789734000": {
+  "slug": "xrp-updown-5m-1789734000",
+  "status": "resolved",
+  "up": true,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "btc-updown-5m-1789734300": {
+  "slug": "btc-updown-5m-1789734300",
+  "status": "resolved",
+  "up": true,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "eth-updown-5m-1789734300": {
+  "slug": "eth-updown-5m-1789734300",
+  "status": "resolved",
+  "up": true,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "sol-updown-5m-1789734300": {
+  "slug": "sol-updown-5m-1789734300",
+  "status": "resolved",
+  "up": true,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "xrp-updown-5m-1789734300": {
+  "slug": "xrp-updown-5m-1789734300",
+  "status": "resolved",
+  "up": true,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "doge-updown-5m-1789734300": {
+  "slug": "doge-updown-5m-1789734300",
+  "status": "resolved",
+  "up": true,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "sol-updown-5m-1789734600": {
+  "slug": "sol-updown-5m-1789734600",
+  "status": "resolved",
+  "up": true,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "xrp-updown-5m-1789734600": {
+  "slug": "xrp-updown-5m-1789734600",
+  "status": "resolved",
+  "up": true,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "doge-updown-5m-1789734600": {
+  "slug": "doge-updown-5m-1789734600",
+  "status": "resolved",
+  "up": true,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "btc-updown-5m-1789735200": {
+  "slug": "btc-updown-5m-1789735200",
+  "status": "resolved",
+  "up": true,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "eth-updown-5m-1789735200": {
+  "slug": "eth-updown-5m-1789735200",
+  "status": "resolved",
+  "up": false,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "sol-updown-5m-1789735200": {
+  "slug": "sol-updown-5m-1789735200",
+  "status": "resolved",
+  "up": false,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "xrp-updown-5m-1789735200": {
+  "slug": "xrp-updown-5m-1789735200",
+  "status": "resolved",
+  "up": false,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "eth-updown-5m-1789735800": {
+  "slug": "eth-updown-5m-1789735800",
+  "status": "resolved",
+  "up": false,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "sol-updown-5m-1789735800": {
+  "slug": "sol-updown-5m-1789735800",
+  "status": "resolved",
+  "up": false,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "xrp-updown-5m-1789735800": {
+  "slug": "xrp-updown-5m-1789735800",
+  "status": "resolved",
+  "up": false,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "btc-updown-5m-1789736100": {
+  "slug": "btc-updown-5m-1789736100",
+  "status": "resolved",
+  "up": false,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "sol-updown-5m-1789736100": {
+  "slug": "sol-updown-5m-1789736100",
+  "status": "resolved",
+  "up": false,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "doge-updown-5m-1789736100": {
+  "slug": "doge-updown-5m-1789736100",
+  "status": "resolved",
+  "up": false,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "btc-updown-5m-1789736400": {
+  "slug": "btc-updown-5m-1789736400",
+  "status": "resolved",
+  "up": true,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "sol-updown-5m-1789736400": {
+  "slug": "sol-updown-5m-1789736400",
+  "status": "resolved",
+  "up": false,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "xrp-updown-5m-1789736400": {
+  "slug": "xrp-updown-5m-1789736400",
+  "status": "resolved",
+  "up": false,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "doge-updown-5m-1789736400": {
+  "slug": "doge-updown-5m-1789736400",
+  "status": "resolved",
+  "up": false,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "btc-updown-5m-1789736700": {
+  "slug": "btc-updown-5m-1789736700",
+  "status": "resolved",
+  "up": true,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "eth-updown-5m-1789736700": {
+  "slug": "eth-updown-5m-1789736700",
+  "status": "resolved",
+  "up": true,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "doge-updown-5m-1789736700": {
+  "slug": "doge-updown-5m-1789736700",
+  "status": "resolved",
+  "up": false,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "btc-updown-5m-1789737000": {
+  "slug": "btc-updown-5m-1789737000",
+  "status": "resolved",
+  "up": false,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "eth-updown-5m-1789737000": {
+  "slug": "eth-updown-5m-1789737000",
+  "status": "resolved",
+  "up": true,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "doge-updown-5m-1789737000": {
+  "slug": "doge-updown-5m-1789737000",
+  "status": "resolved",
+  "up": false,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "eth-updown-5m-1789737300": {
+  "slug": "eth-updown-5m-1789737300",
+  "status": "resolved",
+  "up": true,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "btc-updown-5m-1789737900": {
+  "slug": "btc-updown-5m-1789737900",
+  "status": "resolved",
+  "up": true,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "eth-updown-5m-1789737900": {
+  "slug": "eth-updown-5m-1789737900",
+  "status": "resolved",
+  "up": true,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "sol-updown-5m-1789737900": {
+  "slug": "sol-updown-5m-1789737900",
+  "status": "resolved",
+  "up": true,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "eth-updown-5m-1789738200": {
+  "slug": "eth-updown-5m-1789738200",
+  "status": "resolved",
+  "up": true,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "doge-updown-5m-1789738200": {
+  "slug": "doge-updown-5m-1789738200",
+  "status": "resolved",
+  "up": true,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "btc-updown-5m-1789738500": {
+  "slug": "btc-updown-5m-1789738500",
+  "status": "resolved",
+  "up": true,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "eth-updown-5m-1789738500": {
+  "slug": "eth-updown-5m-1789738500",
+  "status": "resolved",
+  "up": true,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "btc-updown-5m-1789738800": {
+  "slug": "btc-updown-5m-1789738800",
+  "status": "resolved",
+  "up": true,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "sol-updown-5m-1789738800": {
+  "slug": "sol-updown-5m-1789738800",
+  "status": "resolved",
+  "up": true,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "xrp-updown-5m-1789738800": {
+  "slug": "xrp-updown-5m-1789738800",
+  "status": "resolved",
+  "up": true,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "doge-updown-5m-1789738800": {
+  "slug": "doge-updown-5m-1789738800",
+  "status": "resolved",
+  "up": true,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "doge-updown-5m-1789740300": {
+  "slug": "doge-updown-5m-1789740300",
+  "status": "resolved",
+  "up": false,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "eth-updown-5m-1789740600": {
+  "slug": "eth-updown-5m-1789740600",
+  "status": "resolved",
+  "up": true,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "xrp-updown-5m-1789740600": {
+  "slug": "xrp-updown-5m-1789740600",
+  "status": "resolved",
+  "up": true,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "btc-updown-5m-1789742100": {
+  "slug": "btc-updown-5m-1789742100",
+  "status": "resolved",
+  "up": false,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "xrp-updown-5m-1789742100": {
+  "slug": "xrp-updown-5m-1789742100",
+  "status": "resolved",
+  "up": true,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "btc-updown-5m-1789742700": {
+  "slug": "btc-updown-5m-1789742700",
+  "status": "resolved",
+  "up": true,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "eth-updown-5m-1789742700": {
+  "slug": "eth-updown-5m-1789742700",
+  "status": "resolved",
+  "up": true,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "doge-updown-5m-1789742700": {
+  "slug": "doge-updown-5m-1789742700",
+  "status": "resolved",
+  "up": true,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "btc-updown-5m-1789743000": {
+  "slug": "btc-updown-5m-1789743000",
+  "status": "resolved",
+  "up": false,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "eth-updown-5m-1789743000": {
+  "slug": "eth-updown-5m-1789743000",
+  "status": "resolved",
+  "up": true,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "doge-updown-5m-1789743000": {
+  "slug": "doge-updown-5m-1789743000",
+  "status": "resolved",
+  "up": false,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "eth-updown-5m-1789743300": {
+  "slug": "eth-updown-5m-1789743300",
+  "status": "resolved",
+  "up": true,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "btc-updown-5m-1789743600": {
+  "slug": "btc-updown-5m-1789743600",
+  "status": "resolved",
+  "up": false,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "eth-updown-5m-1789743600": {
+  "slug": "eth-updown-5m-1789743600",
+  "status": "resolved",
+  "up": false,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "doge-updown-5m-1789743900": {
+  "slug": "doge-updown-5m-1789743900",
+  "status": "resolved",
+  "up": false,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "xrp-updown-5m-1789744200": {
+  "slug": "xrp-updown-5m-1789744200",
+  "status": "resolved",
+  "up": true,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "doge-updown-5m-1789744200": {
+  "slug": "doge-updown-5m-1789744200",
+  "status": "resolved",
+  "up": true,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "btc-updown-5m-1789744800": {
+  "slug": "btc-updown-5m-1789744800",
+  "status": "resolved",
+  "up": true,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "xrp-updown-5m-1789744800": {
+  "slug": "xrp-updown-5m-1789744800",
+  "status": "resolved",
+  "up": true,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "xrp-updown-5m-1789745100": {
+  "slug": "xrp-updown-5m-1789745100",
+  "status": "resolved",
+  "up": false,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "doge-updown-5m-1789745100": {
+  "slug": "doge-updown-5m-1789745100",
+  "status": "resolved",
+  "up": false,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "sol-updown-5m-1789746000": {
+  "slug": "sol-updown-5m-1789746000",
+  "status": "resolved",
+  "up": false,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "eth-updown-5m-1789746300": {
+  "slug": "eth-updown-5m-1789746300",
+  "status": "resolved",
+  "up": true,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "sol-updown-5m-1789746300": {
+  "slug": "sol-updown-5m-1789746300",
+  "status": "resolved",
+  "up": true,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "sol-updown-5m-1789746600": {
+  "slug": "sol-updown-5m-1789746600",
+  "status": "resolved",
+  "up": false,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "eth-updown-5m-1789746900": {
+  "slug": "eth-updown-5m-1789746900",
+  "status": "resolved",
+  "up": true,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "eth-updown-5m-1789747200": {
+  "slug": "eth-updown-5m-1789747200",
+  "status": "resolved",
+  "up": true,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "sol-updown-5m-1789747200": {
+  "slug": "sol-updown-5m-1789747200",
+  "status": "resolved",
+  "up": true,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "xrp-updown-5m-1789747200": {
+  "slug": "xrp-updown-5m-1789747200",
+  "status": "resolved",
+  "up": false,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "xrp-updown-5m-1789747800": {
+  "slug": "xrp-updown-5m-1789747800",
+  "status": "resolved",
+  "up": false,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "eth-updown-5m-1789748100": {
+  "slug": "eth-updown-5m-1789748100",
+  "status": "resolved",
+  "up": true,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "sol-updown-5m-1789748400": {
+  "slug": "sol-updown-5m-1789748400",
+  "status": "resolved",
+  "up": true,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "xrp-updown-5m-1789748400": {
+  "slug": "xrp-updown-5m-1789748400",
+  "status": "resolved",
+  "up": true,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "eth-updown-5m-1789748700": {
+  "slug": "eth-updown-5m-1789748700",
+  "status": "resolved",
+  "up": true,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "sol-updown-5m-1789748700": {
+  "slug": "sol-updown-5m-1789748700",
+  "status": "resolved",
+  "up": true,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "xrp-updown-5m-1789748700": {
+  "slug": "xrp-updown-5m-1789748700",
+  "status": "resolved",
+  "up": false,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "btc-updown-5m-1789899300": {
+  "slug": "btc-updown-5m-1789899300",
+  "status": "resolved",
+  "up": true,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "eth-updown-5m-1789899300": {
+  "slug": "eth-updown-5m-1789899300",
+  "status": "resolved",
+  "up": true,
+  "slug_ok": true,
+  "outcomes": [
+   "Up",
+   "Down"
+  ]
+ },
+ "btc-updown-5m-1790463300": {
+  "slug": "btc-updown-5m-1790463300",
+  "status": "unresolved",
+  "up": null,
+  "slug_ok": true
+ }
+}

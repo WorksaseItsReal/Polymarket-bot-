@@ -1,0 +1,140 @@
+====================================================================================================
+ETAT MESURE (re-verifie dans /root/.polymarket/history.json)
+====================================================================================================
+  n_resolus        = 65
+  WR               = 70.77%  (46 W / 19 L)
+  entree moyenne   = 0.6277  ->  BE = 62.8%
+  PnL/trade        = +0.1363 EUR   sd 0.7148  se 0.0887
+  t                = 1.538   (|t|<1.96 => NON significatif)
+  PnL total        = +8.86 EUR   IC95 [-2.43, +20.16]
+  brief fourni     : n~57-120, WR 72%, entree 0.61, t~1.44  (coherent, meme conclusion)
+
+====================================================================================================
+(a) MONTE-CARLO  20000 trajectoires x 1000 trades, mise FIXE 1 EUR
+====================================================================================================
+  Entree echantillonnee (bootstrap) sur les prix reels -> payoff gagnant 1/e-1,
+  perte = -1.00 entierement. BE = moyenne(prix) ~ 0.628.
+
+  A  edge mesure   WR=72%            moy  +152.69 | P5  +115.45 | med  +152.75 | P95  +190.00 | P(net<0)   0.0% | DD50   8.38 DD95   13.13 | pertes-max95 7
+  B  edge ZERO     WR=BE=0.628       moy    +4.74 | P5   -35.97 | med    +4.86 | P95   +45.21 | P(net<0)  42.1% | DD50  25.89 DD95   51.44 | pertes-max95 9
+  C  brief WR=65% (>BE -> +edge)     moy   +40.51 | P5    +0.93 | med   +40.38 | P95   +80.43 | P(net<0)   4.7% | DD50  17.06 DD95   31.79 | pertes-max95 8
+  C' vrai negatif  WR=60%            moy   -39.52 | P5   -80.79 | med   -39.41 | P95    +1.72 | P(net<0)  94.2% | DD50  51.73 DD95   88.08 | pertes-max95 10
+  C'' vrai negatif WR=55%            moy  -119.73 | P5  -161.46 | med  -119.87 | P95   -77.98 | P(net<0) 100.0% | DD50 124.23 DD95  164.87 | pertes-max95 11
+      reference    WR=50% (pile)     moy  -200.02 | P5  -241.45 | med  -199.97 | P95  -158.62 | P(net<0) 100.0% | DD50 202.61 DD95  243.69 | pertes-max95 13
+
+  Table 5% / 50% / 95% (PnL total sur 1000 trades, mise 1 EUR) :
+  ----------------------------------------------------------------------------------------------
+  scenario                       WR  edge/trade        P5       P50       P95  P(net<0)
+  A  edge mesure   WR=72%     72.0%     +0.1471    +115.4    +152.7    +190.0      0.0%
+  B  edge ZERO     WR=BE=0.628  62.8%     +0.0000     -36.0      +4.9     +45.2     42.1%
+  C  brief WR=65% (>BE -> +edge)  65.0%     +0.0355      +0.9     +40.4     +80.4      4.7%
+  C' vrai negatif  WR=60%     60.0%     -0.0441     -80.8     -39.4      +1.7     94.2%
+  C'' vrai negatif WR=55%     55.0%     -0.1238    -161.5    -119.9     -78.0    100.0%
+      reference    WR=50% (pile)  50.0%     -0.2034    -241.4    -200.0    -158.6    100.0%
+
+====================================================================================================
+(b) TAILLE DE MISE : ou la variance devient intenable
+====================================================================================================
+  b = gain_moyen/|perte| = 0.6004 / 1.00 = 0.6004
+  Kelly f* (edge mesure WR=72%  ) = +0.2537  (+25.4% du capital par trade)
+  Kelly f* (edge zero   WR=BE   ) = +0.0076  (+0.8% du capital par trade)
+  Kelly f* (edge neg.   WR=55%  ) = -0.1994  (-19.9% du capital par trade)
+  -> pile ou face (p=e) => f*=0 : theorie = NE PAS PARIER.
+
+  Mise fixe MAXIMALE telle que P(drawdown max > 50% du capital) <= 5%
+  Identite : maxDD(s) = s * maxDD(1)  =>  s_max = 0.5 * B / Q95(maxDD@1).
+  ------------------------------------------------------------------------
+  Q95(maxDD a mise 1 EUR), edge mesure WR=72%   =   13.20 EUR
+  Q95(maxDD a mise 1 EUR), edge ZERO WR=BE      =   51.53 EUR
+  Q95(maxDD a mise 1 EUR), edge neg. WR=55%     =  164.82 EUR
+
+     capital |  s_max edge mesure |  s_max edge ZERO |  % cap (edge ZERO)
+        20 EUR |           0.758 E |         0.194 E |           0.970 %
+        50 EUR |           1.894 E |         0.485 E |           0.970 %
+       100 EUR |           3.788 E |         0.970 E |           0.970 %
+       200 EUR |           7.576 E |         1.941 E |           0.970 %
+       500 EUR |          18.939 E |         4.851 E |           0.970 %
+      1000 EUR |          37.878 E |         9.703 E |           0.970 %
+
+  => la contrainte qui compte est celle de l'hypothese EDGE ZERO (non prouvee) :
+     elle plafonne la mise a ~0.5*B/Q95(maxDD@1) ~ quelques % du capital, PAS
+     la 'mise optimale' de Kelly (qui suppose l'edge vraie).
+  Mise actuelle du bot (0.65-1.10 EUR/trade) : pour rester dans la limite
+  de l'hypothese edge ZERO, il faut un capital B tel que 0.5*B/Q95 >= 1.10,
+     soit B >= 2.2 * Q95(maxDD@1) = 2.2 * 51.5 = 113 EUR.
+
+====================================================================================================
+(c) TEST DU SIZING ACTUEL du bot (Kelly plafonne 0.05, sizeFactor 0.65-2)
+====================================================================================================
+  Logique du code : f* = p-(1-p)/b ; clamp [0,0.05] ; sizeFactor = 1+2*f*
+  clamp [0.65,2] ; si n<10 -> min(1.2, sf).  Mise de base = 1 EUR.
+  -> f*=0.05 => sizeFactor = 1.10 MAX. En pratique : 0.65x .. 1.10x (0.65-1.10 EUR).
+
+  WR=72% (recent)      -> f*_clamp=0.050  sizeFactor=1.10x  (mise 1.100 EUR)
+  WR=BE (edge nul)     -> f*_clamp=0.008  sizeFactor=1.02x  (mise 1.015 EUR)
+  WR=55%               -> f*_clamp=0.000  sizeFactor=1.00x  (mise 1.000 EUR)
+
+  actuel: mise 0.65-1.10 EUR         moy  +152.47 | P5  +114.41 | med  +152.49 | P95  +189.95 | P(net<0)   0.0% | DD50   8.38 DD95   13.19 | pertes-max95 7
+  NAIF: Kelly non plafonne 1.51x     moy  +229.46 | P5  +172.08 | med  +229.73 | P95  +286.07 | P(net<0)   0.0% | DD50  12.64 DD95   19.80 | pertes-max95 7
+  NAIF non plafonne + edge ZERO      moy    +7.53 | P5   -53.33 | med    +7.45 | P95   +68.69 | P(net<0)  41.9% | DD50  38.84 DD95   76.99 | pertes-max95 9
+
+  Verdict (c) : le plafond kellyCeil=0.05 borne la mise a ~1.10x la base.
+  Compte tenu de t=1.54 (edge non prouvee), ce plafond est PRUDENT et CORRECT.
+  Le danger serait de (1) lever le plafond, ou (2) lever la mise de BASE.
+
+====================================================================================================
+(d) SUR-DIMENSIONNEMENT : que se passe-t-il si l'on double la mise ?
+====================================================================================================
+  Mise de base augmentee (x2, x5), sous 3 hypotheses d'edge, capital 100 EUR :
+
+  --- mise de base 1 EUR ---
+  edge mesure WR=72%                 moy  +152.30 | P5  +113.86 | med  +152.38 | P95  +190.04 | P(net<0)   0.0% | DD50   8.38 DD95   13.29 | pertes-max95 7
+                                     (bankroll 100 EUR -> P(DD>25%) 0.0% P(DD>50%) 0.0% P(ruine) 0.00%)
+  edge ZERO WR=BE                    moy    +4.74 | P5   -35.64 | med    +4.88 | P95   +44.80 | P(net<0)  42.1% | DD50  25.77 DD95   51.24 | pertes-max95 9
+                                     (bankroll 100 EUR -> P(DD>25%) 52.8% P(DD>50%) 5.8% P(ruine) 0.01%)
+  edge neg. WR=55%                   moy  -119.29 | P5  -161.14 | med  -119.13 | P95   -77.87 | P(net<0) 100.0% | DD50 123.66 DD95  164.50 | pertes-max95 11
+                                     (bankroll 100 EUR -> P(DD>25%) 100.0% P(DD>50%) 99.9% P(ruine) 77.70%)
+
+  --- mise de base 2 EUR ---
+  edge mesure WR=72%                 moy  +304.75 | P5  +228.69 | med  +304.81 | P95  +379.92 | P(net<0)   0.0% | DD50  16.76 DD95   26.24 | pertes-max95 7
+                                     (bankroll 100 EUR -> P(DD>25%) 7.0% P(DD>50%) 0.0% P(ruine) 0.00%)
+  edge ZERO WR=BE                    moy    +8.94 | P5   -71.23 | med    +8.75 | P95   +90.05 | P(net<0)  42.7% | DD50  51.91 DD95  102.06 | pertes-max95 9
+                                     (bankroll 100 EUR -> P(DD>25%) 97.5% P(DD>50%) 53.6% P(ruine) 1.30%)
+  edge neg. WR=55%                   moy  -239.06 | P5  -322.27 | med  -239.06 | P95  -156.21 | P(net<0) 100.0% | DD50 248.19 DD95  328.78 | pertes-max95 11
+                                     (bankroll 100 EUR -> P(DD>25%) 100.0% P(DD>50%) 100.0% P(ruine) 99.69%)
+
+  --- mise de base 5 EUR ---
+  edge mesure WR=72%                 moy  +762.90 | P5  +572.99 | med  +763.34 | P95  +950.04 | P(net<0)   0.0% | DD50  41.91 DD95   65.77 | pertes-max95 7
+                                     (bankroll 100 EUR -> P(DD>25%) 99.3% P(DD>50%) 24.5% P(ruine) 0.00%)
+  edge ZERO WR=BE                    moy   +23.63 | P5  -178.91 | med   +25.19 | P95  +224.16 | P(net<0)  42.0% | DD50 128.89 DD95  256.79 | pertes-max95 9
+                                     (bankroll 100 EUR -> P(DD>25%) 100.0% P(DD>50%) 99.8% P(ruine) 15.54%)
+  edge neg. WR=55%                   moy  -598.99 | P5  -809.14 | med  -599.10 | P95  -389.47 | P(net<0) 100.0% | DD50 621.27 DD95  825.52 | pertes-max95 11
+                                     (bankroll 100 EUR -> P(DD>25%) 100.0% P(DD>50%) 100.0% P(ruine) 100.00%)
+
+  --- mise de base 10 EUR ---
+  edge mesure WR=72%                 moy +1522.09 | P5 +1144.94 | med +1521.79 | P95 +1893.38 | P(net<0)   0.0% | DD50  84.25 DD95  132.00 | pertes-max95 7
+                                     (bankroll 100 EUR -> P(DD>25%) 100.0% P(DD>50%) 99.4% P(ruine) 0.00%)
+  edge ZERO WR=BE                    moy   +46.61 | P5  -356.91 | med   +46.49 | P95  +454.27 | P(net<0)  42.7% | DD50 259.41 DD95  512.83 | pertes-max95 9
+                                     (bankroll 100 EUR -> P(DD>25%) 100.0% P(DD>50%) 100.0% P(ruine) 27.68%)
+  edge neg. WR=55%                   moy -1196.53 | P5 -1614.12 | med -1197.06 | P95  -776.15 | P(net<0) 100.0% | DD50 1242.43 DD95 1649.98 | pertes-max95 11
+                                     (bankroll 100 EUR -> P(DD>25%) 100.0% P(DD>50%) 100.0% P(ruine) 100.00%)
+
+====================================================================================================
+(e) COMBIEN DE TRADES AVANT DE RE-JUGER ?  (puissance statistique)
+====================================================================================================
+  taille d'effet mesuree d = PnL_moy/sd = 0.1363/0.7148 = 0.1907
+  n pour t=1.96 (95%% signif.)         ~ 106 trades resolus
+  n pour 80%% de puissance (z=2.80)     ~ 216 trades resolus
+  si la VRAIE edge = moitie de l'estimee (d=0.0954) :
+    n pour 95%% signif. ~ 422   |  n pour 80%% puissance ~ 863
+  (rappel : les 65 trades actuels -> n manquant = 151)
+
+====================================================================================================
+SYNTHESE CHIFFREE
+====================================================================================================
+  edge mesuree   : WR 70.8% vs BE 62.8% -> marge +8.0 pt, t=1.54 (NON prouvee)
+  si edge ZERO   : esperance reelle = 0 ; le PnL observe est du bruit.
+  mise actuelle  : 0.65-1.10 EUR/trade sur base 1 EUR  -> conservative
+  sur-dimensionner (x5) sur une edge non prouvee : si edge nulle, P(ruine, cap 100 EUR) = 15.65% , P(DD>50%) = 99.7%
+  REPONSE : NON, augmenter les mises n'est pas une bonne idee aujourd'hui.
+====================================================================================================

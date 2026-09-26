@@ -184,7 +184,7 @@ export const DEFAULT_DIP_ARB_CONFIG: DipArbConfigInternal = {
 // ============= Market Configuration =============
 
 /** 支持的底层资产 */
-export type DipArbUnderlying = 'BTC' | 'ETH' | 'SOL' | 'XRP';
+export type DipArbUnderlying = 'BTC' | 'ETH' | 'SOL' | 'XRP' | 'DOGE';
 
 /** 市场时长 */
 export type DipArbDuration = 5 | 15;
@@ -691,6 +691,7 @@ export function parseUnderlyingFromSlug(slug: string): DipArbUnderlying {
   if (lower.startsWith('eth')) return 'ETH';
   if (lower.startsWith('sol')) return 'SOL';
   if (lower.startsWith('xrp')) return 'XRP';
+  if (lower.startsWith('doge')) return 'DOGE';
   return 'BTC'; // default
 }
 

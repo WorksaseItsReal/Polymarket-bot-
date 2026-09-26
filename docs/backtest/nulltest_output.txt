@@ -1,0 +1,31 @@
+==============================================================================
+A) TEST EXACT (binomial) SUR LA FENÊTRE 0,58-0,65
+==============================================================================
+  décisions du log (n=745)     n=745  gagnants=440 prix implicite=0.606  WR= 59.1%  P(X>=440)=0.8112
+  100 trades comptés (n=39)    n=39   gagnants=29  prix implicite=0.603  WR= 74.4%  P(X>=29)=0.0491
+  NB : 29 fenêtres de prix ont été balayées -> p corrigée (Bonferroni) ≈ 1.0000 pour la meilleure.
+  Rappel : les trades ne sont pas indépendants (plusieurs coins par round) -> les p-values ci-dessus sont OPTIMISTES.
+
+==============================================================================
+B) TEST DE PLACEBO — marchés parfaitement prixés, même procédure de sélection
+==============================================================================
+  2000 simulations d'un marché PARFAITEMENT prixé (Bernoulli(prix)).
+  Meilleure EV in-sample trouvée par hasard : médiane +0.0495, 95e % +0.1118, max +0.1833
+  EV in-sample OBSERVÉE (fenêtre 0,65-0,70) : +0.0252  -> percentile 22.4 %
+  P(meilleure EV in-sample >= observée par pur hasard) = 0.776
+  Hors échantillon, l'EV de la fenêtre « gagnante » est négative dans 51.5 % des simulations (observé : négative, -0.0842)
+
+==============================================================================
+C) ERREURS STANDARD ROBUSTES AU CLUSTERING (grappes = round de 5 min, puis jour)
+==============================================================================
+  décisions (n=1411)           par round n=1411  grappes=1411  EV=-0.0253  SE(cluster)=0.0200  t=-1.27
+  décisions (n=1411)           par jour  n=1411  grappes=10    EV=-0.0253  SE(cluster)=0.0330  t=-0.77
+  trades comptés (base round)  par round n=100   grappes=100   EV=+0.0626  SE(cluster)=0.0708  t=0.88
+  trades comptés (base round)  par jour  n=100   grappes=5     EV=+0.0626  SE(cluster)=0.0538  t=1.16
+  -> sur les 1411 décisions, le t « naïf » (SE i.i.d.) est 1,27 ;
+     regroupé par JOUR (la seule grappe réelle : 1 seule décision par round)
+     il tombe à t=0.77 -> non significatif.
+  grappes : 1412 rounds distincts pour 1412 décisions (max 1 par round) -> pas de grappe intra-round.
+  Le vrai facteur de dépendance est le COIN : les 5 coins bougent ensemble pendant un même mouvement de marché.
+
+-> nulltest_results.json
