@@ -395,7 +395,11 @@ export class ArbitrageService extends EventEmitter {
       this.log('No wallet configured - monitoring only');
     }
 
-    // Connect and subscribe to WebSocket
+    // Connect and subscribe to orderbook.
+    // ⚠️ Le canal WS `clob_market` est MORT côté serveur (réponse 400). Le
+    // fallback REST `/book` est géré en interne par RealtimeServiceV2 : cet
+    // appel reçoit donc bien des carnets via l'événement 'orderbook' sans rien
+    // changer ici (même nom, même forme).
     this.realtimeService.connect();
     this.marketSubscription = this.realtimeService.subscribeMarkets(
       [market.yesTokenId, market.noTokenId],
@@ -410,7 +414,15 @@ export class ArbitrageService extends EventEmitter {
           };
           this.handleBookUpdate(bookUpdate);
         },
-        onError: (error: Error) => this.emit('error', error),
+        // Ne PAS relayer aveuglément sur 'error' : sans listener enregistré,
+        // Node lance « Unhandled 'error' event » et tue le process.
+        onError: (error: Error) => {
+          if (this.listenerCount('error') > 0) {
+            this.emit('error', error);
+          } else {
+            this.log(`Realtime error (sans listener): ${this.errStr(error)}`);
+          }
+        },
       }
     );
 
@@ -769,7 +781,7 @@ export class ArbitrageService extends EventEmitter {
       this.emit('rebalance', rebalanceResult);
       return rebalanceResult;
     } catch (error: any) {
-      this.log(`   ❌ Failed: ${error.message}`);
+      this.log(`   ❌ Failed: ${this.errStr(error)}`);
       const rebalanceResult: RebalanceResult = {
         success: false,
         action: rebalanceAction,
@@ -861,7 +873,7 @@ export class ArbitrageService extends EventEmitter {
         this.log(`   ✅ Recovered: $${mergeAmount.toFixed(2)} USDC`);
       } catch (error: any) {
         result.error = error.message;
-        this.log(`   ❌ Merge failed: ${error.message}`);
+        this.log(`   ❌ Merge failed: ${this.errStr(error)}`);
       }
     } else if (pairedTokens >= 1) {
       this.log(`   💡 Run settlePosition(market, true) to recover $${pairedTokens.toFixed(2)} USDC`);
@@ -1092,7 +1104,7 @@ export class ArbitrageService extends EventEmitter {
             success: false,
             error: error.message,
           });
-          this.log(`   ❌ Redeem failed: ${error.message}`);
+          this.log(`   ❌ Redeem failed: ${this.errStr(error)}`);
         }
       }
     } else {
@@ -1127,7 +1139,7 @@ export class ArbitrageService extends EventEmitter {
             success: false,
             error: error.message,
           });
-          this.log(`   ❌ Merge failed: ${error.message}`);
+          this.log(`   ❌ Merge failed: ${this.errStr(error)}`);
           // Update unpaired amounts since merge failed
           unpairedYes = yesBalance;
           unpairedNo = noBalance;
@@ -1166,7 +1178,7 @@ export class ArbitrageService extends EventEmitter {
             success: false,
             error: error.message,
           });
-          this.log(`   ❌ Sell YES failed: ${error.message}`);
+          this.log(`   ❌ Sell YES failed: ${this.errStr(error)}`);
         }
       }
 
@@ -1201,7 +1213,7 @@ export class ArbitrageService extends EventEmitter {
             success: false,
             error: error.message,
           });
-          this.log(`   ❌ Sell NO failed: ${error.message}`);
+          this.log(`   ❌ Sell NO failed: ${this.errStr(error)}`);
         }
       }
     }
@@ -1356,7 +1368,7 @@ export class ArbitrageService extends EventEmitter {
         }
       }
     } catch (error: any) {
-      this.log(`   ❌ Failed to fix imbalance: ${error.message}`);
+      this.log(`   ❌ Failed to fix imbalance: ${this.errStr(error)}`);
     }
   }
 
@@ -1601,6 +1613,19 @@ export class ArbitrageService extends EventEmitter {
         executionTimeMs: Date.now() - startTime,
       };
     }
+  }
+
+  /**
+   * ✅ Hygiène de log (2026-09-26) : formate une erreur en UNE ligne bornée.
+   * Même esprit que `errStr()` de dip-arb-service.ts. Les erreurs ethers v5
+   * embarquent `transaction={…}` / `error={…}` (en-têtes HTTP complets) →
+   * jusqu'à ~7 Ko PAR ligne de log. On aplatit et on tronque.
+   */
+  private errStr(err: unknown, maxLen = 240): string {
+    const raw = (err instanceof Error ? err.message : String(err)).replace(/\s+/g, ' ').trim();
+    if (raw.length <= maxLen) return raw;
+    const suffix = `…[+${raw.length - maxLen}]`;
+    return raw.slice(0, Math.max(0, maxLen - suffix.length)) + suffix;
   }
 
   private log(message: string): void {

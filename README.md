@@ -1,346 +1,283 @@
-# 🤖 Polymarket Trading Bot v3.1 - Enhanced Risk Management
+# Polymarket-paperbot — bot PAPER « Up / Down 5 min » (documentation de référence)
 
-**The Ultimate Open-Source Automated Trading Bot for Polymarket**
-
-[![English](https://img.shields.io/badge/Language-English-blue)](README.md)
-[![Arabic](https://img.shields.io/badge/Language-Arabic-green)](README_AR.md)
-
-**Created by**: [@Mr_CryptoYT](https://x.com/Mr_CryptoYT)
-
-## 🆕 What's New in v3.1 (January 2026)
-
-### 🔴 **Professional-Grade Risk Management**
-- ✅ **4-Layer Protection System**: Daily (5%), Monthly (15%), Drawdown (25%), Total Loss Halt (40%)
-- ✅ **Smart Money Filtering**: Only follow traders with 60%+ win rate, 1.5x profit factor, and consistency checks
-- ✅ **Dynamic Position Sizing**: Automatically reduces during losses, increases during wins
-- ✅ **Enhanced Monitoring**: Real-time risk status with breach alerts
-
-### 🛡️ **Safety Improvements**
-- ✅ **Minimum Trade Enforcement**: All DipArb positions ≥ $1.50 (guaranteed exit capability)
-- ✅ **Gas Fee Accounting**: Higher profit thresholds to cover transaction costs
-- ✅ **Whale Trade Detection**: Prevents following lucky one-hit wonders
-- ✅ **Permanent Halt**: Trading stops automatically at 40% total loss
-
-This guide will take you **from A to Z** on how to set up, configure, and run your own trading bot safely.
+> **Ce document décrit le bot qui tourne réellement sur cette machine** :
+> `polymarket-paperbot` sous PM2, en **PAPER TRADING** (`DRY_RUN=true`, aucun ordre réel),
+> stratégie **100 % déterministe** (aucun appel LLM), 5 coins (BTC / ETH / SOL / XRP / DOGE).
+> Il remplace l'ancien README générique du dépôt amont (v3.1).
 
 ---
 
-## 📋 Table of Contents
+## ⚠️ Statut réel — à lire avant tout le reste
 
-1. [Prerequisites](#prerequisites)
-2. [Installation](#installation)
-3. [Configuration](#configuration)
-4. [Running the Bot](#running-the-bot)
-5. [Dashboard Guide](#dashboard-guide)
-6. [Risk Management](#risk-management)
-7. [Strategies Explained](#strategies-explained)
-8. [Troubleshooting](#troubleshooting)
-9. [Safety & Risks](#safety--risks)
+**L'edge n'est pas prouvé.** Sur les données disponibles (n = 167 trades résolus re-mesurés),
+le PnL moyen par trade est **+0,0696 €** avec **t = +1,25** et un intervalle de confiance à 95 %
+du PnL total de **[-6,59 €; +29,84 €]** — qui **contient zéro**. Aucun coin, aucune tranche de
+prix n'est significatif après correction pour comparaisons multiples (seuil de Bonferroni ≈ 2,81) ;
+le t = +2,15 de BTC est exactement ce qu'un tirage au sort produits en testant 10 sous-groupes.
 
----
+Détail complet et sources : [`docs/rebuild/strategy/EDGE.md`](docs/rebuild/strategy/EDGE.md) et
+[`docs/rebuild/SYNTHESIS.md`](docs/rebuild/SYNTHESIS.md).
 
-## 1. Prerequisites
-
-Before you start, you need three things:
-
-### 💻 Computer Requirements
-- **OS**: Windows, Mac, or Linux.
-- **Node.js**: You must have Node.js installed (Version 18 or higher).
-  - [Download Node.js here](https://nodejs.org/) (Choose "LTS" version).
-- **Git**: Required to download the code.
-  - [Download Git here](https://git-scm.com/).
-
-### 💰 Wallet Requirements
-- **A Polymarket Account**: Log in to [Polymarket.com](https://polymarket.com).
-- **USDC (Polygon)**: You need funds to trade.
-  - **USDC.e** is the specific token used on Polygon for Polymarket.
-- **MATIC (Polygon)**: You need a small amount ($1-$5) for gas fees.
-
-### 🔑 Private Key
-- You need the **Private Key** of your wallet (e.g., from MetaMask or your Polymarket proxy wallet).
-- *Security Note: Never share this key with anyone.*
+**Conséquence pratique :** toute hausse de mise serait un pari **non étayé par les données**.
 
 ---
 
-## 2. Installation
+## 1. Ce que fait le bot
 
-Open your terminal (Command Prompt or PowerShell on Windows, Terminal on Mac) and run these commands one by one.
+- **Marchés** : les marchés binaires **« Up or Down 5 minutes »** de Polymarket (résolution
+  toutes les 5 min sur le prix crypto). Le bot lit le carnet d'ordres CLOB (côté `YES`/`NO`).
+- **Décision** : 100 % **déterministe**. Il ne mise que si la probabilité implicite du côté
+  favori tombe dans une **fenêtre dite « sweet spot »** (bornes `.env` `P_STRONG_MIN` /
+  `P_STRONG_MAX`, ~[0,58 ; 0,65]) et si le prix est ≥ `P_MIN_PRICE`. Sinon → **HOLD**
+  (aucune mise).
+- **Mode** : **PAPER** (`DRY_RUN=true`). Aucune transaction, aucune clé privée utilisée ;
+  chaque décision gagnante/perdante est simulée et enregistrée.
+- **Coins** : BTC, ETH, SOL, XRP, DOGE.
+- **IA / LLM** : **désactivé** (`DEEPSEEK_ANALYZER_ENABLED=false`, module en mode `DEGRADED
+  (local HOLD)`) → **zéro token consommé** (`/root/.polymarket/llm-calls.json`).
+- **Smart Money / Arbitrage / Trend** : désactivés.
 
-### Step 1: Clone the Repository
-Download the bot code to your computer.
+---
+
+## 2. Comment il démarre
+
+### 2.1 PM2
+
+Le process est géré par **PM2** sous le nom d'application **`polymarket-paperbot`**,
+défini dans [`ecosystem.config.cjs`](ecosystem.config.cjs) :
+
+| Champ PM2 | Valeur |
+|---|---|
+| `name` | `polymarket-paperbot` |
+| `script` | `bot-with-dashboard.ts` |
+| `cwd` | `/root/clawd/Polymarket-bot` |
+| `interpreter` | `node_modules/.bin/tsx` (exécution TypeScript directe, sans build) |
+| `autorestart` | `true`, `max_restarts: 20`, `restart_delay: 5000` |
+| `out_file` / `error_file` | `paperbot.log` / `paperbot.error.log` |
+
+Commandes utiles (lecture seule) :
 
 ```bash
-git clone https://github.com/MrFadiAi/Polymarket-bot.git
-cd Polymarket-bot
+pm2 list | grep polymarket          # état, restarts, uptime
+pm2 describe polymarket-paperbot    # détail (script, interpreter, cwd, created_at)
 ```
 
-*(Note: If you downloaded the ZIP file instead, just unzip it and open the folder in your terminal)*
+> ⚠️ **Ne pas relancer le bot à la légère** : un `pm2 restart` réinitialise le contexte
+> d'apprentissage en mémoire et coupe le cycle en cours. Aucun redémarrage n'est nécessaire
+> pour lire les données.
 
-### Step 2: Install Dependencies & Build Dashboard
-This installs all the "parts" the bot needs to run and builds the dashboard interface.
+### 2.2 Lancement manuel (sans PM2)
 
 ```bash
-# Install main dependencies
-npm install
-
-# Build the dashboard (Critical Step!)
-cd dashboard
-npm install
-npm run build
-cd ..
-```
-
-*This process might take 1-3 minutes.*
-
----
-
-## 3. Configuration
-
-This is the most important step. We need to tell the bot your wallet details.
-
-### Step 1: Create the .env File
-1. Find the file named `.env.example` in the folder.
-2. Copy it and rename the copy to `.env`.
-
-### Step 2: Add Your Credentials
-Open the `.env` file with any text editor (Notepad, VS Code) and fill in your details:
-
-```env
-# ==============================================
-# 🔑 WALLET CONFIGURATION (REQUIRED)
-# ==============================================
-
-# Your Wallet Private Key (Export from MetaMask)
-# Format: 0x...
-POLYMARKET_PRIVATE_KEY=0xYourPrivateKeyHere
-
-# ==============================================
-# ⚙️ BOT SETTINGS
-# ==============================================
-
-# CAPITAL (Your risk budget - NOT your wallet balance)
-# This determines position sizes and risk limits
-# Start with a small amount for testing
-CAPITAL_USD=250
-
-# DRY RUN MODE
-# "true" = Simulation Mode (No real money used, SAFE to test)
-# "false" = Live Trading (Real money used, BE CAREFUL)
-DRY_RUN=true
-
-# 🆕 RISK MANAGEMENT (Optional - defaults are conservative)
-DAILY_MAX_LOSS_PCT=0.05      # 5% daily loss limit
-MONTHLY_MAX_LOSS_PCT=0.15    # 15% monthly loss limit
-MAX_DRAWDOWN_PCT=0.25        # 25% drawdown from peak
-TOTAL_MAX_LOSS_PCT=0.40      # 40% total loss = permanent halt
-
-# API Keys (Optional but recommended for speed)
-# Get a free key from specific providers if you want better performance
-# ALCHEMY_KEY=...
-```
-
-**⚠️ IMPORTANT:** 
-- Start with `DRY_RUN=true` and `CAPITAL_USD=50` for testing
-- Only change to `DRY_RUN=false` when you are 100% sure everything works
-
----
-
-## 4. Running the Bot
-
-Now the fun part! Let's start the bot with the visual dashboard.
-
-Run this command:
-
-```bash
+cd /root/clawd/Polymarket-bot
 npx tsx bot-with-dashboard.ts
 ```
 
-### What happens next?
-1. The terminal will show startup logs.
-2. It will verify your wallet connection.
-3. **The Dashboard will open automatically in your browser** at `http://localhost:3001`.
+### 2.3 Configuration : `.env`
 
-If it doesn't open, just click that link.
+Toute la configuration runtime vit dans **`.env`** (versionné **jamais** — voir `.gitignore` ;
+tout `.env`, `.env.*` et `.env.bak-*` est ignoré). Le modèle documenté est
+[`.env.example`](.env.example). **Aucune valeur de clé/secret n'est reproduite ici.**
 
----
+Variables (nom → rôle) :
 
-## 5. Dashboard Guide
+**Mode & capital**
 
-The dashboard is your command center with **enhanced risk monitoring**.
+| Variable | Rôle |
+|---|---|
+| `DRY_RUN` | `true` = 100 % paper (aucun ordre) · `false` = réel. **Le bot est en paper.** |
+| `CAPITAL_USD` | Capital de référence (dimensionne les limites de risque). |
+| `PAPER_CAPITAL` | Capital virtuel de départ pour la simulation paper. |
+| `BET_STAKE` | **Mise de base paper** (défaut code : 1). La mise effective par trade = `BET_STAKE × sizeFactor` (voir §7). |
 
-### Main Panels
-- **Mode Indicator**: Shows if you are in **🔴 LIVE** or **🟢 DRY RUN** mode.
-- **Mode Toggle**: Click the "Switch to LIVE/DRY RUN" button to instantly switch modes.
-- **Balances**: Real-time view of your MATIC and USDC.
-- **PnL Panel**: Tracks your Profit and Loss per session.
+**Accès réseau / secrets — [REDACTED]**
 
-### 🆕 Risk Status Panel
-- **Daily Limit**: Shows usage of 5% daily loss limit
-- **Monthly Limit**: Shows usage of 15% monthly loss limit  
-- **Drawdown**: Current drawdown from peak capital
-- **Consecutive Tracker**: Win/loss streak counter
-- **Status Indicators**: 🔴 BREACHED or ✅ OK for each limit
+| Variable | Rôle |
+|---|---|
+| `POLYMARKET_PRIVATE_KEY` | Clé du wallet Polymarket (Polygon). **Placeholder en DRY_RUN.** Valeur : `[REDACTED]`. |
+| `POLYGON_RPC_URL` | Endpoint RPC Polygon. Valeur : `[REDACTED]`. |
+| `OPENCODE_GO_API_KEY` | Clé du provider LLM (opencode-go/zen). Valeur : `[REDACTED]`. |
 
-### Quick Actions
-- **Strategy Toggles**: Enable/disable strategies in real-time
-- **Emergency Stop**: Instantly halt all trading
-- **Panic Sell**: Close all positions (use with caution)
+**Module LLM (désactivé en pratique)**
 
----
+`DEEPSEEK_ANALYZER_ENABLED`, `DEEPSEEK_MODEL`, `DEEPSEEK_API_URL`, `DEEPSEEK_MAX_CALLS_PER_DAY`,
+`DEEPSEEK_MAX_TOKENS`, `DEEPSEEK_MIN_TOKENS`, `DEEPSEEK_MIN_CONF`, `DEEPSEEK_TIMEOUT_MS`.
 
-## 6. Risk Management
+**Stratégie (`P_*`)**
 
-### 🆕 Multi-Layer Protection System
+| Variable | Rôle |
+|---|---|
+| `P_STRONG_MIN` | Borne **basse** de la fenêtre d'entrée (favori net minimal). |
+| `P_STRONG_MAX` | Borne **haute** de la fenêtre d'entrée (au-delà, gain insuffisant → HOLD). |
+| `P_MIN_PRICE` | Prix d'achat minimal (rejette les cotes extrêmes type 0,01). |
+| `P_TAKE_PROFIT` | % de gain projeté déclenchant la vente paper anticipée (100 = ne pas vendre avant la résolution). |
+| `P_STOP_LOSS` | Seuil de stop-loss. **Inerte sur un round binaire** (voir §7). |
+| `EDGE_FILTER_ENABLED` | Filtre d'edge par coin. **Désactivé** tant que les `realized` ne sont pas fiables. |
 
-The bot now has **4 layers of protection** to safeguard your capital:
-
-#### Layer 1: Daily Loss Limit (5%)
-- **What it does**: Stops trading if you lose 5% in one day
-- **Action**: Pauses for 60 minutes, then resumes
-- **Example**: With $250 capital, stops at -$12.50 daily loss
-
-#### Layer 2: Monthly Loss Limit (15%)
-- **What it does**: Stops trading if you lose 15% in 30 days
-- **Action**: Pauses for 30 days (rest of month)
-- **Example**: With $250 capital, stops at -$37.50 monthly loss
-
-#### Layer 3: Drawdown Limit (25%)
-- **What it does**: Monitors drop from your peak capital
-- **Action**: Pauses for 7 days if exceeded
-- **Example**: Peak $300, stops if drops below $225
-
-#### Layer 4: Total Loss Halt (40%)
-- **What it does**: **PERMANENT HALT** if total loss reaches 40%
-- **Action**: Stops trading entirely, requires manual restart
-- **Example**: With $250 capital, halts at -$100 total loss
-
-### 🆕 Smart Position Sizing
-
-The bot now **adapts position sizes** based on performance:
-
-- **Base Size**: 2% of capital (down from 3%)
-- **During Losses**: Reduces by 20% per consecutive loss
-- **During Wins**: Increases by 10% per consecutive win (capped at 5%)
-- **Example**:
-  - Normal: $250 × 2% = $5/trade
-  - After 3 losses: $5 × 0.8 × 0.8 = $3.20/trade
-  - After 5 wins: $5 × 1.4 = $7/trade (capped at $12.50)
+**Feature flags** : `DIPARB_ENABLED`, `SMARTMONEY_ENABLED`.
 
 ---
 
-## 7. Strategies Explained
+## 3. Où sont les données
 
-The bot comes with 4 powerful strategies. You can toggle them ON/OFF in the dashboard.
+Tout vit dans **`~/.polymarket/`** (`/root/.polymarket/`) :
 
-### 1. ⚖️ Arbitrage
-- **Concept**: Finds markets where `YES Price + NO Price < $1.00`.
-- **Action**: Buys both sides immediately.
-- **Profit**: Guaranteed math-based profit when the market resolves to $1.00.
-- **🆕 v3.1**: Higher profit threshold (1%) to cover gas fees
-- **Risk**: Extremely Low.
+| Fichier | Contenu | Statut |
+|---|---|---|
+| `history.json` | Fenêtre glissante des décisions/mises récentes (avec `roundId`, `side`, `price`, `realized`, `stake`…). Les HOLD ne sont **plus** écrits. | **Fenêtre** (300 max), pas un historique complet |
+| `cumulative.json` | **Registre PnL cumulé — SOURCE DE VÉRITÉ.** Contient `pnl`, `resolved` (par clé), `total_trades`, `wins`, `losses`, `audit_ledger`. | **Autorité** |
+| `pnl.json` | Instantané de sortie (ce que lit le recap) : `trades`, `wins`, `losses`, `win_rate`, `pnl`, `pending`, `window_pnl`. | Dérivé du registre |
+| `llm-calls.json` | Compteur d'appels LLM par jour (`calls: 0`). | — |
+| `archive/AAAA-MM-JJ/` | Archives quotidiennes (`resume.json`). | — |
+| `audit-*.json` | Journaux de l'audit d'intégrité comptable. | — |
+| `*.bak-*` | Sauvegardes horodatées (créées avant chaque correction). | — |
 
-### 2. 📉 DipArb (Dip Arbitrage)
-- **Concept**: Watches for panic selling in 15-minute crypto markets (BTC, ETH).
-- **Trigger**: If price crashes >15% in 3 seconds.
-- **Action**: Buys the dip (Leg 1) and hedges with the opposite side (Leg 2).
-- **🆕 v3.1**: Minimum $1.50 trade value (all positions can be exited)
-- **Risk**: Low-Medium (hedged positions).
-
-### 3. 🐋 Smart Money (🆕 Enhanced)
-- **Concept**: Tracks the top profitable traders on the leaderboard.
-- **🆕 Strict Filtering**:
-  - ✅ Minimum 60% win rate (up from 50%)
-  - ✅ Minimum $500 total PnL (up from $100)
-  - ✅ Profit Factor ≥ 1.5x (wins/losses ratio)
-  - ✅ Consistency score 70%+ (recent performance)
-  - ✅ No whale trades (max 30% PnL from one trade)
-- **Action**: Copies their trades automatically.
-- **Risk**: Medium (depends on trader quality).
-
-### 4. ⚡ Direct Trading
-- **Concept**: Tools for manual trading with super-powers.
-- **Features**:
-  - **FOK (Fill or Kill)**: Ensures your whole order fills or cancels.
-  - **Sniper**: Quick buy buttons slightly above market price.
-- **🆕 v3.1**: Stop-loss (15%), Take-profit (25%), Max hold (7 days)
-- **Risk**: Controlled (with new limits).
+> **Clé d'identité d'un trade dans le registre** : `conditionId|side|price`. C'est elle qui
+> garantit l'absence de double comptage (voir [`docs/rebuild/pnl/REPORT.md`](docs/rebuild/pnl/REPORT.md)).
 
 ---
 
-## 8. Troubleshooting
+## 4. Comment lire son PnL (sans se tromper)
 
-**"Command not found" error?**
-- Make sure you installed Node.js. Restart your computer if you just installed it.
+### 4.1 Le chiffre officiel
 
-**"Connection Failed"?**
-- Check your internet.
-- Verify your `POLYMARKET_PRIVATE_KEY` is correct in `.env`.
+```bash
+cat ~/.polymarket/pnl.json
+```
 
-**"Insufficient Funds"?**
-- You need both USDC (for trades) and MATIC (for gas) on the **Polygon Network**.
+Champs et **pièges** :
 
-**"Trade value below minimum"?**
-- This is the new $1.50 minimum protection. Increase your `CAPITAL_USD` or wait for better prices.
+| Champ | Signification |
+|---|---|
+| `pnl` | **PnL cumulé réalisé** (source : le registre `cumulative.json`). **Le chiffre de référence.** |
+| `trades` / `wins` / `losses` | Compteurs du **registre** (pas de la fenêtre). |
+| `win_rate` | `wins / trades` en %. |
+| `pending` | Trades ouverts, non encore résolus. |
+| `window_pnl` | Somme de la **fenêtre courante** de `history.json`. **Périmètre différent** → **ne JAMAIS additionner à `pnl`**. |
 
-**Bot paused unexpectedly?**
-- Check the Risk Status panel - you may have hit a daily/monthly/drawdown limit.
-- This is a **safety feature** working as intended.
+**Règle de lecture :**
+- **Un trade `realized: 0` = PENDING**, jamais compté gagnant ni perdant.
+- `pnl.json` **n'est pas une seconde comptabilité** : il est recalculé à partir de
+  `cumulative.json` (ledger = source de vérité depuis le correctif du 2026-09-26).
+- Pour auditer : `python3 /root/.hermes/scripts/paperbot-pnl-audit.py` (auto-test a–e,
+  échoue si un doublon ou un `realized:0` entre dans le ledger).
 
----
+### 4.2 Le recap Telegram
 
-## 9. Safety & Risks
+Un **cron Hermes** (`paperbot-recap-telegram`, toutes les 5 min) exécute
+`/root/.hermes/scripts/paperbot-recap.py`, qui envoie sur Telegram : prix live, probabilités
+UP/DOWN du round, PnL réalisé, win rate et une ligne **📐 Edge** (moyenne/mise, t-stat, verdict
+« significatif » / « non significatif (bruit) »).
 
-### ✅ Built-in Safety Features (v3.1)
-1. **Multi-Layer Limits**: 4 levels of automatic protection
-2. **Quality Trader Filtering**: Only follow proven, consistent traders
-3. **Position Size Limits**: Maximum 5% per trade, adapts to performance
-4. **Minimum Trade Values**: All positions can be exited (no stuck trades)
-5. **Permanent Halt**: Trading stops at 40% total loss
-
-### ⚠️ Your Responsibilities
-1. **Private Keys**: Your key gives full access to your funds. Keep it safe.
-2. **Start Small**: 
-   - Use Dry Run first (24-48 hours)
-   - Then test with $50 real money
-   - Scale up gradually to $250+
-3. **Monitor Regularly**: Check the Risk Status panel daily
-4. **Understand Limits**: Know what triggers each safety layer
-5. **Capital Management**: Set `CAPITAL_USD` to what you can afford to lose
-
-### 📊 Recommended Testing Path
-
-1. **Day 1-2**: Dry run mode (`DRY_RUN=true`, `CAPITAL_USD=50`)
-2. **Day 3-9**: Live testing (`DRY_RUN=false`, `CAPITAL_USD=50`)
-3. **Day 10+**: Scale up if profitable (`CAPITAL_USD=250`)
-
-### 🚨 Emergency Actions
-
-If something goes wrong:
-1. Click "Emergency Stop" in dashboard
-2. Or press `Ctrl+C` in terminal
-3. Use "Panic Sell" only if absolutely necessary
+> La ligne « Edge » affiche **volontairement** le **n** et le **t** pour empêcher de lire un
+> PnL positif comme une preuve. Voir [`docs/rebuild/recap/REPORT.md`](docs/rebuild/recap/REPORT.md).
 
 ---
 
-## 📚 Additional Resources
+## 5. Stratégie en clair (déterministe)
 
-- **Original SDK Documentation**: For developers who want to use the raw SDK, see [SDK_DOCUMENTATION.md](SDK_DOCUMENTATION.md).
-- **Beginner Guide**: Step-by-step tutorial in [BEGINNER_GUIDE.md](BEGINNER_GUIDE.md).
-- **Quick Start**: Fast setup guide in [QUICKSTART.md](QUICKSTART.md).
+1. À chaque round, le bot lit le meilleur ask du côté favori (`orderbook.yes.ask` / `no.ask`).
+2. Il retient le côté si son prix est dans `[P_STRONG_MIN ; P_STRONG_MAX]` **et** ≥ `P_MIN_PRICE`,
+   **et** hors cooldown santé du coin (voir §6).
+3. **Sizing** : `f* = p − (1−p)/b`, `kelly = clamp(f*, 0, kellyCeil)`,
+   `sizeFactor = clamp(1 + 2·kelly, 0.65, 2)`, plafonné à 1,2 si `n < 10`.
+   Avec `kellyCeil = 0.05`, la mise effective est **bornée** (voir `RISK.md`).
+4. Sinon → **HOLD**, rien n'est misé et rien n'est écrit.
+
+**Deux points d'honnêteté du code :**
+- **Le bot ne regarde jamais la profondeur** du carnet avant de miser (il fixe son prix sur
+  `…ask` sans contrôler `askDepth`) → voir §8.
+- **Le stop-loss est inerte** sur un round binaire tout-ou-rien : mesuré 20/20 pertes à
+  −1,00 exactement, 0 perte coupée. Ce n'est pas un contrôle de risque. Le seul levier réel est
+  **le prix d'entrée face à la win rate**.
 
 ---
 
-## 📈 Version History
+## 6. Apprentissage & cooldown (déterministe, sans IA)
 
-- **v3.1** (January 2026): Enhanced Risk Management, Smart Money improvements, Dynamic sizing
-- **v3.0** (December 2025): Dashboard, Multi-strategy support, Auto-rotation
-- **v2.0** (November 2025): Smart Money, Arbitrage, DipArb strategies
-- **v1.0** (October 2025): Initial release
+- Le bot suit par coin : win rate récent, taille de fenêtre, et un **cooldown santé** (skip si
+  espérance ≤ 0).
+- **Correctif anti-blocage (2026-09-26)** : un cooldown ne doit **jamais** être éternel. Une
+  ancienne version réappliquait le cooldown sur des résultats vieux de 7 à 25 h → des coins
+  restaient bloqués **pour toujours** (`LEARN_COOLDOWN_AGE_H`, défaut 6 h). Corrigé dans
+  `bot-with-dashboard.ts` (~l.410–424).
 
 ---
 
-**Created by**: [@Mr_CryptoYT](https://x.com/Mr_CryptoYT)
+## 7. Bugs déjà corrigés (et vérifiés)
 
-**Support**: Open an issue on GitHub or contact via Twitter
+| # | Bug | Correctif | Source |
+|---|---|---|---|
+| 1 | **Résolveur PnL faux** : endpoint `markets?condition_id=` ignorait son filtre → renvoyait toujours `xi-jinping-out-before-2027` → tous les YES perdants, tous les NO gagnants. Écart mesuré **21,69 €**. | Passage à `events?slug=<coin>-updown-5m-<slot>` + rejet si le slug ne correspond pas. Auto-test : 5 cids → 5 slugs distincts. | `docs/STRATEGY-REVIEW.md` §1.2, `docs/rebuild/pnl/REPORT.md` (a) |
+| 2 | **Registre PnL stockait `true`** au lieu du montant réalisé (64 entrées) → total non reconstructible (`sum(ledger)=−2,07` vs `pnl=+6,79`). | Le ledger stocke désormais le **montant** ; il est **source de vérité** ; `pnl` recalculé par `sum(ledger)`. | `docs/rebuild/pnl/REPORT.md` (e) |
+| 3 | **RPC Polygon mort** (`polygon-rpc.com` → `API key disabled`). | Remplacement par un endpoint fiable (`1rpc.io/matic`). | commit `d3780ca` (« RPC fiable ») |
+| 4 | **Canal WS `clob_market` déprécié** : le serveur rejette les souscriptions (400, 128–274×/h) → `emit('orderbook')` ne se déclenche jamais. | **Non coupé** (des consommateurs réels l'écoutent) ; commentaire d'audit ajouté. Le cycle des rounds DipArb a été **re-piloté par le flux REST vivant**. | `docs/rebuild/code/REPORT.md` (points 1–2) |
+| 5 | **Cooldown éternel** bloquant des coins (résultats périmés de 7–25 h réappliqués). | Bornage par âge (`LEARN_COOLDOWN_AGE_H`). | code `bot-with-dashboard.ts` (~l.410–424) |
+| 6 | **Probabilités UP/DOWN ≠ 100 %** : les `ask` bruts sommaient ≈ 1 + spread (ex. 0,56 + 0,47 → recap à **103 %**). | Chaque côté divisé par `(yes + no) \|\| 1` → somme exactement 100 %. | `tests/prob-normalization.test.ts`, `docs/rebuild/recap/REPORT.md` |
+| 7 | **Clé de dédup du recap instable** : les prix live/probas changeaient la clé → le recap repartait toutes les 5 min. | Marqueur `VOL` (`\x00`) excluant les lignes volatiles de la clé ; dédup stable prouvée sur 2 appels. | `docs/rebuild/recap/REPORT.md` §4 |
+| 8 | **`history.json` saturé de HOLD** (298/300 → fenêtre de ~4 h). | Les HOLD ne sont plus écrits ; purge → fenêtre couvre plusieurs jours. | `docs/CHANGES-APPLIED.md` §4 |
+| 9 | **Fenêtre apprise écrasait `.env`** : `P_STRONG_MAX` sans effet (log `[0.55 - 0.75]`). | Fenêtre apprise bornée par `[P_STRONG_MIN ; P_STRONG_MAX]`. | `docs/CHANGES-APPLIED.md` §5 |
+| 10 | **Dump d'objet ethers ~7,3 Ko/ligne** dans les logs. | Helper `errStr()` borné à 240 caractères sur 10 sites. | `docs/rebuild/code/REPORT.md` (point 4) |
 
-⚠️ **Disclaimer**: Trading involves risk. This bot does not guarantee profits. Always trade responsibly and never invest more than you can afford to lose.
+---
+
+## 8. Ce qui reste ouvert (honnêtement)
+
+- **L'edge reste non prouvé** : il faut **≈ 427 trades** résolus pour trancher au bruit mesuré
+  (`EDGE.md`), la dernière mesure comptait 167 trades.
+- **Non transposable au réel** : la mise paper historique (base 1 € → **0,65–1,30 €**/trade)
+  était **4 à 8× sous le minimum live (5 USDC)** ; la profondeur au meilleur prix (~12 $ médiane)
+  est insuffisante dans **17,7 %** des cas en zone de mise ; la part du PnL paper qui survivrait
+  au réel est **≈ 0 %** (le paper a déjà une EV négative, le réel ≈ double la perte).
+  → `docs/rebuild/execution/COSTS.md`.
+- **Filtre d'edge par coin** (`EDGE_FILTER_ENABLED`) et `kellyCeil=0.05` sont **provisoires** :
+  à ré-évaluer quand `n ≥ 200` et `realized` fiables (`docs/CHANGES-APPLIED.md` §7).
+- **Topics WS `clob_market`** à retirer proprement une fois DipArb/Arbitrage migrés vers REST
+  (`docs/rebuild/code/REPORT.md`).
+- **Import orphelin** `analyzeMarket` dans `bot-with-dashboard.ts` (non supprimable en sécurité).
+- **Dérive live à réconcilier** : les rapports mesurent la mise sur une base de 1 €, tandis que
+  les entrées récentes de `history.json` enregistrent un champ `stake` (voir §9). La valeur de
+  base**actuelle** est `BET_STAKE` dans `.env` — à lire sur place.
+
+---
+
+## 9. Vérification live (commandes exécutées le 2026-09-26 ~23:25 UTC)
+
+```text
+$ pm2 describe polymarket-paperbot
+  status : online   ·   restarts : 11   ·   uptime : 16m   ·   created : 2026-09-26T23:09:37Z
+  script : /root/clawd/Polymarket-bot/bot-with-dashboard.ts   ·   interpreter : node_modules/.bin/tsx
+
+$ cat ~/.polymarket/pnl.json
+  {"trades": 129, "wins": 89, "losses": 40, "win_rate": 69.0, "pnl": 13.19, "pending": 2,
+   "window_pnl": 15.26, "cumulative": true}
+
+$ cumulative.json
+  pnl = 13.1855 · resolved = 129 · audit_ledger.fixed_at = 2026-09-26T22:53:18
+
+$ history.json
+  68 entrées (40 YES / 28 NO)   ·   4 entrées récentes portent un champ "stake"
+```
+
+> Ces chiffres **bougent** : le bot tourne et résout des rounds en continu (les rapports de
+> `docs/rebuild/` ont été figés plus tôt le 2026-09-26, avec des `n` plus petits et un `pnl`
+> plus bas). Le **PnL brut affiché n'est PAS une preuve d'edge** : lire §4 et
+> [`docs/rebuild/SYNTHESIS.md`](docs/rebuild/SYNTHESIS.md).
+
+---
+
+## 10. Carte de la documentation
+
+- [`docs/rebuild/SYNTHESIS.md`](docs/rebuild/SYNTHESIS.md) — **synthèse chiffrée de tous les
+  rapports d'audit** (edge, risque, exécution, PnL, recap, code) + « comment ne pas se mentir ».
+- [`docs/rebuild/strategy/EDGE.md`](docs/rebuild/strategy/EDGE.md) — mesure de l'edge (167 trades, t=+1,25).
+- [`docs/rebuild/risk/RISK.md`](docs/rebuild/risk/RISK.md) — gestion du risque pour une edge non prouvée (Monte-Carlo).
+- [`docs/rebuild/execution/COSTS.md`](docs/rebuild/execution/COSTS.md) — tick, taille min, profondeur, frais, non-transposabilité paper→réel.
+- [`docs/rebuild/pnl/REPORT.md`](docs/rebuild/pnl/REPORT.md) — audit d'intégrité comptable.
+- [`docs/rebuild/recap/REPORT.md`](docs/rebuild/recap/REPORT.md) — audit du recap Telegram.
+- [`docs/rebuild/code/REPORT.md`](docs/rebuild/code/REPORT.md) — audit temps réel / DipArb.
+- [`docs/rebuild/monitoring/MONITORING.md`](docs/rebuild/monitoring/MONITORING.md) — surveillance statistique honnête (`tools/edge_monitor.py`, kill-switch).
+- [`docs/STRATEGY-REVIEW.md`](docs/STRATEGY-REVIEW.md) — revue de stratégie (2026-09-25).
+- [`docs/EDGE-VALIDATION.md`](docs/EDGE-VALIDATION.md) — validation d'edge sur 1 411 décisions.
+- [`docs/CHANGES-APPLIED.md`](docs/CHANGES-APPLIED.md) — correctifs C2/C3/C5/C6/C7/C9.
+- [`.env.example`](.env.example) — modèle de configuration (sans secrets).

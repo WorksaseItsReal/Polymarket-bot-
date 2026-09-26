@@ -130,6 +130,11 @@ export class DipArbService extends EventEmitter {
   private currentUnderlyingPrice = 0;
   private lastPriceUpdate = 0;
 
+  // ✅ FIX 2026-09-26 : provenance du « price to beat » du round courant.
+  // Sert à un log HONNÊTE : on n'affiche plus `0.00` comme si c'était une
+  // valeur valide quand le strike réel n'a pas pu être récupéré (→ `n/a`).
+  private priceToBeatSource: 'binance-1m-open' | 'unknown' = 'unknown';
+
   // Signal state - prevent duplicate signals within same round
   private leg1SignalEmitted = false;
   private lastSignalTime = 0;
@@ -415,6 +420,22 @@ export class DipArbService extends EventEmitter {
       // garde-fou supplémentaire : jamais plus d'une ligne par minute
       if (Date.now() - this.lastHeartbeatAt < 55_000) return;
       this.lastHeartbeatAt = Date.now();
+
+      // ✅ FIX 2026-09-26 : rattrapage du strike d'ouverture (≤ 1×/min). Si la
+      // bougie Binance était indisponible au démarrage du round, on retente ici
+      // plutôt que de laisser `priceToBeat = 0` (et de désactiver à vie les
+      // estimations de win-rate du round). Best-effort, jamais bloquant.
+      if (this.currentRound && this.currentRound.priceToBeat <= 0) {
+        void (async () => {
+          const slot = this.market ? this.parseSlotFromSlug(this.market.slug) : null;
+          const open = await this.fetchRoundOpenPrice(slot);
+          if (open !== null && open > 0 && this.currentRound && this.currentRound.priceToBeat <= 0) {
+            this.currentRound.priceToBeat = open;
+            this.priceToBeatSource = 'binance-1m-open';
+            this.log(`Price to Beat backfill: ${open.toFixed(2)} (round ${this.currentRound.roundId})`);
+          }
+        })().catch(() => { /* best-effort */ });
+      }
 
       const coin = (this.market?.underlying as SpotCoin | undefined) ?? 'BTC';
       const price = this.currentUnderlyingPrice;
@@ -1175,6 +1196,72 @@ export class DipArbService extends EventEmitter {
 
   // ===== Private: Round Management =====
 
+  /** Paires Binance utilisées pour retrouver l'ouverture d'un round. */
+  private static readonly ROUND_OPEN_PAIRS: Record<string, string> = {
+    BTC: 'BTCUSDT',
+    ETH: 'ETHUSDT',
+    SOL: 'SOLUSDT',
+    XRP: 'XRPUSDT',
+    DOGE: 'DOGEUSDT',
+  };
+
+  /**
+   * Slot Unix (secondes) du DÉBUT du round, extrait du slug du marché.
+   * ex. « btc-updown-5m-1790464800 » → 1790464800.
+   */
+  private parseSlotFromSlug(slug: string): number | null {
+    const m = slug.match(/(\d{9,})$/);
+    if (!m) return null;
+    const v = parseInt(m[1], 10);
+    return Number.isFinite(v) && v > 0 ? v : null;
+  }
+
+  /**
+   * VRAI « price to beat » d'un round Up/Down 5m = prix au DÉBUT de la fenêtre.
+   *
+   * Pourquoi pas l'API Gamma : `events?slug=` n'expose AUCUN champ de strike
+   * (vérifié) ; le marché résout sur le TWAP Chainlink 60 s
+   * (`cryptoMarketConfigId = btc-5m-twap-60`, `resolutionSource` =
+   * data.chain.link/streams/btc-usd-twap-60s-streams), non reproductible sans
+   * credentials Chainlink Data Streams. On prend donc l'ouverture de la bougie
+   * Binance 1m au slot du round — même méthode que paperbot-recap.py.
+   *
+   * Ce n'est PAS le spot courant : la rotation démarre ~9 s APRÈS le slot, donc
+   * le spot est déjà post-ouverture (bug historique à l'origine du 0.00).
+   *
+   * Renvoie `null` si indisponible → l'appelant logge alors `n/a` (jamais un
+   * faux `0.00` ni une division par zéro).
+   */
+  private async fetchRoundOpenPrice(slotSec: number | null): Promise<number | null> {
+    const coin = this.market?.underlying;
+    if (!coin) return null;
+    const symbol = DipArbService.ROUND_OPEN_PAIRS[coin];
+    if (!symbol) return null;
+
+    const startTime = (slotSec ?? Math.floor(Date.now() / 1000)) * 1000;
+    const urls = [
+      `https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=1m&startTime=${startTime}&limit=1`,
+      `https://data-api.binance.vision/api/v3/klines?symbol=${symbol}&interval=1m&startTime=${startTime}&limit=1`,
+    ];
+
+    for (const url of urls) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 3500);
+      try {
+        const res = await fetch(url, { signal: controller.signal, headers: { Accept: 'application/json' } });
+        if (!res.ok) continue;
+        const data = (await res.json()) as unknown;
+        const open = Array.isArray(data) && Array.isArray(data[0]) ? parseFloat(data[0][1] as string) : NaN;
+        if (Number.isFinite(open) && open > 0) return open;
+      } catch {
+        // source suivante
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+    return null;
+  }
+
   private async checkAndStartNewRound(): Promise<void> {
     if (!this.market) return;
 
@@ -1217,8 +1304,22 @@ export class DipArbService extends EventEmitter {
       const upPrice = this.upAsks[0]?.price ?? 0.5;
       const downPrice = this.downAsks[0]?.price ?? 0.5;
 
-      // Use current underlying price as price to beat (or fallback to 0)
-      const priceToBeat = this.currentUnderlyingPrice || 0;
+      // ✅ FIX 2026-09-26 : le « price to beat » est le strike d'OUVERTURE du
+      // round (prix au DÉBUT de la fenêtre), PAS le spot courant.
+      // AVANT : `const priceToBeat = this.currentUnderlyingPrice || 0;` → quand
+      // le flux de prix n'était pas prêt on loggait « Price to Beat: 0.00 » et
+      // on faussait les estimations de win-rate (strike faux). On lit désormais
+      // l'ouverture de la bougie Binance 1m au slot du round (aucun champ strike
+      // dans l'API Gamma). Si indisponible : 0 = inconnu (log `n/a`).
+      const slot = this.parseSlotFromSlug(this.market.slug);
+      let priceToBeat = 0;
+      const klineOpen = await this.fetchRoundOpenPrice(slot);
+      if (klineOpen !== null && klineOpen > 0) {
+        priceToBeat = klineOpen;
+        this.priceToBeatSource = 'binance-1m-open';
+      } else {
+        this.priceToBeatSource = 'unknown';
+      }
 
       // Create new round
       const roundId = `${this.market.slug}-${Date.now()}`;
@@ -1248,7 +1349,11 @@ export class DipArbService extends EventEmitter {
       };
 
       this.emit('newRound', event);
-      this.log(`New round: ${roundId}, Price to Beat: ${priceToBeat.toFixed(2)}`);
+      // Log HONNÊTE : `n/a` si le strike réel est inconnu, jamais un faux `0.00`.
+      const ptbLabel = priceToBeat > 0
+        ? `${priceToBeat.toFixed(2)} (source: ${this.priceToBeatSource})`
+        : 'n/a (strike d\'ouverture indisponible — bougie Binance 1m absente)';
+      this.log(`New round: ${roundId}, Price to Beat: ${ptbLabel}`);
     }
 
     // Check for round expiration - exit Leg1 if Leg2 times out
