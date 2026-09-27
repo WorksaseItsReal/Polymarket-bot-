@@ -13,7 +13,7 @@ import { fileURLToPath } from 'url';
 import { WebSocketServer, WebSocket } from 'ws';
 import { dashboardEmitter } from './state-emitter.js';
 import type { WebSocketMessage } from './types.js';
-import { loadHistory, getSession, getHistorySummary } from './session-history.js';
+import { loadHistory, getSession } from './session-history.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -25,7 +25,17 @@ function broadcast(message: WebSocketMessage): void {
   const data = JSON.stringify(message);
   wss.clients.forEach((client) => {
     if (client.readyState === WebSocket.OPEN) {
-      client.send(data);
+      // ⚠️ `send()` peut lever si la socket est fermée entre le test de
+      // `readyState` et l'appel. Sans ce try/catch, l'exception remonte dans le
+      // handler synchrone de `dashboardEmitter.emit('state', …)` — donc dans le
+      // chemin d'appel de `updateState()` côté bot, et peut interrompre une
+      // itération de la boucle de trading. Un problème d'affichage ne doit
+      // JAMAIS pouvoir casser le bot.
+      try {
+        client.send(data);
+      } catch (err) {
+        console.error('[Dashboard] send failed:', (err as Error).message);
+      }
     }
   });
 }

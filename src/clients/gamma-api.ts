@@ -36,10 +36,103 @@
 
 import { RateLimiter, ApiType } from '../core/rate-limiter.js';
 import type { UnifiedCache } from '../core/unified-cache.js';
-import { PolymarketError } from '../core/errors.js';
+import { PolymarketError, ErrorCode } from '../core/errors.js';
 
 /** Gamma API base URL */
 const GAMMA_API_BASE = 'https://gamma-api.polymarket.com';
+
+/** User-Agent explicite : certains edges rejettent les clients sans UA (403). */
+const HTTP_USER_AGENT = 'polymarket-bot/1.0 (+https://polymarket.com)';
+
+/** Timeout réseau par défaut (ms). Un `fetch` sans timeout bloque indéfiniment. */
+const DEFAULT_TIMEOUT_MS = 10_000;
+
+/** Nombre total de tentatives (1 = pas de retry). */
+const DEFAULT_MAX_ATTEMPTS = 3;
+
+/**
+ * `fetch` JSON avec TIMEOUT + RETRY/BACKOFF.
+ *
+ * Pourquoi : un `fetch()` nu (a) n'a pas de timeout — un serveur qui accepte la
+ * connexion sans répondre bloque l'appelant pour toujours ; (b) ne retente rien —
+ * un 429 « usage limit reached » ou un 502 devient immédiatement une « donnée »
+ * absente/perimée côté appelant.
+ *
+ * Comportement :
+ * - 429 / 5xx / erreurs réseau / timeout → retry avec backoff (Retry-After honoré).
+ * - 4xx (hors 429) → erreur immédiate (non retentable).
+ */
+async function fetchJsonWithRetry(
+  url: string,
+  opts: { timeoutMs?: number; maxAttempts?: number; label?: string } = {}
+): Promise<unknown> {
+  const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const maxAttempts = Math.max(1, opts.maxAttempts ?? DEFAULT_MAX_ATTEMPTS);
+  const label = opts.label ?? url;
+  let lastError: Error | undefined;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const response = await fetch(url, {
+        signal: controller.signal,
+        headers: { Accept: 'application/json', 'User-Agent': HTTP_USER_AGENT },
+      });
+
+      if (!response.ok) {
+        const body = await response.json().catch(() => null);
+        const err = PolymarketError.fromHttpError(response.status, body);
+        // 429 = rate limit : on honore Retry-After avant de retenter.
+        if (response.status === 429 && attempt < maxAttempts) {
+          const retryAfter = Number(response.headers.get('retry-after'));
+          const waitMs =
+            Number.isFinite(retryAfter) && retryAfter > 0
+              ? Math.min(retryAfter * 1000, 30_000)
+              : Math.min(500 * 2 ** (attempt - 1), 8_000);
+          lastError = err;
+          await new Promise((r) => setTimeout(r, waitMs));
+          continue;
+        }
+        if (err.retryable && attempt < maxAttempts) {
+          lastError = err;
+          await new Promise((r) => setTimeout(r, Math.min(500 * 2 ** (attempt - 1), 8_000)));
+          continue;
+        }
+        throw err;
+      }
+
+      return await response.json();
+    } catch (err) {
+      const aborted = (err as { name?: string })?.name === 'AbortError';
+      if (aborted) {
+        lastError = new PolymarketError(
+          ErrorCode.TIMEOUT,
+          `${label} : timeout après ${timeoutMs} ms`,
+          true
+        );
+      } else if (err instanceof PolymarketError) {
+        if (!err.retryable) throw err;
+        lastError = err;
+      } else {
+        lastError = new PolymarketError(
+          ErrorCode.NETWORK_ERROR,
+          `${label} : ${(err as Error)?.message ?? String(err)}`,
+          true,
+          err as Error
+        );
+      }
+      if (attempt < maxAttempts) {
+        await new Promise((r) => setTimeout(r, Math.min(500 * 2 ** (attempt - 1), 8_000)));
+        continue;
+      }
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  throw lastError ?? new Error(`${label} : échec après ${maxAttempts} tentatives`);
+}
 
 // ===== Types =====
 
@@ -86,8 +179,20 @@ export interface GammaMarket {
   /**
    * Current prices for each outcome (0-1 range)
    * @example [0.65, 0.35] for 65% YES probability
+   *
+   * @remarks ⚠️ PÉRIMÉ / RETARDÉ. Ce champ est un instantané Gamma qui retarde
+   * sur le carnet CLOB (mesuré : ~40-75 s et jusqu'à 0.18 d'écart sur un marché
+   * 5 min). Ne JAMAIS l'utiliser pour une décision de trading : lire le carnet
+   * CLOB (`/book?token_id=`). Tableau VIDE si Gamma n'a pas fourni la donnée
+   * (plus de faux [0.5, 0.5]).
    */
   outcomePrices: number[];
+
+  /** Vrai si `outcomePrices` est absent/incomplet (aucun prix utilisable). */
+  pricesMissing?: boolean;
+
+  /** Vrai si `endDate` était absent de la réponse Gamma (valeur = epoch). */
+  endDateMissing?: boolean;
 
   /**
    * Total trading volume (lifetime, in USDC)
@@ -362,7 +467,14 @@ export class GammaApiClient {
   async getMarkets(params?: MarketSearchParams): Promise<GammaMarket[]> {
     const query = new URLSearchParams();
     if (params?.slug) query.set('slug', params.slug);
-    if (params?.conditionId) query.set('condition_id', params.conditionId);
+    // ⚠️ VÉRIFIÉ SUR LE MARCHÉ RÉEL (2026-09-27) : le paramètre SINGULIER
+    // `condition_id` est IGNORÉ par Gamma — `?condition_id=0x15e1…` renvoie les
+    // 5 marchés les plus liquides de la plateforme (filtre inopérant). Le
+    // paramètre PLURIEL `condition_ids` filtre correctement. Comme l'ancien code
+    // envoyait `condition_id` puis lisait `markets[0]`, `getMarketByConditionId`
+    // renvoyait un marché TOTALEMENT ÉTRANGER (mesuré : la requête sur le
+    // conditionId d'un BTC-updown-5m renvoyait « xi-jinping-out-before-2027 »).
+    if (params?.conditionId) query.set('condition_ids', params.conditionId);
     if (params?.active !== undefined) query.set('active', String(params.active));
     if (params?.closed !== undefined) query.set('closed', String(params.closed));
     if (params?.limit) query.set('limit', String(params.limit));
@@ -373,15 +485,20 @@ export class GammaApiClient {
     if (params?.tag) query.set('tag', params.tag);
 
     return this.rateLimiter.execute(ApiType.GAMMA_API, async () => {
-      const response = await fetch(`${GAMMA_API_BASE}/markets?${query}`);
-      if (!response.ok)
-        throw PolymarketError.fromHttpError(
-          response.status,
-          await response.json().catch(() => null)
-        );
-      const data = (await response.json()) as unknown[];
+      const data = await fetchJsonWithRetry(`${GAMMA_API_BASE}/markets?${query}`, {
+        label: `GET /markets?${query}`,
+      });
       if (!Array.isArray(data)) return [];
-      return data.map((item) => this.normalizeMarket(item as Record<string, unknown>));
+      const markets = data.map((item) =>
+        this.normalizeMarket(item as Record<string, unknown>)
+      );
+      // Défense en profondeur : même si le filtre serveur déraille, on ne
+      // renvoie jamais un marché dont le conditionId diffère de celui demandé.
+      if (params?.conditionId) {
+        const wanted = params.conditionId.toLowerCase();
+        return markets.filter((m) => m.conditionId.toLowerCase() === wanted);
+      }
+      return markets;
     });
   }
 
@@ -454,13 +571,9 @@ export class GammaApiClient {
     if (params?.limit) query.set('limit', String(params.limit));
 
     return this.rateLimiter.execute(ApiType.GAMMA_API, async () => {
-      const response = await fetch(`${GAMMA_API_BASE}/events?${query}`);
-      if (!response.ok)
-        throw PolymarketError.fromHttpError(
-          response.status,
-          await response.json().catch(() => null)
-        );
-      const data = (await response.json()) as unknown[];
+      const data = await fetchJsonWithRetry(`${GAMMA_API_BASE}/events?${query}`, {
+        label: `GET /events?${query}`,
+      });
       if (!Array.isArray(data)) return [];
       return data.map((item) => this.normalizeEvent(item as Record<string, unknown>));
     });
@@ -498,16 +611,19 @@ export class GammaApiClient {
    */
   async getEventById(id: string): Promise<GammaEvent | null> {
     return this.rateLimiter.execute(ApiType.GAMMA_API, async () => {
-      const response = await fetch(`${GAMMA_API_BASE}/events/${id}`);
-      if (!response.ok) {
-        if (response.status === 404) return null;
-        throw PolymarketError.fromHttpError(
-          response.status,
-          await response.json().catch(() => null)
-        );
+      let data: unknown;
+      try {
+        data = await fetchJsonWithRetry(`${GAMMA_API_BASE}/events/${id}`, {
+          label: `GET /events/${id}`,
+        });
+      } catch (err) {
+        // 404 = événement inconnu → null (comportement historique conservé).
+        if (err instanceof PolymarketError && err.code === ErrorCode.MARKET_NOT_FOUND) {
+          return null;
+        }
+        throw err;
       }
-      const data = (await response.json()) as Record<string, unknown>;
-      return this.normalizeEvent(data);
+      return this.normalizeEvent(data as Record<string, unknown>);
     });
   }
 
@@ -556,6 +672,22 @@ export class GammaApiClient {
   // ===== Data Normalization =====
 
   private normalizeMarket(m: Record<string, unknown>): GammaMarket {
+    // ⚠️ Les 4 champs de prix de Gamma (`outcomePrices`, `bestBid`, `bestAsk`,
+    // `lastTradePrice`) sont documentés/observés comme PÉRIMÉS ou FIGÉS :
+    // - `bestBid`/`bestAsk` restent figés sur la valeur d'ouverture du round
+    //   (mesuré : 0.49/0.50 pendant toute la vie d'un round 5 min alors que le
+    //   carnet CLOB réel affichait 0.67/0.68 — écart 0.18) ;
+    // - `outcomePrices` est un instantané retardé (mesuré : jusqu'à ~0.18 d'écart
+    //   et ~40-75 s de retard sur un marché de 5 min) ;
+    // - sur un round TERMINÉ, ils affichent des valeurs terminales (0.9995/0.0005)
+    //   alors que le carnet CLOB n'existe plus (token périmé).
+    // Ces valeurs restent exposées (métadonnées d'affichage) mais plus AUCUN
+    // défaut inventé (l'ancien `[0.5, 0.5]` transformait une absence en mesure).
+    const rawPrices = this.parseJsonArray<unknown>(m.outcomePrices, [])
+      .map(Number)
+      .filter((n) => Number.isFinite(n));
+    const pricesMissing = rawPrices.length < 2;
+
     return {
       id: String(m.id || ''),
       conditionId: String(m.conditionId || ''),
@@ -563,9 +695,8 @@ export class GammaApiClient {
       question: String(m.question || ''),
       description: m.description ? String(m.description) : undefined,
       outcomes: this.parseJsonArray(m.outcomes, ['Yes', 'No']),
-      outcomePrices: this.parseJsonArray(m.outcomePrices, [0.5, 0.5]).map(
-        Number
-      ),
+      outcomePrices: rawPrices,
+      pricesMissing,
       volume: Number(m.volume || 0),
       volume24hr: m.volume24hr !== undefined ? Number(m.volume24hr) : undefined,
       volume1wk: m.volume1wk !== undefined ? Number(m.volume1wk) : undefined,
@@ -583,7 +714,15 @@ export class GammaApiClient {
         m.lastTradePrice !== undefined ? Number(m.lastTradePrice) : undefined,
       bestBid: m.bestBid !== undefined ? Number(m.bestBid) : undefined,
       bestAsk: m.bestAsk !== undefined ? Number(m.bestAsk) : undefined,
-      endDate: new Date(String(m.endDate || Date.now())),
+      // ⚠️ `endDate` Gamma n'est PAS fiable (voir AGENTS/docs) : on ne fabrique
+      // PLUS « maintenant » quand il est absent (une absence ressemblait à un
+      // marché qui se termine à l'instant → sélection/filtrage faussés).
+      endDate:
+        m.endDate !== undefined && m.endDate !== null && String(m.endDate) !== ''
+          ? new Date(String(m.endDate))
+          : new Date(0),
+      endDateMissing:
+        m.endDate === undefined || m.endDate === null || String(m.endDate) === '',
       createdAt: m.createdAt ? new Date(String(m.createdAt)) : undefined,
       startDate: m.startDate ? new Date(String(m.startDate)) : undefined,
       acceptingOrdersTimestamp: m.acceptingOrdersTimestamp
@@ -593,7 +732,19 @@ export class GammaApiClient {
       closed: Boolean(m.closed),
       image: m.image ? String(m.image) : undefined,
       icon: m.icon ? String(m.icon) : undefined,
-      tags: m.tags ? this.parseJsonArray(m.tags, []) : undefined,
+      // Gamma renvoie `tags` comme un tableau d'OBJETS ({id,label,slug}),
+      // pas un tableau de chaînes : l'ancien cast produisait des `[object Object]`.
+      tags: Array.isArray(m.tags)
+        ? (m.tags as Array<Record<string, unknown>>)
+            .map((t) => String(t?.slug ?? t?.label ?? t?.id ?? ''))
+            .filter((s) => s.length > 0)
+        : this.parseJsonArray<unknown>(m.tags, [])
+            .map((t) =>
+              typeof t === 'string'
+                ? t
+                : String((t as Record<string, unknown>)?.slug ?? '')
+            )
+            .filter((s) => s.length > 0),
     };
   }
 

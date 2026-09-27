@@ -74,6 +74,18 @@ export interface TradingServiceConfig {
   chainId?: number;
   /** Pre-generated API credentials (optional) */
   credentials?: ApiCredentials;
+  /**
+   * Mode PAPER (défaut : `process.env.DRY_RUN !== 'false'`).
+   *
+   * `true`  → AUCUN ordre réel n'est envoyé au CLOB, aucune écriture on-chain.
+   * `false` → exécution réelle autorisée (n'est activé que si l'opérateur a
+   *           explicitement positionné `DRY_RUN=false`).
+   *
+   * Le défaut est volontairement FAIL-CLOSED : en cas de variable d'environnement
+   * absente, indéfinie ou mal orthographiée, le service refuse d'émettre des
+   * ordres au lieu de laisser passer une exécution réelle.
+   */
+  paperMode?: boolean;
 }
 
 // Order types
@@ -164,6 +176,8 @@ export class TradingService {
   private initialized = false;
   private tickSizeCache: Map<string, string> = new Map();
   private negRiskCache: Map<string, boolean> = new Map();
+  /** Verrou PAPER : fail-closed (voir TradingServiceConfig.paperMode). */
+  private paperMode: boolean;
 
   constructor(
     private rateLimiter: RateLimiter,
@@ -173,6 +187,41 @@ export class TradingService {
     this.wallet = new Wallet(config.privateKey);
     this.chainId = (config.chainId || POLYGON_MAINNET) as Chain;
     this.credentials = config.credentials || null;
+    this.paperMode = config.paperMode ?? (process.env.DRY_RUN !== 'false');
+  }
+
+  // ============================================================================
+  // Paper-mode guard (défense en profondeur)
+  // ============================================================================
+  //
+  // Les appelants (bot-with-dashboard, arbitrage-service, dip-arb-service,
+  // smart-money-service) filtrent déjà l'exécution via `autoExecute=false` et
+  // `enableRebalancer=false` en DRY_RUN. Ces gardes-là sont côté appelant : elles
+  // ne protègent donc PAS les méthodes publiques de ce service si elles sont
+  // invoquées directement. Le verrou ci-dessous rend l'envoi d'ordre impossible
+  // au niveau du service lui-même, indépendamment de l'appelant.
+
+  /** true = aucun ordre réel ne peut partir de ce service. */
+  isPaperMode(): boolean {
+    return this.paperMode;
+  }
+
+  /**
+   * Force le mode paper/live à chaud. Réservé aux tests et à une bascule
+   * explicite ; le défaut reste piloté par `DRY_RUN` (fail-closed).
+   */
+  setPaperMode(enabled: boolean): void {
+    this.paperMode = enabled;
+  }
+
+  /** Refus paper-mode homogène avec le contrat `OrderResult`. */
+  private paperBlock(operation: string): OrderResult {
+    return {
+      success: false,
+      errorMsg:
+        `[PAPER MODE] ${operation} refusé — exécution réelle désactivée. ` +
+        `Aucun ordre n'a été envoyé au CLOB (DRY_RUN != 'false').`,
+    };
   }
 
   // ============================================================================
@@ -288,6 +337,9 @@ export class TradingService {
    * Orders below these limits will be rejected by the API.
    */
   async createLimitOrder(params: LimitOrderParams): Promise<OrderResult> {
+    // 🔒 GARDE PAPER (fail-closed) — AVANT toute validation et tout appel réseau.
+    if (this.paperMode) return this.paperBlock('createLimitOrder');
+
     // Validate minimum order requirements before sending to API
     if (params.size < MIN_ORDER_SIZE_SHARES) {
       return {
@@ -357,6 +409,9 @@ export class TradingService {
    * Market orders below this limit will be rejected by the API.
    */
   async createMarketOrder(params: MarketOrderParams): Promise<OrderResult> {
+    // 🔒 GARDE PAPER (fail-closed) — AVANT toute validation et tout appel réseau.
+    if (this.paperMode) return this.paperBlock('createMarketOrder');
+
     // Validate minimum order value before sending to API
     if (params.amount < MIN_ORDER_VALUE_USDC) {
       return {
@@ -413,6 +468,9 @@ export class TradingService {
   // ============================================================================
 
   async cancelOrder(orderId: string): Promise<OrderResult> {
+    // 🔒 GARDE PAPER : aucun ordre réel n'existe → rien à annuler côté CLOB.
+    if (this.paperMode) return this.paperBlock('cancelOrder');
+
     const client = await this.ensureInitialized();
 
     return this.rateLimiter.execute(ApiType.CLOB_API, async () => {
@@ -429,6 +487,9 @@ export class TradingService {
   }
 
   async cancelOrders(orderIds: string[]): Promise<OrderResult> {
+    // 🔒 GARDE PAPER
+    if (this.paperMode) return this.paperBlock('cancelOrders');
+
     const client = await this.ensureInitialized();
 
     return this.rateLimiter.execute(ApiType.CLOB_API, async () => {
@@ -445,6 +506,9 @@ export class TradingService {
   }
 
   async cancelAllOrders(): Promise<OrderResult> {
+    // 🔒 GARDE PAPER
+    if (this.paperMode) return this.paperBlock('cancelAllOrders');
+
     const client = await this.ensureInitialized();
 
     return this.rateLimiter.execute(ApiType.CLOB_API, async () => {
@@ -586,6 +650,9 @@ export class TradingService {
     assetType: 'COLLATERAL' | 'CONDITIONAL',
     tokenId?: string
   ): Promise<void> {
+    // 🔒 GARDE PAPER : écriture de l'état d'approbation côté CLOB → bloquée.
+    if (this.paperMode) return;
+
     const client = await this.ensureInitialized();
     return this.rateLimiter.execute(ApiType.CLOB_API, async () => {
       await client.updateBalanceAllowance({

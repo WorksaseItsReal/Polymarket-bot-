@@ -30,14 +30,29 @@ test('fmt_round : ne casse pas les identifiants non numériques', { skip }, () =
 });
 
 test('build_message : un slug dégradé (virgule + suffixe) devient une fenêtre propre', { skip }, () => {
+  // NOTE (2026-09-27) : la ligne « Round » est desormais derivee du SLOT COURANT, plus du
+  // dernier round lu dans le log (qui pouvait etre perime de plusieurs heures). L'ancienne
+  // assertion figeait « 23:15→23:20 » et cassait donc a chaque changement d'heure : on
+  // verifie ce qui compte vraiment — aucune virgule finale, aucun suffixe interne, et une
+  // fenetre 5 min au format HH:MM→HH:MM.
   const r = runHarness<Record<string, string>>('round-line');
-  assert.equal(
-    r.slug_avec_virgule,
-    '🔁 Round: <b>23:15→23:20</b>',
-    'la virgule finale et le suffixe interne sont éliminés, le slot est formaté',
+  // La fenetre affichee depend de l'heure d'execution (slot courant) : on valide donc le
+  // FORMAT et l'absence de scorie, pas une heure figee.
+  for (const name of ['slug_avec_virgule', 'slug_propre'] as const) {
+    const line = r[name] ?? '';
+    assert.match(
+      line,
+      /^🔁 Round: <b>\d{2}:\d{2}→\d{2}:\d{2}<\/b>$/,
+      `[${name}] fenetre 5 min propre attendue, obtenu : ${line}`,
+    );
+  }
+  // Un id vide retombe sur le SLOT COURANT (le header reflete le round live) : la
+  // garantie qui compte est qu'on n'affiche jamais une chaine vide ni un epoch brut.
+  assert.match(
+    r.vide ?? '',
+    /^🔁 Round: <b>(\d{2}:\d{2}→\d{2}:\d{2}|…)<\/b>$/,
+    `[vide] fenetre courante ou ellipse attendue, obtenu : ${r.vide}`,
   );
-  assert.equal(r.slug_propre, '🔁 Round: <b>23:15→23:20</b>', 'slug propre → même fenêtre');
-  assert.equal(r.vide, '🔁 Round: <b>…</b>', 'aucun id → ellipse');
 
   // NON-RÉGRESSION explicite : jamais de virgule finale ni de suffixe interne affiché.
   for (const [name, line] of Object.entries(r)) {

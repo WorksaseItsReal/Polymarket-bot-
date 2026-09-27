@@ -136,6 +136,12 @@ export interface ClearAction {
   txHash?: string;
   success: boolean;
   error?: string;
+  /**
+   * Vrai si `usdcResult` est une ESTIMATION (prix lu au carnet, pas un
+   * remplissage réel). Un `usdcResult` estimé ne doit jamais être présenté
+   * comme un montant effectivement récupéré.
+   */
+  estimated?: boolean;
 }
 
 // ===== Market Scanning Types =====
@@ -1038,27 +1044,58 @@ export class ArbitrageService extends EventEmitter {
           totalUsdcRecovered += pairedTokens;
         }
 
-        // For unpaired tokens, estimate sell price (assume ~0.5 if unknown)
+        // ⚠️ AUDIT DONNÉES (2026-09-27) : l'ancien code estimait le produit d'une
+        // vente avec un `0.5` FORFAITAIRE (« assume ~0.5 »), c'est-à-dire un prix
+        // inventé présenté comme un montant récupéré. Sur ce bot, un up/down 5 min
+        // cote 0.05 ou 0.99 bien plus souvent que 0.5 (mesuré : 0.045, 0.69, 0.925).
+        // On lit désormais le meilleur bid CLOB ; si le carnet est indisponible, on
+        // ne prétend RIEN (usdcResult = 0 + action marquée `estimated`).
         if (unpairedYes >= this.config.minTradeSize) {
-          const estimatedPrice = 0.5; // Conservative estimate
-          actions.push({
-            type: 'sell_yes',
-            amount: unpairedYes,
-            usdcResult: unpairedYes * estimatedPrice,
-            success: true,
-          });
-          totalUsdcRecovered += unpairedYes * estimatedPrice;
+          const liveBid = await this.liveBestBid(market.yesTokenId);
+          if (liveBid === undefined) {
+            actions.push({
+              type: 'sell_yes',
+              amount: unpairedYes,
+              usdcResult: 0,
+              success: false,
+              estimated: true,
+              error: 'prix de vente indisponible (carnet CLOB) — montant non estimé (refus du 0.5 forfaitaire)',
+            });
+            this.log(`      ⚠️ sell_yes: prix inconnu, $0 comptabilisé (pas d'estimation inventée)`);
+          } else {
+            actions.push({
+              type: 'sell_yes',
+              amount: unpairedYes,
+              usdcResult: unpairedYes * liveBid,
+              success: true,
+              estimated: true,
+            });
+            totalUsdcRecovered += unpairedYes * liveBid;
+          }
         }
 
         if (unpairedNo >= this.config.minTradeSize) {
-          const estimatedPrice = 0.5;
-          actions.push({
-            type: 'sell_no',
-            amount: unpairedNo,
-            usdcResult: unpairedNo * estimatedPrice,
-            success: true,
-          });
-          totalUsdcRecovered += unpairedNo * estimatedPrice;
+          const liveBid = await this.liveBestBid(market.noTokenId);
+          if (liveBid === undefined) {
+            actions.push({
+              type: 'sell_no',
+              amount: unpairedNo,
+              usdcResult: 0,
+              success: false,
+              estimated: true,
+              error: 'prix de vente indisponible (carnet CLOB) — montant non estimé (refus du 0.5 forfaitaire)',
+            });
+            this.log(`      ⚠️ sell_no: prix inconnu, $0 comptabilisé (pas d'estimation inventée)`);
+          } else {
+            actions.push({
+              type: 'sell_no',
+              amount: unpairedNo,
+              usdcResult: unpairedNo * liveBid,
+              success: true,
+              estimated: true,
+            });
+            totalUsdcRecovered += unpairedNo * liveBid;
+          }
         }
       }
 
@@ -1150,6 +1187,9 @@ export class ArbitrageService extends EventEmitter {
       if (this.tradingService && unpairedYes >= this.config.minTradeSize) {
         try {
           const sellAmount = Math.floor(unpairedYes * 1e6) / 1e6;
+          // ⚠️ AUDIT DONNÉES : le produit est estimé avec le meilleur bid CLOB
+          // RELEVÉ AVANT la vente (l'ancien `* 0.5` forfaitaire inventait un prix).
+          const bidBefore = await this.liveBestBid(market.yesTokenId);
           const result = await this.tradingService.createMarketOrder({
             tokenId: market.yesTokenId,
             side: 'SELL',
@@ -1157,16 +1197,28 @@ export class ArbitrageService extends EventEmitter {
             orderType: 'FOK',
           });
           if (result.success) {
-            // Estimate USDC received (conservative estimate since we don't have exact trade info)
-            const usdcReceived = sellAmount * 0.5; // Assume ~0.5 average price
-            actions.push({
-              type: 'sell_yes',
-              amount: sellAmount,
-              usdcResult: usdcReceived,
-              success: true,
-            });
-            totalUsdcRecovered += usdcReceived;
-            this.log(`   ✅ Sold YES: ${sellAmount.toFixed(4)} → ~$${usdcReceived.toFixed(2)} USDC`);
+            if (bidBefore === undefined) {
+              actions.push({
+                type: 'sell_yes',
+                amount: sellAmount,
+                usdcResult: 0,
+                estimated: true,
+                success: true,
+                error: 'produit non estimé: carnet CLOB indisponible avant la vente (0.5 forfaitaire supprimé)',
+              });
+              this.log(`   ✅ Sold YES: ${sellAmount.toFixed(4)} → produit non estimé (prix inconnu)`);
+            } else {
+              const usdcReceived = sellAmount * bidBefore;
+              actions.push({
+                type: 'sell_yes',
+                amount: sellAmount,
+                usdcResult: usdcReceived,
+                estimated: true,
+                success: true,
+              });
+              totalUsdcRecovered += usdcReceived;
+              this.log(`   ✅ Sold YES: ${sellAmount.toFixed(4)} → ~$${usdcReceived.toFixed(2)} USDC (bid ${bidBefore})`);
+            }
           } else {
             throw new Error(result.errorMsg || 'Sell failed');
           }
@@ -1185,6 +1237,8 @@ export class ArbitrageService extends EventEmitter {
       if (this.tradingService && unpairedNo >= this.config.minTradeSize) {
         try {
           const sellAmount = Math.floor(unpairedNo * 1e6) / 1e6;
+          // ⚠️ AUDIT DONNÉES : cf. sell YES ci-dessus (plus de `* 0.5` inventé).
+          const bidBefore = await this.liveBestBid(market.noTokenId);
           const result = await this.tradingService.createMarketOrder({
             tokenId: market.noTokenId,
             side: 'SELL',
@@ -1192,16 +1246,28 @@ export class ArbitrageService extends EventEmitter {
             orderType: 'FOK',
           });
           if (result.success) {
-            // Estimate USDC received (conservative estimate since we don't have exact trade info)
-            const usdcReceived = sellAmount * 0.5; // Assume ~0.5 average price
-            actions.push({
-              type: 'sell_no',
-              amount: sellAmount,
-              usdcResult: usdcReceived,
-              success: true,
-            });
-            totalUsdcRecovered += usdcReceived;
-            this.log(`   ✅ Sold NO: ${sellAmount.toFixed(4)} → ~$${usdcReceived.toFixed(2)} USDC`);
+            if (bidBefore === undefined) {
+              actions.push({
+                type: 'sell_no',
+                amount: sellAmount,
+                usdcResult: 0,
+                estimated: true,
+                success: true,
+                error: 'produit non estimé: carnet CLOB indisponible avant la vente (0.5 forfaitaire supprimé)',
+              });
+              this.log(`   ✅ Sold NO: ${sellAmount.toFixed(4)} → produit non estimé (prix inconnu)`);
+            } else {
+              const usdcReceived = sellAmount * bidBefore;
+              actions.push({
+                type: 'sell_no',
+                amount: sellAmount,
+                usdcResult: usdcReceived,
+                estimated: true,
+                success: true,
+              });
+              totalUsdcRecovered += usdcReceived;
+              this.log(`   ✅ Sold NO: ${sellAmount.toFixed(4)} → ~$${usdcReceived.toFixed(2)} USDC (bid ${bidBefore})`);
+            }
           } else {
             throw new Error(result.errorMsg || 'Sell failed');
           }
@@ -1399,6 +1465,127 @@ export class ArbitrageService extends EventEmitter {
     }
   }
 
+  // ===== Re-vérification de la source avant d'agir =====
+
+  /**
+   * Relit les DEUX carnets CLOB (`/book?token_id=`) au moment de l'exécution et
+   * recalcule les prix effectifs / profits d'arbitrage.
+   *
+   * ⚠️ Pourquoi (audit données 2026-09-27) : le signal qui déclenche l'exécution
+   * vient du flux `RealtimeServiceV2` (WS ou fallback REST) et peut avoir
+   * plusieurs secondes de retard. Sur un marché « up/down 5 min », quelques
+   * secondes suffisent à annuler l'opportunité (mesuré sur le carnet réel :
+   * le meilleur ask d'un round a bougé de 0.50 à 0.69 en ~60 s). On ne place donc
+   * plus un ordre sur un signal non re-vérifié.
+   *
+   * Retourne `null` si la re-vérification n'a pas pu être faite (réseau) — dans
+   * ce cas l'appelant NE bloque PAS (le flux temps réel reste une source live)
+   * mais logge un avertissement explicite.
+   */
+  private async recheckLiveBooks(): Promise<{
+    longProfit: number;
+    shortProfit: number;
+    buyYes: number;
+    buyNo: number;
+    sellYes: number;
+    sellNo: number;
+    ageMs: number;
+  } | null> {
+    if (!this.market) return null;
+    try {
+      const cache = createUnifiedCache();
+      const gammaApi = new GammaApiClient(this.rateLimiter, cache);
+      const marketService = new MarketService(gammaApi, undefined, this.rateLimiter, cache);
+      const [yesBook, noBook] = await Promise.all([
+        marketService.getTokenOrderbook(this.market.yesTokenId),
+        marketService.getTokenOrderbook(this.market.noTokenId),
+      ]);
+      const yesBid = yesBook.bids[0]?.price;
+      const yesAsk = yesBook.asks[0]?.price;
+      const noBid = noBook.bids[0]?.price;
+      const noAsk = noBook.asks[0]?.price;
+      if (
+        yesBid === undefined ||
+        yesAsk === undefined ||
+        noBid === undefined ||
+        noAsk === undefined
+      ) {
+        return null;
+      }
+      const eff = {
+        buyYes: Math.min(yesAsk, 1 - noBid),
+        buyNo: Math.min(noAsk, 1 - yesBid),
+        sellYes: Math.max(yesBid, 1 - noAsk),
+        sellNo: Math.max(noBid, 1 - yesAsk),
+      };
+      return {
+        longProfit: 1 - (eff.buyYes + eff.buyNo),
+        shortProfit: eff.sellYes + eff.sellNo - 1,
+        buyYes: eff.buyYes,
+        buyNo: eff.buyNo,
+        sellYes: eff.sellYes,
+        sellNo: eff.sellNo,
+        ageMs: Date.now(),
+      };
+    } catch (error) {
+      this.log(`  ⚠️ Re-vérification CLOB impossible: ${this.errStr(error)} — exécution poursuivie sur le flux temps réel`);
+      return null;
+    }
+  }
+
+  /**
+   * Bloque l'exécution si le carnet CLOB live ne confirme PLUS l'opportunité
+   * (preuve positive de péremption). Sur simple doute (re-vérification
+   * impossible), on n'interdit rien : c'est l'appelant qui logge.
+   */
+  private async confirmSignalStillValid(
+    type: 'long' | 'short',
+    expectedProfitRate: number
+  ): Promise<{ ok: boolean; reason?: string }> {
+    const live = await this.recheckLiveBooks();
+    if (!live) return { ok: true };
+    const liveProfit = type === 'long' ? live.longProfit : live.shortProfit;
+    const threshold = this.config.profitThreshold;
+    if (liveProfit < threshold) {
+      return {
+        ok: false,
+        reason:
+          `signal périmé: profit ${type} attendu ${(expectedProfitRate * 100).toFixed(3)}% ` +
+          `mais carnet CLOB live = ${(liveProfit * 100).toFixed(3)}% (< seuil ${(threshold * 100).toFixed(3)}%)`,
+      };
+    }
+    const drift = Math.abs(liveProfit - expectedProfitRate);
+    if (drift > 0.002) {
+      this.log(
+        `  ℹ️ Re-vérification CLOB: profit ${(liveProfit * 100).toFixed(3)}% vs signal ${(expectedProfitRate * 100).toFixed(3)}% (dérive ${(drift * 100).toFixed(3)} pts) — on exécute sur le live`
+      );
+    }
+    return { ok: true };
+  }
+
+  /** Meilleur bid CLOB live pour un token (ou undefined si indisponible). */
+  private async liveBestBid(tokenId: string): Promise<number | undefined> {
+    // 1) Carnet déjà en mémoire (flux temps réel de la session en cours).
+    const inMemory =
+      tokenId === this.market?.yesTokenId
+        ? this.orderbook.yesBids[0]?.price
+        : tokenId === this.market?.noTokenId
+          ? this.orderbook.noBids[0]?.price
+          : undefined;
+    if (inMemory !== undefined && this.orderbook.lastUpdate > 0) return inMemory;
+    // 2) Sinon, relecture directe du carnet CLOB.
+    try {
+      const cache = createUnifiedCache();
+      const gammaApi = new GammaApiClient(this.rateLimiter, cache);
+      const marketService = new MarketService(gammaApi, undefined, this.rateLimiter, cache);
+      const book = await marketService.getTokenOrderbook(tokenId);
+      return book.bids[0]?.price;
+    } catch (error) {
+      this.log(`  ⚠️ Prix de vente indisponible (carnet CLOB): ${this.errStr(error)}`);
+      return undefined;
+    }
+  }
+
   private async executeLongArb(opportunity: ArbitrageOpportunity): Promise<ArbitrageExecutionResult> {
     const startTime = Date.now();
     const txHashes: string[] = [];
@@ -1418,6 +1605,21 @@ export class ArbitrageService extends EventEmitter {
           profit: 0,
           txHashes,
           error: `Insufficient USDC.e: have ${this.balance.usdc.toFixed(2)}, need ${requiredUsdc.toFixed(2)}`,
+          executionTimeMs: Date.now() - startTime,
+        };
+      }
+
+      // ⚠️ AUDIT DONNÉES : re-vérification du carnet CLOB avant tout ordre.
+      const confirmation = await this.confirmSignalStillValid('long', opportunity.profitRate);
+      if (!confirmation.ok) {
+        this.log(`  ✋ Long Arb annulé — ${confirmation.reason}`);
+        return {
+          success: false,
+          type: 'long',
+          size,
+          profit: 0,
+          txHashes,
+          error: `Signal non confirmé par le carnet CLOB (${confirmation.reason})`,
           executionTimeMs: Date.now() - startTime,
         };
       }
@@ -1547,6 +1749,21 @@ export class ArbitrageService extends EventEmitter {
           profit: 0,
           txHashes,
           error: `Insufficient held tokens: have ${heldPairs.toFixed(2)}, need ${size.toFixed(2)}`,
+          executionTimeMs: Date.now() - startTime,
+        };
+      }
+
+      // ⚠️ AUDIT DONNÉES : re-vérification du carnet CLOB avant tout ordre.
+      const confirmation = await this.confirmSignalStillValid('short', opportunity.profitRate);
+      if (!confirmation.ok) {
+        this.log(`  ✋ Short Arb annulé — ${confirmation.reason}`);
+        return {
+          success: false,
+          type: 'short',
+          size,
+          profit: 0,
+          txHashes,
+          error: `Signal non confirmé par le carnet CLOB (${confirmation.reason})`,
           executionTimeMs: Date.now() - startTime,
         };
       }

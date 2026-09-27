@@ -95,28 +95,51 @@ export function loadHistory(): HistoryData {
   ensureDataDir();
   
   if (!existsSync(HISTORY_FILE)) {
-    return {
-      sessions: [],
-      totalSessions: 0,
-      totalProfit: 0,
-      totalTrades: 0,
-      overallWinRate: 0,
-    };
+    return emptyHistory();
   }
 
   try {
     const data = readFileSync(HISTORY_FILE, 'utf-8');
-    return JSON.parse(data) as HistoryData;
+    const parsed = JSON.parse(data) as Partial<HistoryData> | null;
+    // ⚠️ Le fichier peut être tronqué (kill pendant un write), édité à la main
+    // ou hérité d'un ancien format. Sans normalisation, `history.sessions.reduce`
+    // dans `addSession` lève et plus AUCUNE session n'est jamais enregistrée.
+    return normalizeHistory(parsed);
   } catch (error) {
     console.error('[SessionHistory] Error loading history:', error);
-    return {
-      sessions: [],
-      totalSessions: 0,
-      totalProfit: 0,
-      totalTrades: 0,
-      overallWinRate: 0,
-    };
+    return emptyHistory();
   }
+}
+
+/** Historique vide (objet neuf à chaque appel). */
+function emptyHistory(): HistoryData {
+  return {
+    sessions: [],
+    totalSessions: 0,
+    totalProfit: 0,
+    totalTrades: 0,
+    overallWinRate: 0,
+  };
+}
+
+/**
+ * FAIL-SAFE : force la forme attendue. Toute partie manquante ou d'un mauvais
+ * type est remplacée par une valeur neutre au lieu de propager `undefined`.
+ */
+function normalizeHistory(raw: Partial<HistoryData> | null): HistoryData {
+  if (!raw || typeof raw !== 'object') return emptyHistory();
+
+  const sessions = Array.isArray(raw.sessions) ? raw.sessions : [];
+  const totalTrades = sessions.reduce((sum, s) => sum + (Number(s?.totalTrades) || 0), 0);
+  const totalWins = sessions.reduce((sum, s) => sum + (Number(s?.wins) || 0), 0);
+
+  return {
+    sessions,
+    totalSessions: sessions.length,
+    totalProfit: sessions.reduce((sum, s) => sum + (Number(s?.totalPnL) || 0), 0),
+    totalTrades,
+    overallWinRate: totalTrades > 0 ? (totalWins / totalTrades) * 100 : 0,
+  };
 }
 
 /**
@@ -195,7 +218,11 @@ export function createSessionFromState(
   const wins = trades.filter(t => t.profit > 0).length;
   const losses = trades.filter(t => t.profit < 0).length;
   const winRate = trades.length > 0 ? (wins / trades.length) * 100 : 0;
-  const avgProfitPerTrade = trades.length > 0 ? state.totalPnL / trades.length : 0;
+  // Si le détail des trades n'est pas fourni, `trades.length` vaut 0 alors que
+  // `state.tradesExecuted` peut être > 0 → on retombe sur ce dernier pour que
+  // « P&L moyen par trade » ne soit pas silencieusement affiché à 0.
+  const tradeCount = trades.length > 0 ? trades.length : state.tradesExecuted;
+  const avgProfitPerTrade = tradeCount > 0 ? state.totalPnL / tradeCount : 0;
   const largestWin = trades.length > 0 ? Math.max(...trades.map(t => t.profit), 0) : 0;
   const largestLoss = trades.length > 0 ? Math.min(...trades.map(t => t.profit), 0) : 0;
   

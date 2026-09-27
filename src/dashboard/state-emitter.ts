@@ -21,7 +21,15 @@ class DashboardEmitter extends EventEmitter {
   private maxLogs = 500;
 
   updateState(newState: BotState): void {
-    this.state = { ...newState };
+    // Copie à un niveau des sous-objets mutables : sans cela, `updateStrategyStatus()`
+    // écrirait `this.state.dipArb.status` sur l'objet `state` VIVANT du bot
+    // (références partagées par la copie superficielle) — alias non voulu et
+    // impossible à déboguer.
+    this.state = {
+      ...newState,
+      dipArb: { ...newState.dipArb },
+      arbitrage: { ...newState.arbitrage },
+    };
     this.emit('state', this.state);
   }
 
@@ -77,7 +85,9 @@ class DashboardEmitter extends EventEmitter {
     return {
       state: this.state,
       config: this.config,
-      logs: this.logs,
+      // Copie : on n'expose jamais le tableau interne (un consommateur pourrait
+      // le muter et corrompre le buffer de logs).
+      logs: [...this.logs],
     };
   }
 

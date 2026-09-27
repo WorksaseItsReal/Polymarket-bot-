@@ -113,6 +113,19 @@ export class DipArbService extends EventEmitter {
   private lastHeartbeatAt = 0;
   private lastRotateLogAt = 0;
 
+  // ✅ AUDIT 2026-09-27 : throttle des logs de validation de signal.
+  // `detectLeg1Signal()` est ré-exécuté à CHAQUE tick de carnet (poller REST
+  // ~2 s + WS) et `validateSignalProfitability()` loguait 2 lignes identiques à
+  // chaque validation → saturation du log (mesuré : 3 867 × le couple
+  // « ✅ Leg1 signal validated » + « (Leg2 will check sumTarget…) », jusqu'à 2
+  // par seconde ; l'historique a atteint 11 475 lignes d'un seul message).
+  private lastValidationLogAt = 0;
+  private suppressedValidationLogs = 0;
+  private readonly VALIDATION_LOG_INTERVAL_MS = 30_000;
+
+  // ✅ AUDIT 2026-09-27 : flags « log unique » (évite 1 ligne / 5 s répétée).
+  private loggedMarketEndedNoRound = false;
+
   // Pending redemption state (for background redemption after market resolution)
   private pendingRedemptions: DipArbPendingRedemption[] = [];
   private redeemCheckInterval: ReturnType<typeof setInterval> | null = null;
@@ -266,7 +279,9 @@ export class DipArbService extends EventEmitter {
 
       return results;
     } catch (error) {
-      this.emit('error', error instanceof Error ? error : new Error(String(error)));
+      // ✅ FIX 2026-09-27 : log borné au lieu de `emit('error')` (aucun listener
+      // 'error' enregistré → « Unhandled 'error' event » tuerait le process).
+      this.log(`Market scan error: ${this.errStr(error)}`);
       return [];
     }
   }
@@ -324,6 +339,9 @@ export class DipArbService extends EventEmitter {
     this.isRunning = true;
     this.stats = createDipArbInitialStats();
     this.priceHistory = [];  // Clear price history for new market
+    // ✅ FIX 2026-09-27 : réarmer le log « marché fini » pour le nouveau marché.
+    this.loggedMarketEndedNoRound = false;
+    this.suppressedValidationLogs = 0;
 
     this.log(`Starting Dip Arb monitor for: ${market.name}`);
     this.log(`Condition ID: ${market.conditionId.slice(0, 20)}...`);
@@ -384,7 +402,11 @@ export class DipArbService extends EventEmitter {
             this.maybeLogOrderbookSummary();
           }
         },
-        onError: (error: Error) => this.emit('error', error),
+        onError: (error: Error) => {
+          // ✅ FIX 2026-09-27 : log borné au lieu de `emit('error')` (aucun
+          // listener → crash « Unhandled 'error' event »).
+          this.log(`Orderbook subscription error: ${this.errStr(error)}`);
+        },
       }
     );
 
@@ -637,6 +659,21 @@ export class DipArbService extends EventEmitter {
     try {
       this.isExecuting = true;  // Also set here for manual mode (when not called from handleSignal)
 
+      // ✅ FIX 2026-09-27 : garde-fou anti-division par zéro. `MIN_TRADE_VALUE /
+      // signal.targetPrice` donnait `Infinity` (puis un montant NaN) si le
+      // targetPrice était 0/NaN (signal construit hors validation, prix
+      // corrompu). On refuse d'exécuter un tel ordre.
+      if (!Number.isFinite(signal.targetPrice) || signal.targetPrice <= 0) {
+        this.log(`❌ Leg1 rejected: invalid targetPrice ${signal.targetPrice}`);
+        return {
+          success: false,
+          leg: 'leg1',
+          roundId: signal.roundId,
+          error: `Invalid target price (${signal.targetPrice})`,
+          executionTimeMs: Date.now() - startTime,
+        };
+      }
+
       // 计算拆分订单参数
       const splitCount = Math.max(1, this.config.splitOrders);
 
@@ -693,7 +730,7 @@ export class DipArbService extends EventEmitter {
           lastOrderId = result.orderId;
         } else {
           failedOrders++;
-          this.log(`Leg1 order ${i + 1}/${splitCount} failed: ${result.errorMsg}`);
+          this.log(`Leg1 order ${i + 1}/${splitCount} failed: ${this.errStr(result.errorMsg)}`);
         }
 
         // 订单间隔
@@ -720,7 +757,10 @@ export class DipArbService extends EventEmitter {
         this.lastExecutionTime = Date.now();
 
         // Detailed execution logging
-        const slippage = ((avgPrice - signal.currentPrice) / signal.currentPrice * 100);
+        // ✅ FIX 2026-09-27 : garde-fou anti-division par zéro (currentPrice).
+        const slippage = signal.currentPrice > 0
+          ? ((avgPrice - signal.currentPrice) / signal.currentPrice * 100)
+          : 0;
         const execTimeMs = Date.now() - startTime;
 
         this.log(`✅ Leg1 FILLED: ${signal.dipSide} x${totalSharesFilled.toFixed(1)} @ ${avgPrice.toFixed(4)}`);
@@ -756,7 +796,7 @@ export class DipArbService extends EventEmitter {
         success: false,
         leg: 'leg1',
         roundId: signal.roundId,
-        error: error instanceof Error ? error.message : String(error),
+        error: this.errStr(error),
         executionTimeMs: Date.now() - startTime,
       };
     } finally {
@@ -783,6 +823,18 @@ export class DipArbService extends EventEmitter {
 
     try {
       this.isExecuting = true;  // Also set here for manual mode (when not called from handleSignal)
+
+      // ✅ FIX 2026-09-27 : garde-fou anti-division par zéro (`1 / targetPrice`).
+      if (!Number.isFinite(signal.targetPrice) || signal.targetPrice <= 0) {
+        this.log(`❌ Leg2 rejected: invalid targetPrice ${signal.targetPrice}`);
+        return {
+          success: false,
+          leg: 'leg2',
+          roundId: signal.roundId,
+          error: `Invalid target price (${signal.targetPrice})`,
+          executionTimeMs: Date.now() - startTime,
+        };
+      }
 
       // 计算拆分订单参数
       const splitCount = Math.max(1, this.config.splitOrders);
@@ -823,7 +875,7 @@ export class DipArbService extends EventEmitter {
           lastOrderId = result.orderId;
         } else {
           failedOrders++;
-          this.log(`Leg2 order ${i + 1}/${splitCount} failed: ${result.errorMsg}`);
+          this.log(`Leg2 order ${i + 1}/${splitCount} failed: ${this.errStr(result.errorMsg)}`);
         }
 
         // 订单间隔
@@ -852,13 +904,28 @@ export class DipArbService extends EventEmitter {
 
         this.stats.leg2Filled++;
         this.stats.roundsSuccessful++;
+        // ✅ FIX 2026-09-27 (cohérence compteurs) : un round dont les DEUX legs
+        // sont remplis est bien un round TERMINÉ. AVANT, `roundsCompleted`
+        // n'était incrémenté que par les chemins « marché fini sans position »
+        // et « timeout Leg1 → expired » : un round réussi via Leg2 n'était donc
+        // jamais compté comme « completed » (sous-comptage permanent).
+        this.stats.roundsCompleted++;
         this.stats.totalProfit += this.currentRound.profit * totalSharesFilled;
         this.stats.totalSpent += actualTotalCost * totalSharesFilled;
+        // ✅ FIX 2026-09-27 : `avgProfitRate` restait figé à 0 alors qu'il fait
+        // partie de DipArbStats. On le tient à jour (profit réalisé / capital
+        // engagé), borné à 0 si aucune dépense enregistrée.
+        this.stats.avgProfitRate = this.stats.totalSpent > 0
+          ? this.stats.totalProfit / this.stats.totalSpent
+          : 0;
 
         this.lastExecutionTime = Date.now();
 
         // Detailed execution logging
-        const slippage = ((avgPrice - signal.currentPrice) / signal.currentPrice * 100);
+        // ✅ FIX 2026-09-27 : garde-fou anti-division par zéro (currentPrice).
+        const slippage = signal.currentPrice > 0
+          ? ((avgPrice - signal.currentPrice) / signal.currentPrice * 100)
+          : 0;
         const execTimeMs = Date.now() - startTime;
         const profitPerShare = this.currentRound.profit;
         const totalProfit = profitPerShare * totalSharesFilled;
@@ -918,7 +985,7 @@ export class DipArbService extends EventEmitter {
         success: false,
         leg: 'leg2',
         roundId: signal.roundId,
-        error: error instanceof Error ? error.message : String(error),
+        error: this.errStr(error),
         executionTimeMs: Date.now() - startTime,
       };
     } finally {
@@ -991,7 +1058,9 @@ export class DipArbService extends EventEmitter {
         executionTimeMs: Date.now() - startTime,
       };
     } catch (error) {
-      const errorMsg = error instanceof Error ? error.message : String(error);
+      // ✅ FIX 2026-09-27 (logs bornés) : `String(error)` non tronqué pouvait
+      // injecter des messages ethers de plusieurs Ko dans le log.
+      const errorMsg = this.errStr(error);
       this.log(`❌ Merge failed: ${errorMsg}`);
       return {
         success: false,
@@ -1032,8 +1101,12 @@ export class DipArbService extends EventEmitter {
     this.maybeLogOrderbookSummary();
 
     // Check if we need to start a new round (async but fire-and-forget to not block orderbook updates)
+    // ✅ FIX 2026-09-27 : NE PAS `emit('error')` ici. Aucun listener 'error'
+    // n'est enregistré par le bot (bot-with-dashboard.ts) → Node lève
+    // « Unhandled 'error' event » et TUE le process. On logue borné (même
+    // correctif que le flux REST, cf. startRestPriceFeed).
     this.checkAndStartNewRound().catch(err => {
-      this.emit('error', err instanceof Error ? err : new Error(String(err)));
+      this.log(`Round lifecycle error (orderbook): ${this.errStr(err)}`);
     });
 
     // Skip signal detection entirely if already executing (prevents duplicate detection logs)
@@ -1293,8 +1366,12 @@ export class DipArbService extends EventEmitter {
     if (!this.currentRound || this.currentRound.phase === 'completed' || this.currentRound.phase === 'expired') {
       // Check if market is still active
       if (new Date() >= this.market.endTime) {
-        // Always log market end (not just in debug mode)
-        if (!this.currentRound) {
+        // ✅ FIX 2026-09-27 (spam) : `checkAndStartNewRound` est appelé à chaque
+        // tick (REST 5 s + carnet 2 s). Ce `console.log` non gaté produisait une
+        // ligne toutes les ~5 s tant qu'aucun round n'existait. On ne logue
+        // qu'UNE fois par épisode « marché fini sans round ».
+        if (!this.currentRound && !this.loggedMarketEndedNoRound) {
+          this.loggedMarketEndedNoRound = true;
           console.log('[DipArb] Market has ended before round could start');
         }
         return;
@@ -1336,6 +1413,10 @@ export class DipArbService extends EventEmitter {
 
       // Reset signal state for new round
       this.leg1SignalEmitted = false;
+      // ✅ FIX 2026-09-27 : réarmer le throttle de validation par round (sinon
+      // le compteur de suppressions fuit d'un round à l'autre).
+      this.suppressedValidationLogs = 0;
+      this.lastValidationLogAt = 0;
 
       this.stats.roundsMonitored++;
 
@@ -1446,12 +1527,12 @@ export class DipArbService extends EventEmitter {
           executionTimeMs: Date.now() - startTime,
         };
       } else {
-        this.log(`❌ Leg1 exit failed: ${result.errorMsg}`);
+        this.log(`❌ Leg1 exit failed: ${this.errStr(result.errorMsg)}`);
         return {
           success: false,
           leg: 'exit',
           roundId: this.currentRound.roundId,
-          error: result.errorMsg,
+          error: this.errStr(result.errorMsg),
           executionTimeMs: Date.now() - startTime,
         };
       }
@@ -1461,7 +1542,7 @@ export class DipArbService extends EventEmitter {
         success: false,
         leg: 'exit',
         roundId: this.currentRound.roundId,
-        error: error instanceof Error ? error.message : String(error),
+        error: this.errStr(error),
         executionTimeMs: Date.now() - startTime,
       };
     }
@@ -1614,7 +1695,24 @@ export class DipArbService extends EventEmitter {
 
     const targetPrice = price * (1 + this.config.maxSlippage);
     const estimatedTotalCost = targetPrice + oppositeAsk;
-    const estimatedProfitRate = calculateDipArbProfitRate(estimatedTotalCost);
+
+    // ✅ FIX 2026-09-27 (SOURCE du bug « estimatedProfitRate = 0 ») :
+    // AVANT, `estimatedProfitRate = calculateDipArbProfitRate(estimatedTotalCost)`
+    // renvoyait **0** dès que `estimatedTotalCost >= 1` (aucun arbitrage
+    // verrouillable à l'instant t — c'est le cas NORMAL d'un Leg1, qui attend
+    // que l'autre côté baisse). Le signal était quand même émis avec `0`, le
+    // consommateur en faisait `stake * (0 - 1)` = perte totale simulée par
+    // signal (2 514 occurrences mesurées). Désormais le taux est soit un VRAI
+    // taux d'arbitrage 2-leg calculé (> 0), soit le rendement intrinsèque du
+    // Leg1 (gain si ce côté gagne, `(1-p)/p`, également > 0) ; si aucun des
+    // deux n'est calculable, on N'ÉMET PAS le signal.
+    const estimatedProfitRate = this.leg1ProfitRate(targetPrice, oppositeAsk);
+    if (estimatedProfitRate === null) {
+      if (this.config.debug) {
+        this.logThrottled(`❌ Leg1 signal rejected: no usable profit rate (target ${targetPrice.toFixed(4)}, opposite ${oppositeAsk.toFixed(4)})`);
+      }
+      return null;
+    }
 
     // openPrice: 对于 dip/surge 信号，使用滑动窗口参考价格；否则使用轮次开盘价
     const openPrice = referencePrice ??
@@ -1672,7 +1770,18 @@ export class DipArbService extends EventEmitter {
       return null;
     }
 
+    // ✅ FIX 2026-09-27 : `calculateDipArbProfitRate` renvoie 0 dès que le coût
+    // total >= 1 (et pourrait être NaN/∞ sur des entrées corrompues). Un signal
+    // avec un taux nul ou non fini n'est PAS exploitable → on ne l'émet pas.
+    // NB : `Number.isFinite(0)` est VRAI, le test `> 0` est donc indispensable.
     const expectedProfitRate = calculateDipArbProfitRate(totalCost);
+    if (!Number.isFinite(totalCost) || totalCost <= 0 ||
+        !Number.isFinite(expectedProfitRate) || expectedProfitRate <= 0) {
+      if (this.config.debug) {
+        this.logThrottled(`❌ Leg2 signal rejected: unusable profit rate (totalCost ${totalCost.toFixed(4)}, rate ${expectedProfitRate})`);
+      }
+      return null;
+    }
 
     if (this.config.debug) {
       this.log(`✅ Leg2 signal found! ${hedgeSide} @ ${currentPrice.toFixed(4)}, totalCost ${totalCost.toFixed(4)}, profit ${(expectedProfitRate * 100).toFixed(2)}%`);
@@ -1704,7 +1813,18 @@ export class DipArbService extends EventEmitter {
     // 只做基本验证：确保价格合理
     if (signal.currentPrice <= 0 || signal.currentPrice >= 1) {
       if (this.config.debug) {
-        this.log(`❌ Signal rejected: invalid price ${signal.currentPrice.toFixed(4)}`);
+        this.logThrottled(`❌ Signal rejected: invalid price ${signal.currentPrice.toFixed(4)}`);
+      }
+      return false;
+    }
+
+    // ✅ FIX 2026-09-27 : le taux de profit DOIT être exploitable. On ne valide
+    // jamais un signal dont le taux est 0 / NaN / ∞ / non calculé — c'est
+    // exactement le défaut qui faisait enregistrer une perte totale par signal
+    // chez le consommateur (`stake * (0 - 1)`).
+    if (!Number.isFinite(signal.estimatedProfitRate) || signal.estimatedProfitRate <= 0) {
+      if (this.config.debug) {
+        this.logThrottled(`❌ Signal rejected: non-exploitable profit rate (${signal.estimatedProfitRate})`);
       }
       return false;
     }
@@ -1712,14 +1832,30 @@ export class DipArbService extends EventEmitter {
     // 确保跌幅达到阈值（这个已经在 detectLeg1Signal 中检查过，这里再确认一下）
     if (signal.dropPercent < this.config.dipThreshold) {
       if (this.config.debug) {
-        this.log(`❌ Signal rejected: drop ${(signal.dropPercent * 100).toFixed(1)}% < threshold ${(this.config.dipThreshold * 100).toFixed(1)}%`);
+        this.logThrottled(`❌ Signal rejected: drop ${(signal.dropPercent * 100).toFixed(1)}% < threshold ${(this.config.dipThreshold * 100).toFixed(1)}%`);
       }
       return false;
     }
 
     if (this.config.debug) {
-      this.log(`✅ Leg1 signal validated: ${signal.dipSide} @ ${signal.currentPrice.toFixed(4)}, drop ${(signal.dropPercent * 100).toFixed(1)}%`);
-      this.log(`   (Leg2 will check sumTarget when opposite price drops)`);
+      // ✅ FIX 2026-09-27 (spam de log) : cette validation se produit à CHAQUE
+      // tick de carnet (~2 s). On ne logue plus qu'une fois toutes les
+      // VALIDATION_LOG_INTERVAL_MS, et l'indice « Leg2 will check sumTarget »
+      // n'est émis qu'UNE fois par round — le log avait atteint 11 475 lignes
+      // d'un même message en quelques heures.
+      const now = Date.now();
+      if (now - this.lastValidationLogAt >= this.VALIDATION_LOG_INTERVAL_MS) {
+        this.lastValidationLogAt = now;
+        const suppressed = this.suppressedValidationLogs;
+        this.suppressedValidationLogs = 0;
+        this.log(`✅ Leg1 signal validated: ${signal.dipSide} @ ${signal.currentPrice.toFixed(4)}, drop ${(signal.dropPercent * 100).toFixed(1)}%${suppressed > 0 ? ` (${suppressed} validations non loguées depuis la dernière, throttle ${this.VALIDATION_LOG_INTERVAL_MS / 1000}s)` : ''}`);
+        if (!this.leg1SignalEmitted) {
+          this.leg1SignalEmitted = true;
+          this.log(`   (Leg2 will check sumTarget when opposite price drops)`);
+        }
+      } else {
+        this.suppressedValidationLogs++;
+      }
     }
 
     return true;
@@ -2184,9 +2320,26 @@ export class DipArbService extends EventEmitter {
         this.emit('settled', settleResult);
         this.log(`Redemption successful: ${pending.market.slug} | Amount: $${settleResult.amountReceived?.toFixed(2) || 'N/A'}`);
 
-        // Update stats
-        if (settleResult.amountReceived) {
-          this.stats.totalProfit += settleResult.amountReceived;
+        // ✅ FIX 2026-09-27 (compteur « Total profit ») : AVANT, on ajoutait le
+        // montant BRUT reçu (`amountReceived`) au profit — c'est-à-dire le
+        // remboursement du principal COMPRIS. Chaque redemption gonflait donc
+        // `totalProfit` du capital engagé, rendant le « Total profit » faux.
+        // On n'ajoute désormais que le RÉSULTAT NET (reçu − coût des jambes
+        // détenues), et uniquement si l'on connaît la base de coût.
+        if (settleResult.amountReceived !== undefined && Number.isFinite(settleResult.amountReceived)) {
+          const r = pending.round;
+          const investedCost =
+            (r?.leg1 ? r.leg1.price * r.leg1.shares : 0) +
+            (r?.leg2 ? r.leg2.price * r.leg2.shares : 0);
+          if (investedCost > 0) {
+            const net = settleResult.amountReceived - investedCost;
+            this.stats.totalProfit += net;
+            this.log(`   Net résultat redemption: $${net.toFixed(2)} (reçu $${settleResult.amountReceived.toFixed(2)} − coût $${investedCost.toFixed(2)})`);
+          } else {
+            // Base de coût inconnue (position de récupération) : on ne touche pas
+            // au profit pour ne pas le fausser.
+            this.log(`   Base de coût inconnue — montant $${settleResult.amountReceived.toFixed(2)} NON compté dans « Total profit »`);
+          }
         }
       } catch (error) {
         this.log(`Redemption error for ${pending.market.slug}: ${this.errStr(error)}`);
@@ -2199,7 +2352,7 @@ export class DipArbService extends EventEmitter {
             success: false,
             strategy: 'redeem',
             market: pending.market,
-            error: error instanceof Error ? error.message : String(error),
+            error: this.errStr(error),
             executionTimeMs: 0,
           } as DipArbSettleResult);
         }
@@ -2524,8 +2677,15 @@ export class DipArbService extends EventEmitter {
     this.log(`   ${formatTime(last.timestamp)}: UP=${last.upAsk.toFixed(4)} DOWN=${last.downAsk.toFixed(4)}`);
 
     // Calculate price changes
-    const upChange = ((last.upAsk - first.upAsk) / first.upAsk * 100).toFixed(2);
-    const downChange = ((last.downAsk - first.downAsk) / first.downAsk * 100).toFixed(2);
+    // ✅ FIX 2026-09-27 : garde-fou anti-division par zéro. `updateOrderbookBuffer`
+    // peut enregistrer `upAsk`/`downAsk` à 0 (carnet vide) → `0/0` = NaN
+    // (loguait « Change: UP NaN% »).
+    const upChange = first.upAsk > 0
+      ? ((last.upAsk - first.upAsk) / first.upAsk * 100).toFixed(2)
+      : 'n/a';
+    const downChange = first.downAsk > 0
+      ? ((last.downAsk - first.downAsk) / first.downAsk * 100).toFixed(2)
+      : 'n/a';
     this.log(`   Change: UP ${upChange}% | DOWN ${downChange}%`);
   }
 
@@ -2544,10 +2704,57 @@ export class DipArbService extends EventEmitter {
     return raw.slice(0, Math.max(0, maxLen - suffix.length)) + suffix;
   }
 
+  /**
+   * ✅ FIX 2026-09-27 : calcule un taux de profit Leg1 TOUJOURS exploitable.
+   *
+   * Sémantique (cf. docs/rebuild/diparb/AUDIT.md) :
+   *  1. Si un arbitrage 2-leg est déjà verrouillable au prix opposé courant
+   *     (`estimatedTotalCost < 1`), on renvoie le VRAI taux
+   *     `(1 - coût) / coût` (> 0).
+   *  2. Sinon — cas NORMAL d'un Leg1 « acheter le creux » qui attend que
+   *     l'autre côté baisse — on renvoie le rendement intrinsèque du seul Leg1
+   *     `(1 - targetPrice) / targetPrice` (gain si ce côté gagne), toujours
+   *     > 0 pour `0 < targetPrice < 1`.
+   *  3. Si aucun des deux n'est fini et strictement positif (prix corrompu,
+   *     targetPrice >= 1, NaN…), on renvoie `null` → le signal N'EST PAS émis.
+   *
+   * ⚠️ Piège : `Number.isFinite(0)` vaut `true`. Le test `> 0` est donc
+   * obligatoire, sinon on ré-émettrait exactement le `0` fautif.
+   */
+  private leg1ProfitRate(targetPrice: number, oppositeAsk: number): number | null {
+    if (!Number.isFinite(targetPrice) || !Number.isFinite(oppositeAsk)) return null;
+
+    const totalCost = targetPrice + oppositeAsk;
+    const arbRate = calculateDipArbProfitRate(totalCost); // 0 si totalCost >= 1 (ou <= 0)
+    if (Number.isFinite(arbRate) && arbRate > 0) return arbRate;
+
+    if (targetPrice > 0 && targetPrice < 1) {
+      const legRate = (1 - targetPrice) / targetPrice;
+      if (Number.isFinite(legRate) && legRate > 0) return legRate;
+    }
+
+    return null;
+  }
+
+  /**
+   * ✅ FIX 2026-09-27 (anti-saturation du log) : `log()` limité à une ligne par
+   * `VALIDATION_LOG_INTERVAL_MS`. Utilisé pour les messages ré-émis à chaque
+   * tick de carnet (validations/rejets de signaux). Les messages importants
+   * (exécutions, erreurs) continuent d'utiliser `log()` sans throttle.
+   */
+  private logThrottled(message: string): void {
+    const now = Date.now();
+    if (now - this.lastValidationLogAt < this.VALIDATION_LOG_INTERVAL_MS) {
+      this.suppressedValidationLogs++;
+      return;
+    }
+    this.lastValidationLogAt = now;
+    this.log(message);
+  }
+
   private log(message: string): void {
     const shouldLog = this.config.debug || message.startsWith('Starting') || message.startsWith('Stopped');
     if (!shouldLog) return;
-
     const formatted = `[DipArb] ${message}`;
 
     // Use custom log handler if provided

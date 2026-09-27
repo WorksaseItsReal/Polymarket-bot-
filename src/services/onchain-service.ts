@@ -35,6 +35,9 @@
 
 import { ethers } from 'ethers';
 
+// GARDES DE SÉCURITÉ DRY_RUN + fournisseur RPC résilient (définis dans ctf-client.ts)
+import { assertWritesAllowed, assertValidPrivateKeyShape, createPolygonProvider } from '../clients/ctf-client.js';
+
 // Import underlying services
 import {
   CTFClient,
@@ -147,7 +150,8 @@ export class OnchainService {
     const rpcUrl = config.rpcUrl || process.env.POLYGON_RPC_URL || 'https://polygon.drpc.org';
 
     // Create shared provider and wallet
-    this.provider = new ethers.providers.JsonRpcProvider(rpcUrl);
+    this.provider = createPolygonProvider(rpcUrl);
+    assertValidPrivateKeyShape(config.privateKey);
     this.wallet = new ethers.Wallet(config.privateKey, this.provider);
 
     // Initialize CTFClient with config
@@ -226,6 +230,9 @@ export class OnchainService {
    * @returns Results of all approval transactions
    */
   async approveAll(): Promise<ApprovalsResult> {
+    // CHEMIN NON GARDÉ AVANT AUDIT: AuthorizationService (hors périmètre) n'a
+    // aucune garde DRY_RUN et envoie de vraies transactions approve().
+    assertWritesAllowed('OnchainService.approveAll (approbations ERC20/ERC1155)');
     return this.authService.approveAll();
   }
 
@@ -236,6 +243,7 @@ export class OnchainService {
     spenderAddress: string,
     amount: ethers.BigNumber = ethers.constants.MaxUint256
   ): Promise<ApprovalTxResult> {
+    assertWritesAllowed('OnchainService.approveUsdc (approve ERC20)');
     return this.authService.approveUsdc(spenderAddress, amount);
   }
 
@@ -246,6 +254,7 @@ export class OnchainService {
     operatorAddress: string,
     approved: boolean = true
   ): Promise<ApprovalTxResult> {
+    assertWritesAllowed('OnchainService.setErc1155Approval (setApprovalForAll)');
     return this.authService.setErc1155Approval(operatorAddress, approved);
   }
 

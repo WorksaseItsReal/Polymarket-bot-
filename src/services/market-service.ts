@@ -351,6 +351,7 @@ export class MarketService {
           price: parseFloat(l.price),
           size: parseFloat(l.size),
         }))
+        .filter((l: { price: number; size: number }) => Number.isFinite(l.price) && Number.isFinite(l.size))
         .sort((a, b) => b.price - a.price);
 
       const asks = (book.asks || [])
@@ -358,7 +359,21 @@ export class MarketService {
           price: parseFloat(l.price),
           size: parseFloat(l.size),
         }))
+        .filter((l: { price: number; size: number }) => Number.isFinite(l.price) && Number.isFinite(l.size))
         .sort((a, b) => a.price - b.price);
+
+      // ⚠️ FIX 2026-09-27 : un carnet VIDE (ni bids ni asks) mais avec un
+      // `asset_id` valide passait le garde-fou ci-dessus. En aval,
+      // `processOrderbooks` le traduisait en `bid=0 / ask=1` — deux nombres qui
+      // ressemblent à des prix et qui fabriquent des « opportunités »
+      // d'arbitrage (ou un ~50/50 fantôme). Un carnet sans aucune côté est une
+      // ABSENCE de donnée, pas une mesure : on la remonte comme telle.
+      if (bids.length === 0 && asks.length === 0) {
+        throw new PolymarketError(
+          ErrorCode.MARKET_NOT_FOUND,
+          `Carnet vide (aucun bid ni ask) pour le token ${tokenId.slice(0, 18)}… — round probablement terminé`
+        );
+      }
 
       return {
         tokenId: book.asset_id,
@@ -388,11 +403,25 @@ export class MarketService {
       const result = new Map<string, Orderbook>();
 
       for (const book of books) {
+        // ⚠️ FIX 2026-09-27 : cette variante n'avait PAS le garde-fou de
+        // `getTokenOrderbook`. Le clob-client ne `throw` pas sur erreur HTTP : il
+        // renvoie `{ error, status }`. Sans ce test, un carnet en erreur était
+        // inséré dans la Map sous la clé `undefined` (asset_id absent) avec
+        // bids/asks vides — donc une ABSENCE de donnée devenait un carnet valide.
+        const b = book as OrderBookSummary & { error?: unknown; status?: number };
+        if (b?.status === 404 || b?.error || !b?.asset_id) {
+          throw new PolymarketError(
+            ErrorCode.MARKET_NOT_FOUND,
+            `Orderbook indisponible (token id périmé ou inconnu) dans getOrderBooks: ${String(b?.error ?? b?.status)}`
+          );
+        }
+
         const bids = (book.bids || [])
           .map((l: { price: string; size: string }) => ({
             price: parseFloat(l.price),
             size: parseFloat(l.size),
           }))
+          .filter((l: { price: number; size: number }) => Number.isFinite(l.price) && Number.isFinite(l.size))
           .sort((a, b) => b.price - a.price);
 
         const asks = (book.asks || [])
@@ -400,7 +429,15 @@ export class MarketService {
             price: parseFloat(l.price),
             size: parseFloat(l.size),
           }))
+          .filter((l: { price: number; size: number }) => Number.isFinite(l.price) && Number.isFinite(l.size))
           .sort((a, b) => a.price - b.price);
+
+        if (bids.length === 0 && asks.length === 0) {
+          throw new PolymarketError(
+            ErrorCode.MARKET_NOT_FOUND,
+            `Carnet vide (aucun bid ni ask) pour le token ${String(b.asset_id).slice(0, 18)}…`
+          );
+        }
 
         result.set(book.asset_id, {
           tokenId: book.asset_id,
@@ -547,7 +584,16 @@ export class MarketService {
    * Get market by slug or condition ID
    */
   async getMarket(identifier: string): Promise<UnifiedMarket> {
-    const isConditionId = identifier.startsWith('0x') || /^\d+$/.test(identifier);
+    // ⚠️ AUDIT DONNÉES 2026-09-27 (cohérence d'identifiants) : l'ancien test
+    // `identifier.startsWith('0x') || /^\d+$/.test(identifier)` envoyait TOUTE
+    // chaîne purement numérique dans le chemin « conditionId ».
+    // Or les identifiants numériques de Polymarket sont des token ids ERC-1155
+    // (ex. « 36610068578171126826218195987528155537558897823906618083367565625241527059596 »)
+    // ou des ids internes Gamma : mélangés avec un conditionId, ils produisent une
+    // requête silencieusement vide (CLOB 404 + `condition_ids` sans résultat).
+    // Un conditionId Polymarket est un hash 0x + 64 hexa : c'est le seul format
+    // désormais routé vers le chemin conditionId ; tout le reste est un slug.
+    const isConditionId = /^0x[0-9a-fA-F]{64}$/.test(identifier);
 
     if (isConditionId) {
       return this.getMarketByConditionId(identifier);
@@ -567,7 +613,7 @@ export class MarketService {
 
     try {
       const clobMarket = await this.getClobMarket(gammaMarket.conditionId);
-      if (clobMarket) {
+      if (clobMarket && gammaMarket.conditionId) {
         return this.mergeMarkets(gammaMarket, clobMarket);
       }
       return this.fromGammaMarket(gammaMarket);
@@ -580,6 +626,7 @@ export class MarketService {
     // Try to get data from both sources for best accuracy
     let clobMarket: Market | null = null;
     let gammaMarket: GammaMarket | null = null;
+    const wanted = conditionId.toLowerCase();
 
     // Try CLOB first (authoritative for trading data)
     try {
@@ -592,6 +639,15 @@ export class MarketService {
     if (this.gammaApi) {
       try {
         gammaMarket = await this.gammaApi.getMarketByConditionId(conditionId);
+        // ⚠️ FIX 2026-09-27 : on ne fait JAMAIS confiance au résultat sans
+        // vérifier qu'il porte bien le conditionId demandé. Avant la correction
+        // du filtre Gamma (`condition_id` → `condition_ids`), cet appel
+        // renvoyait un marché ÉTRANGER (mesuré : « xi-jinping-out-before-2027 »
+        // pour un BTC-updown-5m). Ces métadonnées fantômes alimentaient ensuite
+        // slug/volumes/prix de repli.
+        if (gammaMarket && gammaMarket.conditionId.toLowerCase() !== wanted) {
+          gammaMarket = null;
+        }
       } catch {
         // Gamma failed
       }
@@ -1140,6 +1196,48 @@ export class MarketService {
     return this.calculateRealtimeSpread(orderbook);
   }
 
+  /**
+   * Prix des deux issues lus depuis le CARNET CLOB (et non depuis les champs
+   * périmés de Gamma ou le `price` figé de `/markets`).
+   *
+   * ⚠️ AUDIT DONNÉES 2026-09-27 — pourquoi cette méthode existe :
+   * `UnifiedMarket.tokens[].price` provient de `CLOB /markets/{conditionId}` et
+   * vaut typiquement ~0.505/0.495 (valeur d'amorçage) pendant toute la vie d'un
+   * round, tandis que `gamma.outcomePrices` retarde de ~40-75 s. MESURÉ sur un
+   * round 5 min en cours : `tokens[].price = 0.505/0.495`, `gamma = 0.605/0.395`,
+   * carnet réel = `0.03/0.04` pour l'issue Up. Toute UI/récap/rapport qui affiche
+   * un prix doit passer par ici (ou par `getProcessedOrderbook`).
+   *
+   * @returns Les deux meilleurs bid/ask réels + le mid, ou `null` si le carnet
+   * n'est pas exploitable (round terminé, carnet incomplet) — jamais un 0.5.
+   */
+  async getLiveMarkPrices(conditionId: string): Promise<
+    Array<{ tokenId: string; outcome: string; bid?: number; ask?: number; mid?: number }> | null
+  > {
+    try {
+      const market = await this.getClobMarket(conditionId);
+      if (!market?.tokens?.length) return null;
+      const books = await Promise.all(
+        market.tokens.map((t) => this.getTokenOrderbook(t.tokenId))
+      );
+      return market.tokens.map((t, i) => {
+        const bid = books[i].bids[0]?.price;
+        const ask = books[i].asks[0]?.price;
+        return {
+          tokenId: t.tokenId,
+          outcome: t.outcome,
+          bid,
+          ask,
+          mid: bid !== undefined && ask !== undefined ? (bid + ask) / 2 : undefined,
+        };
+      });
+    } catch {
+      // Carnet indisponible (round terminé, token périmé, réseau) : on renvoie
+      // explicitement « pas de prix » plutôt qu'une valeur de remplissage.
+      return null;
+    }
+  }
+
   // ===== Orderbook Analysis =====
 
   /**
@@ -1487,25 +1585,55 @@ export class MarketService {
     yesTokenId?: string,
     noTokenId?: string
   ): ProcessedOrderbook {
-    const yesBestBid = yesBook.bids[0]?.price || 0;
-    const yesBestAsk = yesBook.asks[0]?.price || 1;
-    const noBestBid = noBook.bids[0]?.price || 0;
-    const noBestAsk = noBook.asks[0]?.price || 1;
+    // ⚠️ FIX 2026-09-27 : l'ancien code faisait `?.price || 0` et `?.price || 1`.
+    // Un côté absent devenait donc un PRIX (bid=0 / ask=1) qui traversait tout le
+    // calcul d'arbitrage (`askSum`, `imbalanceRatio`, `effectiveSellYes = max(bid,
+    // 1-noAsk)`, …) et pouvait fabriquer une opportunité inexistante. Un côté
+    // manquant est une absence de donnée : on refuse de calculer sur un carnet
+    // incomplet plutôt que d'inventer 0 ou 1.
+    const missing: string[] = [];
+    const yesBestBid = yesBook.bids[0]?.price;
+    const yesBestAsk = yesBook.asks[0]?.price;
+    const noBestBid = noBook.bids[0]?.price;
+    const noBestAsk = noBook.asks[0]?.price;
+    if (yesBestBid === undefined) missing.push('yes.bid');
+    if (yesBestAsk === undefined) missing.push('yes.ask');
+    if (noBestBid === undefined) missing.push('no.bid');
+    if (noBestAsk === undefined) missing.push('no.ask');
+
+    if (
+      missing.length > 0 ||
+      !Number.isFinite(yesBestBid) ||
+      !Number.isFinite(yesBestAsk) ||
+      !Number.isFinite(noBestBid) ||
+      !Number.isFinite(noBestAsk)
+    ) {
+      throw new PolymarketError(
+        ErrorCode.INVALID_RESPONSE,
+        `Carnet incomplet (${missing.join(', ') || 'prix non numérique'}) — refus de calculer l'arbitrage sur des niveaux fabriqués (0/1)`
+      );
+    }
+
+    // À partir d'ici les 4 niveaux sont des nombres finis (vérifié ci-dessus).
+    const yesBid = yesBestBid as number;
+    const yesAsk = yesBestAsk as number;
+    const noBid = noBestBid as number;
+    const noAsk = noBestAsk as number;
 
     const yesBidDepth = yesBook.bids.reduce((sum, l) => sum + l.price * l.size, 0);
     const yesAskDepth = yesBook.asks.reduce((sum, l) => sum + l.price * l.size, 0);
     const noBidDepth = noBook.bids.reduce((sum, l) => sum + l.price * l.size, 0);
     const noAskDepth = noBook.asks.reduce((sum, l) => sum + l.price * l.size, 0);
 
-    const askSum = yesBestAsk + noBestAsk;
-    const bidSum = yesBestBid + noBestBid;
+    const askSum = yesAsk + noAsk;
+    const bidSum = yesBid + noBid;
 
     // Effective prices (accounting for mirroring)
     const effectivePrices: EffectivePrices = {
-      effectiveBuyYes: Math.min(yesBestAsk, 1 - noBestBid),
-      effectiveBuyNo: Math.min(noBestAsk, 1 - yesBestBid),
-      effectiveSellYes: Math.max(yesBestBid, 1 - noBestAsk),
-      effectiveSellNo: Math.max(noBestBid, 1 - yesBestAsk),
+      effectiveBuyYes: Math.min(yesAsk, 1 - noBid),
+      effectiveBuyNo: Math.min(noAsk, 1 - yesBid),
+      effectiveSellYes: Math.max(yesBid, 1 - noAsk),
+      effectiveSellNo: Math.max(noBid, 1 - yesAsk),
     };
 
     const effectiveLongCost = effectivePrices.effectiveBuyYes + effectivePrices.effectiveBuyNo;
@@ -1514,12 +1642,12 @@ export class MarketService {
     const longArbProfit = 1 - effectiveLongCost;
     const shortArbProfit = effectiveShortRevenue - 1;
 
-    const yesSpread = yesBestAsk - yesBestBid;
+    const yesSpread = yesAsk - yesBid;
 
     return {
       yes: {
-        bid: yesBestBid,
-        ask: yesBestAsk,
+        bid: yesBid,
+        ask: yesAsk,
         bidSize: yesBook.bids[0]?.size || 0,
         askSize: yesBook.asks[0]?.size || 0,
         bidDepth: yesBidDepth,
@@ -1528,13 +1656,13 @@ export class MarketService {
         tokenId: yesTokenId,
       },
       no: {
-        bid: noBestBid,
-        ask: noBestAsk,
+        bid: noBid,
+        ask: noAsk,
         bidSize: noBook.bids[0]?.size || 0,
         askSize: noBook.asks[0]?.size || 0,
         bidDepth: noBidDepth,
         askDepth: noAskDepth,
-        spread: noBestAsk - noBestBid,
+        spread: noAsk - noBid,
         tokenId: noTokenId,
       },
       summary: {
@@ -1554,13 +1682,43 @@ export class MarketService {
   }
 
   private mergeMarkets(gamma: GammaMarket, clob: Market): UnifiedMarket {
-    // Build tokens array from CLOB data, falling back to Gamma prices
-    const tokens: UnifiedMarketToken[] = clob.tokens.map((t, index) => ({
-      tokenId: t.tokenId,
-      outcome: t.outcome,
-      price: t.price || gamma.outcomePrices[index] || 0.5,
-      winner: t.winner,
-    }));
+    // ⚠️ FIX 2026-09-27 (cohérence d'identifiants) : on refuse de fusionner deux
+    // sources qui ne désignent pas LE MÊME marché. Sans ce test, `mergeMarkets`
+    // pouvait coller le carnet d'un marché sur les métadonnées d'un AUTRE (c'est
+    // exactement ce que produisait le bug `condition_id` de Gamma : le
+    // conditionId d'un BTC-updown-5m renvoyait « xi-jinping-out-before-2027 »,
+    // donc slug/volume/question étrangers). Voir gamma-api.getMarkets().
+    if (
+      gamma.conditionId &&
+      clob.conditionId &&
+      gamma.conditionId.toLowerCase() !== clob.conditionId.toLowerCase()
+    ) {
+      throw new PolymarketError(
+        ErrorCode.INVALID_RESPONSE,
+        `Incohérence d'identifiants: Gamma conditionId=${gamma.conditionId} ≠ CLOB conditionId=${clob.conditionId} — fusion refusée`
+      );
+    }
+
+    // Build tokens array from CLOB data. Plus de repli inventé `|| 0.5` : si
+    // aucune source ne fournit de prix, on le dit (INVALID_RESPONSE) au lieu de
+    // fabriquer une probabilité de 50 %.
+    const tokens: UnifiedMarketToken[] = clob.tokens.map((t, index) => {
+      const clobPrice = Number.isFinite(t.price) ? t.price : undefined;
+      const gammaPrice = gamma.outcomePrices[index];
+      const price = clobPrice ?? (Number.isFinite(gammaPrice) ? gammaPrice : undefined);
+      if (price === undefined) {
+        throw new PolymarketError(
+          ErrorCode.INVALID_RESPONSE,
+          `Aucun prix exploitable pour l'issue « ${t.outcome} » (CLOB et Gamma muets) — refus de fabriquer 0.5`
+        );
+      }
+      return {
+        tokenId: t.tokenId,
+        outcome: t.outcome,
+        price,
+        winner: t.winner,
+      };
+    });
 
     return {
       conditionId: clob.conditionId,
@@ -1577,7 +1735,9 @@ export class MarketService {
       active: clob.active,
       closed: clob.closed,
       acceptingOrders: clob.acceptingOrders,
-      endDate: clob.endDateIso ? new Date(clob.endDateIso) : new Date(),
+      // Pas de `new Date()` de secours : une date de fin inventée (« maintenant »)
+      // fait passer un marché déjà terminé pour un marché en cours.
+      endDate: clob.endDateIso ? new Date(clob.endDateIso) : new Date(0),
       source: 'merged',
     };
   }
@@ -1586,9 +1746,27 @@ export class MarketService {
     // Create tokens from Gamma outcomes - use actual outcome names from gamma data
     // This supports Yes/No, Up/Down, Team1/Team2, Heads/Tails, etc.
     const outcomes = gamma.outcomes || ['Yes', 'No'];
+
+    // ⚠️ FIX 2026-09-27 : `gamma.outcomePrices[i] || 0.5` transformait une donnée
+    // ABSENTE (ou un 0 légitime) en une mesure de 50 %. On refuse désormais de
+    // fabriquer un marché « 50/50 » à partir d'une réponse incomplète. De plus,
+    // ces prix Gamma sont retardés/figés (cf. gamma-api.normalizeMarket) : ce
+    // chemin reste une métadonnée de dernier recours, jamais une source de
+    // décision (les décisions passent par getProcessedOrderbook → carnet CLOB).
+    const priceFor = (index: number): number => {
+      const p = gamma.outcomePrices[index];
+      if (!Number.isFinite(p)) {
+        throw new PolymarketError(
+          ErrorCode.INVALID_RESPONSE,
+          `Gamma n'a fourni aucun prix pour l'issue « ${outcomes[index] ?? index} » (slug=${gamma.slug || gamma.conditionId || '?'}) — refus de fabriquer 0.5. Utiliser le carnet CLOB.`
+        );
+      }
+      return p;
+    };
+
     const tokens: UnifiedMarketToken[] = [
-      { tokenId: '', outcome: outcomes[0], price: gamma.outcomePrices[0] || 0.5 },
-      { tokenId: '', outcome: outcomes[1], price: gamma.outcomePrices[1] || 0.5 },
+      { tokenId: '', outcome: outcomes[0], price: priceFor(0) },
+      { tokenId: '', outcome: outcomes[1], price: priceFor(1) },
     ];
 
     return {
@@ -1606,7 +1784,9 @@ export class MarketService {
       active: gamma.active,
       closed: gamma.closed,
       acceptingOrders: !gamma.closed,
-      endDate: gamma.endDate,
+      // `endDate` Gamma n'est pas fiable et peut être absent (→ epoch) : on ne
+      // prétend plus que le marché se termine « maintenant ».
+      endDate: gamma.endDate ?? new Date(0),
       source: 'gamma',
     };
   }
@@ -1633,7 +1813,9 @@ export class MarketService {
       active: clob.active,
       closed: clob.closed,
       acceptingOrders: clob.acceptingOrders,
-      endDate: clob.endDateIso ? new Date(clob.endDateIso) : new Date(),
+      // Pas de `new Date()` de secours : une date de fin inventée (« maintenant »)
+      // fait passer un marché déjà terminé pour un marché en cours.
+      endDate: clob.endDateIso ? new Date(clob.endDateIso) : new Date(0),
       source: 'clob',
     };
   }

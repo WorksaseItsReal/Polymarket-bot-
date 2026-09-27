@@ -488,6 +488,7 @@ export class BridgeClient {
 // ===== Deposit Execution =====
 
 import { ethers } from 'ethers';
+import { assertWritesAllowed } from './ctf-client.js';
 
 // ERC20 ABI for deposits
 const ERC20_DEPOSIT_ABI = [
@@ -538,6 +539,8 @@ export async function depositUsdc(
   options: DepositOptions = {}
 ): Promise<DepositResult> {
   const { token = 'NATIVE_USDC', gasPriceMultiplier = 1.2 } = options;
+
+  assertWritesAllowed('depositUsdc (ERC20.transfer → adresse de dépôt bridge)');
 
   // Validate minimum deposit
   if (amount < 2) {
@@ -678,6 +681,8 @@ export async function swapAndDeposit(
 ): Promise<SwapAndDepositResult> {
   const { slippage = 0.5, gasPriceMultiplier = 1.2 } = options;
 
+  assertWritesAllowed('swapAndDeposit (swap DEX + dépôt bridge)');
+
   const upperToken = token.toUpperCase();
 
   try {
@@ -752,11 +757,13 @@ export async function swapAndDeposit(
       };
     }
 
-    // Get USDC balance after swap
-    const usdcBalance = await swapService.getBalance('USDC');
+    // Montant réellement reçu du swap (delta, PAS le solde USDC total du wallet).
+    // Bug corrigé: on déposait auparavant TOUT le solde USDC du wallet,
+    // y compris les fonds USDC préexistants non concernés par ce swap.
+    const receivedUsdc = swapResult.amountOut;
 
     // Deposit USDC
-    const depositResult = await depositUsdc(signer, parseFloat(usdcBalance), {
+    const depositResult = await depositUsdc(signer, parseFloat(receivedUsdc), {
       token: 'NATIVE_USDC',
       gasPriceMultiplier,
     });
@@ -767,7 +774,7 @@ export async function swapAndDeposit(
       depositTxHash: depositResult.txHash,
       tokenIn: upperToken,
       amountIn: amount,
-      usdcAmount: usdcBalance,
+      usdcAmount: receivedUsdc,
       depositAddress: depositAddr,
       error: depositResult.error,
     };

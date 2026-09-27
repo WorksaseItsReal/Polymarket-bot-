@@ -6,6 +6,7 @@
  */
 
 import { ethers, Contract, BigNumber } from 'ethers';
+import { assertWritesAllowed, createPolygonProvider } from '../clients/ctf-client.js';
 
 // QuickSwap V3 Contracts on Polygon
 export const QUICKSWAP_ROUTER = '0xf5b509bB0909a69B1c207E495f687a596C168E12';
@@ -156,7 +157,7 @@ export class SwapService {
 
   constructor(signer: ethers.Wallet) {
     // Use signer's provider if available, otherwise create a default Polygon provider
-    this.provider = signer.provider || new ethers.providers.JsonRpcProvider(process.env.POLYGON_RPC_URL || 'https://polygon.drpc.org');
+    this.provider = signer.provider || createPolygonProvider(process.env.POLYGON_RPC_URL);
     // Ensure signer is connected to the provider
     this.signer = signer.provider ? signer : signer.connect(this.provider);
     this.router = new Contract(QUICKSWAP_ROUTER, QUICKSWAP_ROUTER_ABI, this.signer);
@@ -207,10 +208,29 @@ export class SwapService {
 
   /**
    * Get token decimals
+   *
+   * Résout les décimales pour un symbole connu OU une adresse contractuelle.
+   * Fail-closed sur adresse inconnue : on REFUSE de deviner 18 décimales
+   * (une adresse USDC.e interprétée en 18 décimales donnerait un montant x1e12).
    */
   getTokenDecimals(token: string): number {
     const upperToken = token.toUpperCase();
-    return TOKEN_DECIMALS[upperToken] || 18;
+    const known = TOKEN_DECIMALS[upperToken];
+    if (known !== undefined) return known;
+
+    // Le token peut être passé sous forme d'adresse: résoudre via POLYGON_TOKENS
+    if (upperToken.startsWith('0X') && upperToken.length === 42) {
+      const symbol = (Object.keys(POLYGON_TOKENS) as SupportedToken[]).find(
+        (s) => POLYGON_TOKENS[s].toLowerCase() === upperToken.toLowerCase()
+      );
+      if (symbol) return TOKEN_DECIMALS[symbol] ?? 18;
+      throw new Error(
+        `Unknown token address: ${token}. Impossible de déterminer les décimales ` +
+          `en toute sécurité (aucun défaut silencieux à 18).`
+      );
+    }
+
+    return 18;
   }
 
   /**
@@ -380,6 +400,8 @@ export class SwapService {
   ): Promise<SwapResult> {
     const { slippage = 0.5, deadline = 300 } = options;
 
+    assertWritesAllowed('SwapService.swapMultiHop (approve + exactInput)');
+
     if (route.length < 2) {
       throw new Error('Route must have at least 2 tokens');
     }
@@ -430,13 +452,18 @@ export class SwapService {
       amountOutMinimum: 0, // For simplicity; in production use quote with slippage
     };
 
+    // Balance AVANT le swap: nécessaire pour calculer le montant réellement reçu
+    // (balance après - balance avant). Ne PAS confondre avec le solde total.
+    const tokenOutAddress = addresses[addresses.length - 1];
+    const tokenOutContract = new Contract(tokenOutAddress, ERC20_ABI, this.provider);
+    const balanceBefore = await tokenOutContract.balanceOf(this.signer.address);
+
     const tx = await this.router.exactInput(swapParams, { ...gasOptions, gasLimit: 500000 });
     const receipt = await tx.wait();
 
-    // Get actual output amount
-    const tokenOutAddress = addresses[addresses.length - 1];
-    const tokenOutContract = new Contract(tokenOutAddress, ERC20_ABI, this.provider);
+    // Amount réellement reçu = delta du solde
     const finalBalance = await tokenOutContract.balanceOf(this.signer.address);
+    const received = finalBalance.sub(balanceBefore);
 
     return {
       success: receipt.status === 1,
@@ -444,7 +471,7 @@ export class SwapService {
       tokenIn: upperTokenIn,
       tokenOut: upperTokenOut,
       amountIn,
-      amountOut: ethers.utils.formatUnits(finalBalance, decimalsOut),
+      amountOut: ethers.utils.formatUnits(received, decimalsOut),
       gasUsed: receipt.gasUsed.toString(),
     };
   }
@@ -508,6 +535,7 @@ export class SwapService {
    * Wrap native MATIC to WMATIC
    */
   async wrapMatic(amount: string): Promise<SwapResult> {
+    assertWritesAllowed('SwapService.wrapMatic (WMATIC.deposit)');
     const amountWei = ethers.utils.parseEther(amount);
     const wmatic = new Contract(WMATIC, WMATIC_ABI, this.signer);
     const gasOptions = await this.getGasOptions();
@@ -530,6 +558,7 @@ export class SwapService {
    * Unwrap WMATIC to native MATIC
    */
   async unwrapMatic(amount: string): Promise<SwapResult> {
+    assertWritesAllowed('SwapService.unwrapMatic (WMATIC.withdraw)');
     const amountWei = ethers.utils.parseEther(amount);
     const wmatic = new Contract(WMATIC, WMATIC_ABI, this.signer);
     const gasOptions = await this.getGasOptions();
@@ -561,6 +590,8 @@ export class SwapService {
     } = {}
   ): Promise<SwapResult> {
     const { slippage = 0.5, deadline = 300 } = options;
+
+    assertWritesAllowed('SwapService.swap (approve + exactInputSingle)');
 
     const upperTokenIn = tokenIn.toUpperCase();
     const upperTokenOut = tokenOut.toUpperCase();
@@ -636,12 +667,16 @@ export class SwapService {
       limitSqrtPrice: 0,
     };
 
+    // Balance AVANT le swap pour calculer le montant réellement reçu (delta).
+    const tokenOutContract = new Contract(tokenOutAddress, ERC20_ABI, this.provider);
+    const balanceBefore = await tokenOutContract.balanceOf(this.signer.address);
+
     const tx = await this.router.exactInputSingle(swapParams, { ...gasOptions, gasLimit: 300000 });
     const receipt = await tx.wait();
 
-    // Get actual output amount
-    const tokenOutContract = new Contract(tokenOutAddress, ERC20_ABI, this.provider);
+    // Amount réellement reçu = delta du solde (PAS le solde total)
     const finalBalance = await tokenOutContract.balanceOf(this.signer.address);
+    const received = finalBalance.sub(balanceBefore);
 
     return {
       success: true,
@@ -649,7 +684,7 @@ export class SwapService {
       tokenIn: upperTokenIn,
       tokenOut: upperTokenOut,
       amountIn,
-      amountOut: ethers.utils.formatUnits(finalBalance, decimalsOut),
+      amountOut: ethers.utils.formatUnits(received, decimalsOut),
       gasUsed: receipt.gasUsed.toString(),
     };
   }
@@ -721,7 +756,7 @@ export class SwapService {
     address: string,
     provider?: ethers.providers.Provider
   ): Promise<TokenBalance[]> {
-    const rpcProvider = provider || new ethers.providers.JsonRpcProvider(process.env.POLYGON_RPC_URL || 'https://polygon.drpc.org');
+    const rpcProvider = provider || createPolygonProvider(process.env.POLYGON_RPC_URL);
     const balances: TokenBalance[] = [];
 
     // Get native MATIC balance
@@ -763,7 +798,7 @@ export class SwapService {
     token: string,
     provider?: ethers.providers.Provider
   ): Promise<string> {
-    const rpcProvider = provider || new ethers.providers.JsonRpcProvider(process.env.POLYGON_RPC_URL || 'https://polygon.drpc.org');
+    const rpcProvider = provider || createPolygonProvider(process.env.POLYGON_RPC_URL);
     const upperToken = token.toUpperCase();
 
     if (upperToken === 'MATIC') {
@@ -788,6 +823,7 @@ export class SwapService {
    * Transfer native MATIC (POL) to another address
    */
   async transferMatic(to: string, amount: string): Promise<TransferResult> {
+    assertWritesAllowed('SwapService.transferMatic (sendTransaction)');
     const amountWei = ethers.utils.parseEther(amount);
 
     // Check balance
@@ -820,6 +856,7 @@ export class SwapService {
    * Transfer an ERC20 token to another address
    */
   async transfer(token: string, to: string, amount: string): Promise<TransferResult> {
+    assertWritesAllowed('SwapService.transfer (ERC20.transfer)');
     const upperToken = token.toUpperCase();
 
     // For native MATIC, use transferMatic

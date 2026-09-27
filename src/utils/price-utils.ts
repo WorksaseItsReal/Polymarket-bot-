@@ -148,6 +148,13 @@ export function calculateSharesForAmount(
   amount: number,
   price: number
 ): number {
+  // Cas limite : un prix nul/négatif/non-fini (donnée de carnet absente ou NaN
+  // issu d'un parseFloat) donnerait Infinity/NaN → ordre invalide envoyé au CLOB.
+  // On refuse explicitement en renvoyant 0 (aucune part), ce qui est détectable
+  // par l'appelant (0 < minimum d'ordre) et ne peut pas devenir un ordre réel.
+  if (!Number.isFinite(amount) || !Number.isFinite(price) || price <= 0 || amount <= 0) {
+    return 0;
+  }
   return roundSize(amount / price);
 }
 
@@ -268,6 +275,7 @@ export function checkArbitrage(
  * Format price for display
  */
 export function formatPrice(price: number, tickSize?: TickSize): string {
+  if (!Number.isFinite(price)) return '—';
   const decimals = tickSize ? ROUNDING_CONFIG[tickSize].price : 4;
   return price.toFixed(decimals);
 }
@@ -276,6 +284,7 @@ export function formatPrice(price: number, tickSize?: TickSize): string {
  * Format amount in USDC
  */
 export function formatUSDC(amount: number): string {
+  if (!Number.isFinite(amount)) return '$—';
   return `$${amount.toFixed(2)}`;
 }
 
@@ -297,6 +306,13 @@ export function calculatePnL(
     side === 'long'
       ? (currentPrice - entryPrice) * size
       : (entryPrice - currentPrice) * size;
+
+  // Cas limite : entryPrice = 0 ou non-fini → division par zéro → ±Infinity/NaN
+  // qui contaminerait ensuite tout l'agrégat de PnL affiché. On retourne un
+  // pourcentage neutre plutôt qu'une valeur non-finie.
+  if (!Number.isFinite(entryPrice) || entryPrice === 0) {
+    return { pnl: Number.isFinite(pnl) ? pnl : 0, pnlPercent: 0 };
+  }
 
   const pnlPercent =
     side === 'long'

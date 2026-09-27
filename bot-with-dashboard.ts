@@ -24,6 +24,7 @@ import type { BotState, BotConfig, LogLevel, DipArbSignal, SmartMoneySignal } fr
 import { addSession, createSessionFromState, type TradeRecord } from './src/dashboard/session-history.js';
 import { analyzeMarket, isEnabled } from './src/deepseek-analyzer.js';
 import { getSpotPrice, formatSpotPrice, isSpotCoin, type SpotCoin } from './src/services/spot-price-service.js';
+import { computeStake } from './src/services/stake-sizing.js';
 
 // ============================================================================
 // CONFIGURATION (same as bot-config.ts)
@@ -331,14 +332,23 @@ function canTrade(): boolean {
 }
 
 // 🔴 FIXED: Enhanced trade recording with win tracking
-function recordTrade(profit: number, strategy: string) {
+/**
+ * @param creditPnl false pour une projection (gain espéré) : on compte le trade mais on
+ *   ne touche PAS la comptabilite. Seul le resolveur (pnl.json) ecrit le PnL realise.
+ */
+function recordTrade(profit: number, strategy: string, creditPnl = true) {
   state.tradesExecuted++;
-  state.dailyPnL += profit;
-  state.monthlyPnL += profit;  // NEW
-  state.totalPnL += profit;
+  if (creditPnl) {
+    state.dailyPnL += profit;
+    state.monthlyPnL += profit;  // NEW
+    state.totalPnL += profit;
+  }
 
-  // Track consecutive wins/losses
-  if (profit < 0) {
+  // Track consecutive wins/losses (uniquement sur du PnL reel : une projection positive
+  // ferait croire a une serie de victoires, cf. consecutiveWins=583/0 releve par l'audit)
+  if (!creditPnl) {
+    /* projection : pas de serie */
+  } else if (profit < 0) {
     state.consecutiveLosses++;
     state.consecutiveWins = 0;
   } else {
@@ -517,13 +527,17 @@ function simulateTrade(profit: number, strategy: string, description: string) {
   if (!CONFIG.dryRun || !state.paper) return;
 
   state.paper.trades++;
-  state.paper.pnl += profit;
-  state.paper.balance += profit;
+  // ⚠️ FIX 2026-09-27 (audit dashboard) : `profit` est le gain ESPERE *si le bon cote
+  // gagne*, estime au moment de la decision. Le crediter comme realise faisait monter
+  // `totalPnL` a +12 745 $ alors que le PnL reel etait +40,28 $, et rendait les 4
+  // couches de risque inertes (aucune perte n'etait jamais debitee). On le trace
+  // desormais separement : la projection ne touche plus la comptabilite.
+  state.paper.estimatedPnl = (state.paper.estimatedPnl ?? 0) + profit;
 
   // Log as a special SIMULATION event
-  log('TRADE', `[SIMULATION] ${description} | Est. Profit: $${profit.toFixed(2)}`);
-  // Update main PnL so the user sees movement on the dashboard (as requested)
-  recordTrade(profit, strategy);
+  log('TRADE', `[SIMULATION] ${description} | Gain espéré (non réalisé): $${profit.toFixed(2)}`);
+  // Compté comme trade, mais SANS credit de PnL : le realise vient du resolveur.
+  recordTrade(profit, strategy, false);
 }
 
 // === VENTE au take-profit (paper) ===
@@ -872,7 +886,25 @@ async function setupDipArb(sdk: PolymarketSDK) {
     // Le bot RÉFLÉCHIT et DÉCIDE, mais n'envoie JAMAIS d'ordre réel.
     // On simule comme s'il misait 1€ pour voir le gain potentiel.
     if (CONFIG.dryRun && state.paper) {
-      const stake = Number(process.env.BET_STAKE ?? '') || 1; // mise simulée (.env BET_STAKE)
+      // === MISE ADAPTATIVE (2026-09-27) : plus de mise fixe ===
+      // Meme module pur que l'entree principale (src/services/stake-sizing.ts).
+      const _sigHint = ((s as any).estimatedProfitRate ?? (s as any).expectedProfitRate);
+      const _entry = Number(s.currentPrice) > 0 && Number(s.currentPrice) < 1 ? Number(s.currentPrice) : 0;
+      const _sizeSig = computeStake({
+        capital: Number(process.env.PAPER_CAPITAL ?? '') || 50,
+        entryPrice: _entry,
+        bookProb: typeof _sigHint === 'number' && _sigHint > 1 ? 1 / _sigHint : null,
+        consecutiveLosses: state.consecutiveLosses,
+        drawdownCurrent: realDrawdownPct(),
+        openExposureEur: paperOpen.reduce((a, o) => a + (Number(o.stake) || 0), 0),
+        openPositions: paperOpen.length,
+      });
+      if (_sizeSig.skipped || !(_sizeSig.stake > 0)) {
+        log('LEARN', `   ↳ signal ${s.type} ignoré (pas de mise) : ${_sizeSig.rationale}`);
+        updateDashboard();
+        return;
+      }
+      const stake = _sizeSig.stake;
       // Taux de profit estimé du signal (leg1: estimatedProfitRate, leg2: expectedProfitRate)
       const profitRate = (s as any).estimatedProfitRate ?? (s as any).expectedProfitRate;
       let estProfit = 0;
@@ -890,7 +922,7 @@ async function setupDipArb(sdk: PolymarketSDK) {
         estProfit = stake * ((1 / p) - 1);
       }
       const pStr = (s.currentPrice || 0).toFixed(3);
-      simulateTrade(estProfit, 'dipArb', `Décision ${s.type} ${side} @ $${pStr} — mise simulée $${stake.toFixed(2)}, gain est. $${estProfit.toFixed(4)} si ${side} gagne (x${((1 / (s.currentPrice || 1))).toFixed(2)})`);
+      simulateTrade(estProfit, 'dipArb', `Décision ${s.type} ${side} @ $${pStr} — mise $${stake.toFixed(2)} : ${_sizeSig.rationale}, gain est. $${estProfit.toFixed(4)} si ${side} gagne (x${((1 / (s.currentPrice || 1))).toFixed(2)})`);
     }
 
     updateDashboard();
@@ -968,7 +1000,59 @@ async function setupDipArb(sdk: PolymarketSDK) {
 let swapService: SwapService | null = null;
 let currentRoundId: string = '';
 // Positions paper ouvertes (achat simulé) — clôturées au take-profit ou à la résolution.
-let paperOpen: Array<{ side: string; entry: number; conditionId: string; slug: string; coin: string }> = [];
+let paperOpen: Array<{ side: string; entry: number; conditionId: string; slug: string; coin: string; stake: number }> = [];
+
+/**
+ * Drawdown REEL, lu sur le PnL du resolveur (`~/.polymarket/pnl.json`), la seule
+ * source de verite. `state.currentDrawdown` est inutilisable : il derive de
+ * `state.totalPnL`, un compteur en memoire qui ne credite que des gains estimes et
+ * ne debite JAMAIS une perte (cf. docs/rebuild/dashboard/AUDIT.md : +12 745 $ en
+ * memoire contre +40,28 $ reels). On mesure donc la perte par rapport au capital de
+ * depart, ce qui ne depend d'aucun pic fictif.
+ */
+function realPnl(): number | null {
+  try {
+    const p = JSON.parse(readFileSync('/root/.polymarket/pnl.json', 'utf8')) as { pnl?: number };
+    const v = Number(p?.pnl);
+    return Number.isFinite(v) ? v : null;
+  } catch {
+    return null; // fichier absent/illisible : on ne fabrique aucun chiffre
+  }
+}
+
+/**
+ * Recale la comptabilite AFFICHEE sur le PnL REALISE du resolveur (pnl.json), seule
+ * source de verite. Sans ca, `state.totalPnL` ne credite que des gains estimes et ne
+ * debite jamais une perte (audit : +12 745 $ affiches vs +40,28 $ reels), ce qui rendait
+ * les 4 couches de risque inertes. Si le fichier est illisible, on ne touche a RIEN
+ * (mieux vaut un chiffre perime qu'un chiffre inventé).
+ */
+function syncRealizedPnl() {
+  const v = realPnl();
+  if (v === null) return;
+  state.totalPnL = v;
+  state.currentCapital = CONFIG.capital.totalUsd + v;
+  if (state.currentCapital > state.peakCapital) state.peakCapital = state.currentCapital;
+  state.currentDrawdown =
+    state.peakCapital > 0 ? Math.max(0, (state.peakCapital - state.currentCapital) / state.peakCapital) : 0;
+  if (state.paper) {
+    state.paper.pnl = v;
+    state.paper.balance = CONFIG.capital.totalUsd + v;
+  }
+  updateDashboard();
+}
+
+function realDrawdownPct(): number {
+  try {
+    const p = JSON.parse(readFileSync('/root/.polymarket/pnl.json', 'utf8')) as { pnl?: number };
+    const cap = Number(process.env.PAPER_CAPITAL ?? '') || 50;
+    const pnl = Number(p?.pnl);
+    if (Number.isFinite(pnl) && cap > 0 && pnl < 0) return Math.min(1, -pnl / cap);
+    return 0;
+  } catch {
+    return 0; // fichier absent/illisible : on ne fabrique pas un chiffre de risque
+  }
+}
 
 async function updateBalances() {
   if (CONFIG.dryRun) {
@@ -1097,6 +1181,10 @@ async function setupLLMAnalysis(sdk: PolymarketSDK) {
   log('INFO', `🤖 DeepSeek LLM analysis module: ${enabled ? 'ENABLED (remote analysis)' : 'DEGRADED (local HOLD — no API key / not enabled)'}`);
 
   async function runAnalysisLoop() {
+    // Recale la compta affichee sur le PnL REEL du resolveur AVANT la porte de risque :
+    // sinon le controle evalue un chiffre issu de projections (cf. audit dashboard) et les
+    // garde-fous deviennent inertes.
+    syncRealizedPnl();
     // Respect multi-layer risk gate: no trade activity if broker is halted/paused
     if (!canTrade()) return;
 
@@ -1251,20 +1339,43 @@ async function setupLLMAnalysis(sdk: PolymarketSDK) {
                   continue;
                 }
               }
-              // taille auto-adaptée selon la santé de la coin (×0.65 / ×1.10 / ×1.30)
-              const sizeFactor = learn ? learn.sizeFactor : 1;
+              const conf = side === 'YES' ? yesImp : noImp;
+              // === MISE ADAPTATIVE (2026-09-27) : plus de mise fixe a 5 EUR ===
+              // `computeStake` (module pur + teste : src/services/stake-sizing.ts) calcule la
+              // mise a partir du capital, du prix, de la confiance du carnet, du track record
+              // de la coin (avec shrinkage de credibilite : n=0 => aucun edge invente) et de
+              // l'etat de risque. Plafonds DURS : 1 % du capital par trade, 10 % d'exposition
+              // cumulee (5 coins peuvent etre ouverts en meme temps), et la limite quotidienne
+              // doit exiger >= 3 pertes. Edge nul ou negatif => mise 0 => on ne mise pas.
+              // Remplace `BET_STAKE` ET `sizeFactor` : le track record de la coin est deja
+              // integre par le shrinkage, multiplier les deux compterait double.
+              const stakeRes = computeStake({
+                capital: Number(process.env.PAPER_CAPITAL ?? '') || 50,
+                entryPrice: buyPrice,
+                bookProb: conf,
+                winRateRecent: learn && learn.wr > 0 ? learn.wr / 100 : null,
+                recentTrades: learn ? learn.recent : null,
+                consecutiveLosses: state.consecutiveLosses,
+                drawdownCurrent: realDrawdownPct(),
+                openExposureEur: paperOpen.reduce((s, o) => s + (Number(o.stake) || 0), 0),
+                openPositions: paperOpen.length,
+              });
+              if (stakeRes.skipped || !(stakeRes.stake > 0)) {
+                log('LEARN', `   ↳ ${market.name?.slice(0, 30)} ${market.underlying} -> PAS de mise : ${stakeRes.rationale}`);
+                continue;
+              }
+              const BET_STAKE = stakeRes.stake;
+              const sizeFactor = 1; // neutralise : le sizing le remplace (garde pour le log)
               // ⚠️ AVANT (2026-09-26) : `sizeFactor` était calculé puis affiché dans le
               // message, mais `simulateTrade()` recevait `(1/buyPrice) - 1` — le Kelly
               // auto-adaptatif (×0.65 / ×1.10) n'était donc JAMAIS crédité au PnL :
               // purement cosmétique. On applique maintenant sizeFactor ET la mise de base.
-              const BET_STAKE = Number(process.env.BET_STAKE ?? '') || 1;
               // gain si le côté choisi gagne: retour = 1/prix sur la mise
-              const estProfit = ((1 / buyPrice) - 1) * sizeFactor * BET_STAKE;
-              const conf = side === 'YES' ? yesImp : noImp;
-              simulateTrade(estProfit, 'dipArb', `${spotLine} → Décision ${side} @ $${buyPrice.toFixed(3)} (round ${market.slug || market.name?.slice(-22)}, conf ${conf.toFixed(2)}, mise ×${sizeFactor.toFixed(2)})${reason} — gain est. $${estProfit.toFixed(4)} si ${side} gagne (x${(1 / buyPrice).toFixed(2)})`);
+              const estProfit = ((1 / buyPrice) - 1) * BET_STAKE;
+              simulateTrade(estProfit, 'dipArb', `${spotLine} → Décision ${side} @ $${buyPrice.toFixed(3)} (round ${market.slug || market.name?.slice(-22)}, conf ${conf.toFixed(2)}, mise $${BET_STAKE.toFixed(2)} : ${stakeRes.rationale})${reason} — gain est. $${estProfit.toFixed(4)} si ${side} gagne (x${(1 / buyPrice).toFixed(2)})`);
               logLearning({ roundId: market.slug || currentRoundId, market: market.name?.slice(0, 40), side, price: buyPrice, estGain: ((1 / buyPrice) - 1) * BET_STAKE, conf, coin: market.underlying, stake: BET_STAKE, conditionId: market.conditionId, winProb: conf });
               // Ouvre la position paper (sera clôturée au take-profit ou résolue à la fin du round)
-              paperOpen.push({ side, entry: buyPrice, conditionId: market.conditionId, slug: market.slug || '', coin: market.underlying });
+              paperOpen.push({ side, entry: buyPrice, conditionId: market.conditionId, slug: market.slug || '', coin: market.underlying, stake: BET_STAKE });
             }
           }
           updateDashboard();

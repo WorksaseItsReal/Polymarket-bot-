@@ -242,4 +242,50 @@ describe('Price Utilities', () => {
       expect(ROUNDING_CONFIG['0.0001']).toEqual({ price: 4, size: 2, amount: 6 });
     });
   });
+
+  // ==========================================================================
+  // Cas limites (ajoutés par l'audit trading) — un prix NaN/0 ne doit JAMAIS
+  // produire Infinity/NaN : ces valeurs finiraient dans un ordre ou un affichage.
+  // ==========================================================================
+  describe('cas limites (fail-safe)', () => {
+    it('calculateSharesForAmount refuse un prix nul/négatif/non-fini', () => {
+      expect(calculateSharesForAmount(10, 0)).toBe(0);
+      expect(calculateSharesForAmount(10, -0.5)).toBe(0);
+      expect(calculateSharesForAmount(10, NaN)).toBe(0);
+      expect(calculateSharesForAmount(10, Infinity)).toBe(0);
+      expect(calculateSharesForAmount(NaN, 0.5)).toBe(0);
+      expect(calculateSharesForAmount(0, 0.5)).toBe(0);
+    });
+
+    it('calculateSharesForAmount reste correct sur un prix valide', () => {
+      expect(calculateSharesForAmount(10, 0.5)).toBe(20);
+      expect(calculateSharesForAmount(10, 0.33)).toBe(30.3);
+    });
+
+    it('calculatePnL ne renvoie jamais Infinity/NaN si entryPrice=0', () => {
+      const r = calculatePnL(0, 0.6, 10, 'long');
+      expect(Number.isFinite(r.pnl)).toBe(true);
+      expect(Number.isFinite(r.pnlPercent)).toBe(true);
+      expect(r.pnlPercent).toBe(0);
+    });
+
+    it('calculatePnL ne renvoie jamais NaN si entryPrice=NaN', () => {
+      const r = calculatePnL(NaN, 0.6, 10, 'short');
+      expect(Number.isFinite(r.pnl)).toBe(true);
+      expect(Number.isFinite(r.pnlPercent)).toBe(true);
+      expect(r.pnlPercent).toBe(0);
+    });
+
+    it('formatPrice / formatUSDC ne produisent pas "NaN"', () => {
+      expect(formatPrice(NaN)).toBe('—');
+      expect(formatPrice(Infinity, '0.01')).toBe('—');
+      expect(formatUSDC(NaN)).toBe('$—');
+      expect(formatUSDC(Infinity)).toBe('$—');
+    });
+
+    it('roundSize reste stable sur des valeurs entières', () => {
+      expect(roundSize(5)).toBe(5);
+      expect(roundSize(0)).toBe(0);
+    });
+  });
 });

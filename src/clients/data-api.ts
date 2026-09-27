@@ -6,9 +6,118 @@
 import { RateLimiter, ApiType } from '../core/rate-limiter.js';
 import type { UnifiedCache } from '../core/unified-cache.js';
 import { CACHE_TTL } from '../core/unified-cache.js';
-import { PolymarketError } from '../core/errors.js';
+import { PolymarketError, ErrorCode } from '../core/errors.js';
 
 const DATA_API_BASE = 'https://data-api.polymarket.com';
+
+/** User-Agent explicite : certains edges rejettent les clients sans UA (403). */
+const HTTP_USER_AGENT = 'polymarket-bot/1.0 (+https://polymarket.com)';
+
+/** Timeout réseau par défaut (ms). Un `fetch` sans timeout bloque indéfiniment. */
+const DEFAULT_TIMEOUT_MS = 10_000;
+
+/** Nombre total de tentatives (1 = pas de retry). */
+const DEFAULT_MAX_ATTEMPTS = 3;
+
+/**
+ * `fetch` JSON avec TIMEOUT + RETRY/BACKOFF (même contrat que gamma-api).
+ *
+ * ⚠️ AUDIT DONNÉES 2026-09-27 : avant, un `fetch()` nu pouvait (a) rester bloqué
+ * indéfiniment (pas de timeout), (b) transformer un 429 « usage limit reached »
+ * ou un 5xx en erreur immédiate côté appelant — et, par ricochet, en réponse
+ * vide silencieuse (cf. `assertArray`).
+ */
+async function fetchJsonWithRetry(
+  url: string,
+  opts: { timeoutMs?: number; maxAttempts?: number; label?: string } = {}
+): Promise<unknown> {
+  const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const maxAttempts = Math.max(1, opts.maxAttempts ?? DEFAULT_MAX_ATTEMPTS);
+  const label = opts.label ?? url;
+  let lastError: Error | undefined;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const response = await fetch(url, {
+        signal: controller.signal,
+        headers: { Accept: 'application/json', 'User-Agent': HTTP_USER_AGENT },
+      });
+
+      if (!response.ok) {
+        const body = await response.json().catch(() => null);
+        const err = PolymarketError.fromHttpError(response.status, body);
+        if (response.status === 429 && attempt < maxAttempts) {
+          const retryAfter = Number(response.headers.get('retry-after'));
+          const waitMs =
+            Number.isFinite(retryAfter) && retryAfter > 0
+              ? Math.min(retryAfter * 1000, 30_000)
+              : Math.min(500 * 2 ** (attempt - 1), 8_000);
+          lastError = err;
+          await new Promise((r) => setTimeout(r, waitMs));
+          continue;
+        }
+        if (err.retryable && attempt < maxAttempts) {
+          lastError = err;
+          await new Promise((r) => setTimeout(r, Math.min(500 * 2 ** (attempt - 1), 8_000)));
+          continue;
+        }
+        throw err;
+      }
+
+      return await response.json();
+    } catch (err) {
+      const aborted = (err as { name?: string })?.name === 'AbortError';
+      if (aborted) {
+        lastError = new PolymarketError(
+          ErrorCode.TIMEOUT,
+          `${label} : timeout après ${timeoutMs} ms`,
+          true
+        );
+      } else if (err instanceof PolymarketError) {
+        if (!err.retryable) throw err;
+        lastError = err;
+      } else {
+        lastError = new PolymarketError(
+          ErrorCode.NETWORK_ERROR,
+          `${label} : ${(err as Error)?.message ?? String(err)}`,
+          true,
+          err as Error
+        );
+      }
+      if (attempt < maxAttempts) {
+        await new Promise((r) => setTimeout(r, Math.min(500 * 2 ** (attempt - 1), 8_000)));
+        continue;
+      }
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  throw lastError ?? new Error(`${label} : échec après ${maxAttempts} tentatives`);
+}
+
+/**
+ * Vérifie qu'une réponse Data API est bien un TABLEAU.
+ *
+ * ⚠️ AUDIT DONNÉES 2026-09-27 — mode de défaillance grave corrigé ici : les
+ * normalisateurs faisaient `if (!Array.isArray(data)) return []`. Une réponse
+ * d'ERREUR (objet JSON du type `{"error":"usage limit reached"}`) devenait donc
+ * un tableau vide parfaitement légitime pour l'appelant : « aucune position »,
+ * « aucun trade », « pas de K-line » — une PANNE déguisée en MESURE. On préfère
+ * une erreur explicite : l'appelant la traite (retry/skip) au lieu de raisonner
+ * sur du vide.
+ */
+function assertArray(data: unknown, context: string): unknown[] {
+  if (!Array.isArray(data)) {
+    throw new PolymarketError(
+      ErrorCode.INVALID_RESPONSE,
+      `${context} : réponse non-tableau (${typeof data}) — refus de la convertir en [] silencieux`
+    );
+  }
+  return data;
+}
 
 // ===== Types =====
 
@@ -436,14 +545,10 @@ export class DataApiClient {
       if (params?.mergeable !== undefined) query.set('mergeable', String(params.mergeable));
       if (params?.title) query.set('title', params.title);
 
-      const response = await fetch(`${DATA_API_BASE}/positions?${query}`);
-      if (!response.ok)
-        throw PolymarketError.fromHttpError(
-          response.status,
-          await response.json().catch(() => null)
-        );
-      const data = (await response.json()) as unknown[];
-      return this.normalizePositions(data);
+      const data = await fetchJsonWithRetry(`${DATA_API_BASE}/positions?${query}`, {
+        label: `GET /positions?${query}`,
+      });
+      return this.normalizePositions(assertArray(data, 'GET /positions'));
     });
   }
 
@@ -487,14 +592,10 @@ export class DataApiClient {
       if (params?.sortBy) query.set('sortBy', params.sortBy);
       if (params?.sortDirection) query.set('sortDirection', params.sortDirection);
 
-      const response = await fetch(`${DATA_API_BASE}/closed-positions?${query}`);
-      if (!response.ok)
-        throw PolymarketError.fromHttpError(
-          response.status,
-          await response.json().catch(() => null)
-        );
-      const data = (await response.json()) as unknown[];
-      return this.normalizeClosedPositions(data);
+      const data = await fetchJsonWithRetry(`${DATA_API_BASE}/closed-positions?${query}`, {
+        label: `GET /closed-positions?${query}`,
+      });
+      return this.normalizeClosedPositions(assertArray(data, 'GET /closed-positions'));
     });
   }
 
@@ -546,14 +647,10 @@ export class DataApiClient {
       if (params?.sortBy) query.set('sortBy', params.sortBy);
       if (params?.sortDirection) query.set('sortDirection', params.sortDirection);
 
-      const response = await fetch(`${DATA_API_BASE}/activity?${query}`);
-      if (!response.ok)
-        throw PolymarketError.fromHttpError(
-          response.status,
-          await response.json().catch(() => null)
-        );
-      const data = (await response.json()) as unknown[];
-      return this.normalizeActivities(data);
+      const data = await fetchJsonWithRetry(`${DATA_API_BASE}/activity?${query}`, {
+        label: `GET /activity?${query}`,
+      });
+      return this.normalizeActivities(assertArray(data, 'GET /activity'));
     });
   }
 
@@ -648,14 +745,10 @@ export class DataApiClient {
       if (params?.filterType) query.set('filterType', params.filterType);
       if (params?.filterAmount !== undefined) query.set('filterAmount', String(params.filterAmount));
 
-      const response = await fetch(`${DATA_API_BASE}/trades?${query}`);
-      if (!response.ok)
-        throw PolymarketError.fromHttpError(
-          response.status,
-          await response.json().catch(() => null)
-        );
-      const data = (await response.json()) as unknown[];
-      let trades = this.normalizeTrades(data);
+      const data = await fetchJsonWithRetry(`${DATA_API_BASE}/trades?${query}`, {
+        label: `GET /trades?${query}`,
+      });
+      let trades = this.normalizeTrades(assertArray(data, 'GET /trades'));
 
       // Apply timestamp filters client-side (API may not support these directly)
       if (params?.startTimestamp) {
@@ -663,6 +756,18 @@ export class DataApiClient {
       }
       if (params?.endTimestamp) {
         trades = trades.filter(t => t.timestamp <= params.endTimestamp!);
+      }
+
+      // ⚠️ AUDIT DONNÉES : le filtrage par fenêtre temporelle est fait COTÉ CLIENT
+      // sur les `requestLimit` trades les plus récents (≤1000). Si la fenêtre
+      // demandée est plus ancienne que ce lot, le résultat est vide — un vide
+      // TOTALEMENT SILENCIEUX (K-lines « absentes » au lieu de « hors fenêtre »).
+      if (trades.length === 0 && (params?.startTimestamp || params?.endTimestamp)) {
+        console.warn(
+          `[DataApiClient] getTrades: 0 trade après filtrage temporel ` +
+            `(start=${params.startTimestamp ?? '-'}, end=${params.endTimestamp ?? '-'}) ` +
+            `sur ${requestLimit} trades les plus récents — fenêtre probablement trop ancienne.`
+        );
       }
 
       // Apply limit after filtering
@@ -762,17 +867,12 @@ export class DataApiClient {
       if (userName) query.set('userName', userName);
 
       return this.rateLimiter.execute(ApiType.DATA_API, async () => {
-        const response = await fetch(
-          `${DATA_API_BASE}/v1/leaderboard?${query}`
+        const data = await fetchJsonWithRetry(
+          `${DATA_API_BASE}/v1/leaderboard?${query}`,
+          { label: `GET /v1/leaderboard?${query}` }
         );
-        if (!response.ok)
-          throw PolymarketError.fromHttpError(
-            response.status,
-            await response.json().catch(() => null)
-          );
 
-        const data = (await response.json()) as unknown[];
-        const entries = this.normalizeLeaderboardEntries(data);
+        const entries = this.normalizeLeaderboardEntries(assertArray(data, 'GET /v1/leaderboard'));
 
         return {
           entries,
@@ -822,21 +922,21 @@ export class DataApiClient {
         markets.forEach((m) => query.append('market', m));
       }
 
-      const response = await fetch(`${DATA_API_BASE}/value?${query}`);
-      if (!response.ok)
-        throw PolymarketError.fromHttpError(
-          response.status,
-          await response.json().catch(() => null)
-        );
+      const data = await fetchJsonWithRetry(`${DATA_API_BASE}/value?${query}`, {
+        label: `GET /value?${query}`,
+      });
 
       // API returns array: [{ user, value }]
-      const data = (await response.json()) as Array<{ user: string; value: number }>;
-      if (Array.isArray(data) && data.length > 0) {
+      // ⚠️ AUDIT DONNÉES : ne plus convertir une réponse non-tableau en
+      // `{ user, value: 0 }` (valeur inventée = « ce wallet ne vaut rien »).
+      const rows = assertArray(data, 'GET /value') as Array<{ user: string; value: number }>;
+      if (rows.length > 0) {
         return {
-          user: String(data[0].user),
-          value: Number(data[0].value) || 0,
+          user: String(rows[0].user),
+          value: Number(rows[0].value) || 0,
         };
       }
+      // Tableau vide = réponse réelle « aucune valeur » (≠ panne, qui lève).
       return { user: address, value: 0 };
     });
   }
@@ -862,22 +962,17 @@ export class DataApiClient {
       const query = new URLSearchParams({ market: params.market });
       if (params.limit !== undefined) query.set('limit', String(params.limit));
 
-      const response = await fetch(`${DATA_API_BASE}/holders?${query}`);
-      if (!response.ok)
-        throw PolymarketError.fromHttpError(
-          response.status,
-          await response.json().catch(() => null)
-        );
-
-      const data = (await response.json()) as unknown[];
-      return this.normalizeHolders(data);
+      const data = await fetchJsonWithRetry(`${DATA_API_BASE}/holders?${query}`, {
+        label: `GET /holders?${query}`,
+      });
+      return this.normalizeHolders(assertArray(data, 'GET /holders'));
     });
   }
 
   // ===== Data Normalization =====
 
   private normalizePositions(data: unknown[]): Position[] {
-    if (!Array.isArray(data)) return [];
+    assertArray(data, 'normalizePositions');
     return data.map((item) => {
       const p = item as Record<string, unknown>;
       return {
@@ -932,7 +1027,7 @@ export class DataApiClient {
   }
 
   private normalizeClosedPositions(data: unknown[]): ClosedPosition[] {
-    if (!Array.isArray(data)) return [];
+    assertArray(data, 'normalizeClosedPositions');
     return data.map((item) => {
       const p = item as Record<string, unknown>;
       return {
@@ -963,7 +1058,7 @@ export class DataApiClient {
   }
 
   private normalizeActivities(data: unknown[]): Activity[] {
-    if (!Array.isArray(data)) return [];
+    assertArray(data, 'normalizeActivities');
     return data.map((item) => {
       const a = item as Record<string, unknown>;
       return {
@@ -1001,7 +1096,7 @@ export class DataApiClient {
   }
 
   private normalizeTrades(data: unknown[]): Trade[] {
-    if (!Array.isArray(data)) return [];
+    assertArray(data, 'normalizeTrades');
     return data.map((item) => {
       const t = item as Record<string, unknown>;
       return {
@@ -1053,7 +1148,7 @@ export class DataApiClient {
   }
 
   private normalizeLeaderboardEntries(data: unknown[]): LeaderboardEntry[] {
-    if (!Array.isArray(data)) return [];
+    assertArray(data, 'normalizeLeaderboardEntries');
     return data.map((item) => {
       const e = item as Record<string, unknown>;
       return {
@@ -1079,7 +1174,7 @@ export class DataApiClient {
   }
 
   private normalizeHolders(data: unknown[]): MarketHolder[] {
-    if (!Array.isArray(data)) return [];
+    assertArray(data, 'normalizeHolders');
 
     // The API returns grouped by token: [{ token, holders: [...] }, { token, holders: [...] }]
     // We need to flatten this and normalize each holder

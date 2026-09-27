@@ -48,7 +48,144 @@ export const NEG_RISK_CTF_EXCHANGE = '0xC5d563A36AE78145C45a50134d48A1215220f80a
 export const NEG_RISK_ADAPTER = '0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296';
 
 // USDC.e uses 6 decimals
+// NOTE: les positions CTF (ERC-1155) sont libellées dans les décimales du collatéral
+// (USDC.e = 6), PAS en 18. Tous les montants de split/merge/redeem sont donc en 1e6.
 export const USDC_DECIMALS = 6;
+
+// ===== Sécurité DRY_RUN (garde fail-closed) =====
+
+/**
+ * Erreur levée lorsqu'une écriture on-chain est tentée en mode paper (DRY_RUN).
+ *
+ * Aucune transaction n'est signée ni diffusée lorsque cette erreur est levée :
+ * elle est vérifiée AVANT toute action irréversible (approve / transfer /
+ * deposit / swap / mint-merge-redeem CTF).
+ */
+export class DryRunWriteBlockedError extends Error {
+  public readonly operation: string;
+  constructor(operation: string) {
+    super(
+      `[DRY_RUN] Écriture on-chain bloquée: ${operation}. ` +
+        `Mode paper actif => aucune transaction signée envoyée. ` +
+        `Pour autoriser les écritures réelles: DRY_RUN=false (explicite).`
+    );
+    this.name = 'DryRunWriteBlockedError';
+    this.operation = operation;
+  }
+}
+
+/**
+ * Indique si le mode paper/DRY_RUN est actif.
+ *
+ * Sémantique alignée sur `bot-config.ts` (`dryRun: process.env.DRY_RUN !== 'false'`) :
+ * seul un `DRY_RUN` EXPLICITEMENT falsy autorise les écritures réelles.
+ * => fail-closed : variable absente, vide ou illisible => mode paper.
+ */
+export function isDryRunMode(): boolean {
+  const raw = (process.env.DRY_RUN ?? '').trim().toLowerCase();
+  if (raw === 'false' || raw === '0' || raw === 'no' || raw === 'off') return false;
+  return true;
+}
+
+/**
+ * Vérifie la FORME de la clé privée avant de la donner à ethers.
+ *
+ * Pourquoi: `new ethers.Wallet(k)` peut inclure la valeur brute dans son message
+ * d'erreur (`invalid hexlify value ... value="0x..."`), qui est ensuite logguée
+ * par les appelants -> fuite du secret. On rejette donc la valeur AVANT ethers,
+ * avec un message qui ne contient JAMAIS la clé.
+ */
+export function assertValidPrivateKeyShape(privateKey: string | undefined): asserts privateKey is string {
+  if (typeof privateKey !== 'string' || !/^0x[0-9a-fA-F]{64}$/.test(privateKey)) {
+    throw new Error(
+      'Private key invalide: attendu "0x" + 64 caractères hexadécimaux. ' +
+        'Valeur volontairement non affichée (anti-fuite de secret dans les logs).'
+    );
+  }
+}
+
+/**
+ * Garde fail-closed : refuse toute écriture on-chain en mode paper.
+ * À appeler en TOUT PREMIER dans chaque méthode d'écriture, avant tout
+ * `approve`, `transfer`, `deposit`, swap ou mint/merge/redeem.
+ */
+export function assertWritesAllowed(operation: string): void {
+  if (isDryRunMode()) throw new DryRunWriteBlockedError(operation);
+}
+
+// ===== Fournisseur RPC résilient (timeout + bascule multi-fournisseurs) =====
+
+/** RPC Polygon mainnet connus comme vivants (ordre de préférence). */
+export const KNOWN_POLYGON_RPCS: readonly string[] = [
+  'https://polygon.drpc.org',
+  'https://polygon-bor-rpc.publicnode.com',
+  'https://polygon.gateway.tenderly.co',
+  'https://api.zan.top/polygon-mainnet',
+];
+
+const POLYGON_NETWORK = { name: 'matic', chainId: 137 };
+/** Timeout par requête HTTP (ms). */
+const RPC_TIMEOUT_MS = 15_000;
+
+/**
+ * Fournisseur JSON-RPC avec réseau statique (évite les erreurs
+ * « could not detect network ») et bascule automatique entre plusieurs RPC.
+ *
+ * - `StaticJsonRpcProvider` : ne tente JAMAIS `eth_chainId`/`net_version` au
+ *   démarrage -> plus de cascade « could not detect network ».
+ * - Timeout HTTP : une requête qui pend est coupée au lieu de bloquer le bot.
+ * - Bascule : une erreur de TRANSPORT (timeout, fetch, réseau) est rejouée sur
+ *   le fournisseur suivant. Une réponse d'erreur du nœud (ex: revert) est
+ *   renvoyée telle quelle, sans bascule (ce n'est pas un problème de RPC).
+ */
+class FailoverPolygonProvider extends ethers.providers.StaticJsonRpcProvider {
+  private readonly _pool: ethers.providers.StaticJsonRpcProvider[];
+  private _activeIndex = 0;
+
+  constructor(urls: string[]) {
+    super({ url: urls[0], timeout: RPC_TIMEOUT_MS }, POLYGON_NETWORK);
+    this._pool = urls.map(
+      (u) => new ethers.providers.StaticJsonRpcProvider({ url: u, timeout: RPC_TIMEOUT_MS }, POLYGON_NETWORK)
+    );
+  }
+
+  /** true si l'échec vient du transport (à rejouer ailleurs), false si le nœud a répondu. */
+  private isTransportError(err: unknown): boolean {
+    const e = err as { error?: { body?: unknown; code?: number }; code?: string | number } | null;
+    // ethers v5 encapsule la réponse JSON-RPC d'erreur dans err.error.body (string).
+    if (e && e.error && typeof e.error.body === 'string') return false;
+    return true;
+  }
+
+  async perform(method: string, params: { [key: string]: any }): Promise<any> {
+    let lastError: unknown = new Error('no RPC backend available');
+    const size = this._pool.length;
+
+    for (let i = 0; i < size; i++) {
+      const index = (this._activeIndex + i) % size;
+      try {
+        const result = await this._pool[index].perform(method, params);
+        if (index !== this._activeIndex) this._activeIndex = index; // mémorise le backend sain
+        return result;
+      } catch (err) {
+        lastError = err;
+        if (!this.isTransportError(err)) throw err; // le nœud a répondu: ne pas masquer
+      }
+    }
+
+    throw lastError;
+  }
+}
+
+/**
+ * Crée un fournisseur Polygon résilient.
+ * @param rpcUrl URL prioritaire (sinon `POLYGON_RPC_URL`, sinon 1er RPC connu)
+ */
+export function createPolygonProvider(rpcUrl?: string): ethers.providers.JsonRpcProvider {
+  const primary = rpcUrl || process.env.POLYGON_RPC_URL || KNOWN_POLYGON_RPCS[0];
+  const urls = [primary, ...KNOWN_POLYGON_RPCS.filter((u) => u !== primary)];
+  return new FailoverPolygonProvider(urls) as unknown as ethers.providers.JsonRpcProvider;
+}
 
 // ===== ABIs =====
 
@@ -193,7 +330,10 @@ export class CTFClient {
   constructor(config: CTFConfig) {
     // RPC Polygon fiable en fallback (polygon-rpc.com est souvent "API key disabled").
     const rpcUrl = config.rpcUrl || process.env.POLYGON_RPC_URL || 'https://polygon.drpc.org';
-    this.provider = new ethers.providers.JsonRpcProvider(rpcUrl);
+    this.provider = createPolygonProvider(rpcUrl);
+    // Vérifie la forme de la clé AVANT ethers (évite la fuite de la valeur
+    // brute dans le message d'erreur remonté aux logs).
+    assertValidPrivateKeyShape(config.privateKey);
     this.wallet = new Wallet(config.privateKey, this.provider);
     this.ctfContract = new Contract(CTF_CONTRACT, CTF_ABI, this.wallet);
     this.usdcContract = new Contract(USDC_CONTRACT, ERC20_ABI, this.wallet);
@@ -319,6 +459,7 @@ export class CTFClient {
    * ```
    */
   async split(conditionId: string, amount: string): Promise<SplitResult> {
+    assertWritesAllowed('CTFClient.split (approve USDC.e + splitPosition)');
     const amountWei = ethers.utils.parseUnits(amount, USDC_DECIMALS);
 
     // 1. Check USDC balance
@@ -376,6 +517,7 @@ export class CTFClient {
    * ```
    */
   async merge(conditionId: string, amount: string): Promise<MergeResult> {
+    assertWritesAllowed('CTFClient.merge (mergePositions)');
     const amountWei = ethers.utils.parseUnits(amount, USDC_DECIMALS);
 
     // Check token balances
@@ -423,6 +565,7 @@ export class CTFClient {
    * @returns MergeResult with transaction details
    */
   async mergeByTokenIds(conditionId: string, tokenIds: TokenIds, amount: string): Promise<MergeResult> {
+    assertWritesAllowed('CTFClient.mergeByTokenIds (mergePositions)');
     const amountWei = ethers.utils.parseUnits(amount, USDC_DECIMALS);
 
     // Check token balances using the provided token IDs
@@ -487,6 +630,7 @@ export class CTFClient {
    * @see redeemByTokenIds - Use this for Polymarket CLOB markets
    */
   async redeem(conditionId: string, outcome?: string): Promise<RedeemResult> {
+    assertWritesAllowed('CTFClient.redeem (redeemPositions)');
     // Check resolution status
     const resolution = await this.getMarketResolution(conditionId);
     if (!resolution.isResolved) {
@@ -570,6 +714,7 @@ export class CTFClient {
     tokenIds: TokenIds,
     outcome?: string
   ): Promise<RedeemResult> {
+    assertWritesAllowed('CTFClient.redeemByTokenIds (redeemPositions)');
     // Check resolution status
     const resolution = await this.getMarketResolution(conditionId);
     if (!resolution.isResolved) {

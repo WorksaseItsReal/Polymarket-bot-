@@ -56,6 +56,11 @@ export interface RealtimeServiceConfig {
   wsOrderbookProbeMs?: number;
   /** Backoff exponentiel de base du polling REST en ms (défaut: 2000, plafond 60000) */
   restBackoffBaseMs?: number;
+  /**
+   * Nombre maximal de requêtes REST /book EN VOL simultanément, par passe de
+   * polling (défaut: 8). Borne la rafale quand de nombreux tokens sont abonnés.
+   */
+  restMaxConcurrency?: number;
 }
 
 // Market data types
@@ -284,6 +289,7 @@ export class RealtimeServiceV2 extends EventEmitter {
     restRequestTimeoutMs: number;
     wsOrderbookProbeMs: number;
     restBackoffBaseMs: number;
+    restMaxConcurrency: number;
   };
   private subscriptions: Map<string, Subscription> = new Map();
   private subscriptionIdCounter = 0;
@@ -344,6 +350,7 @@ export class RealtimeServiceV2 extends EventEmitter {
       restRequestTimeoutMs: config.restRequestTimeoutMs ?? 5000,
       wsOrderbookProbeMs: config.wsOrderbookProbeMs ?? 8000,
       restBackoffBaseMs: config.restBackoffBaseMs ?? 2000,
+      restMaxConcurrency: config.restMaxConcurrency ?? 8,
     };
   }
 
@@ -377,6 +384,12 @@ export class RealtimeServiceV2 extends EventEmitter {
    */
   disconnect(): void {
     this.stopRestPoller();
+    // La sonde de vivacité WS doit mourir avec la connexion : sinon elle se
+    // déclenche après coup et peut rallumer le poller sur un client déconnecté.
+    if (this.wsProbeTimer) {
+      clearTimeout(this.wsProbeTimer);
+      this.wsProbeTimer = null;
+    }
     if (this.client) {
       this.client.disconnect();
       this.client = null;
@@ -1010,6 +1023,10 @@ export class RealtimeServiceV2 extends EventEmitter {
     this.subscriptionMessages.clear();  // Clear reconnection list
     this.restTokens.clear();
     this.orderbookLastHash.clear();
+    // Purge complète des caches par-token (évite la fuite mémoire cumulée).
+    this.bookCache.clear();
+    this.priceCache.clear();
+    this.lastTradeCache.clear();
     this.stopRestPoller();
   }
 
@@ -1445,6 +1462,11 @@ export class RealtimeServiceV2 extends EventEmitter {
       if (refs.size === 0) {
         this.restTokens.delete(t);
         this.orderbookLastHash.delete(t);
+        // Purge des caches par-token : sans cela ils croissent sans borne au fil
+        // des rotations de marché (5–15 min) → fuite mémoire lente mais réelle.
+        this.bookCache.delete(t);
+        this.priceCache.delete(t);
+        this.lastTradeCache.delete(t);
       }
     }
     if (this.restTokens.size === 0) this.stopRestPoller();
@@ -1495,55 +1517,73 @@ export class RealtimeServiceV2 extends EventEmitter {
     const tokens = Array.from(this.restTokens.keys());
     let failures = 0;
 
-    await Promise.all(
-      tokens.map(async (tokenId) => {
-        try {
-          const book = await this.fetchRestBook(tokenId);
-          if (book) {
-            this.restRequestsOk++;
-            this.emitOrderbook(book);
-          } else {
+    try {
+      // Concurrence BORNÉE : un utilisateur peut souscrire à N marchés et chaque
+      // token est interrogé à chaque passe. Sans plafond, une passe lancerait N
+      // requêtes HTTP simultanées (rafale incontrôlée). On limite le nombre de
+      // requêtes EN VOL à `restMaxConcurrency`. Aucune passe n'est empilée : la
+      // suivante n'est planifiée qu'à la fin de celle-ci (voir `finally`).
+      const limit = Math.max(1, this.config.restMaxConcurrency);
+      let cursor = 0;
+
+      const worker = async (): Promise<void> => {
+        while (cursor < tokens.length) {
+          const tokenId = tokens[cursor++];
+          try {
+            const book = await this.fetchRestBook(tokenId);
+            if (book) {
+              this.restRequestsOk++;
+              this.emitOrderbook(book);
+            } else {
+              failures++;
+              this.restRequestsFailed++;
+            }
+          } catch (err) {
             failures++;
             this.restRequestsFailed++;
+            this.restLastError = this.brief(err);
           }
-        } catch (err) {
-          failures++;
-          this.restRequestsFailed++;
-          this.restLastError = this.brief(err);
         }
-      })
-    );
+      };
 
-    const total = tokens.length;
-    if (failures > 0 && failures === total) {
-      // Échec TOTAL de la passe → backoff.
-      this.restFailureStreak++;
-      this.restBackoffMs = Math.min(
-        this.restBackoffMs > 0 ? this.restBackoffMs * 2 : this.config.restBackoffBaseMs,
-        60000
+      await Promise.all(
+        Array.from({ length: Math.min(limit, tokens.length) }, () => worker())
       );
-      const now = Date.now();
-      // Un seul message, puis au maximum un rappel toutes les 5 minutes.
-      if (this.restWarnedAt === 0 || now - this.restWarnedAt >= 300000) {
-        this.restWarnedAt = now;
-        this.warn(
-          `REST /book en échec total (${this.restFailureStreak} passe(s) consécutive(s)) → ` +
-            `backoff ${this.restBackoffMs} ms. Dernière cause: ${this.restLastError || 'inconnue'}`
+    } finally {
+      // ⚠️ Le `finally` est ESSENTIEL : si la passe levait (erreur hors du
+      // try/catch par token), `scheduleRestPoll` ne serait jamais rappelé et le
+      // poller mourrait DÉFINITIVEMENT et silencieusement → plus aucun carnet.
+      const total = tokens.length;
+      if (failures > 0 && failures === total) {
+        // Échec TOTAL de la passe → backoff.
+        this.restFailureStreak++;
+        this.restBackoffMs = Math.min(
+          this.restBackoffMs > 0 ? this.restBackoffMs * 2 : this.config.restBackoffBaseMs,
+          60000
         );
+        const now = Date.now();
+        // Un seul message, puis au maximum un rappel toutes les 5 minutes.
+        if (this.restWarnedAt === 0 || now - this.restWarnedAt >= 300000) {
+          this.restWarnedAt = now;
+          this.warn(
+            `REST /book en échec total (${this.restFailureStreak} passe(s) consécutive(s)) → ` +
+              `backoff ${this.restBackoffMs} ms. Dernière cause: ${this.restLastError || 'inconnue'}`
+          );
+        }
+      } else {
+        if (this.restBackoffMs > 0) {
+          this.warn(
+            `REST /book rétabli (${this.restFailureStreak} échec(s) consécutif(s) surmonté(s)). ` +
+              `ok=${this.restRequestsOk} failed=${this.restRequestsFailed}`
+          );
+        }
+        this.restBackoffMs = 0;
+        this.restFailureStreak = 0;
+        this.restWarnedAt = 0;
       }
-    } else {
-      if (this.restBackoffMs > 0) {
-        this.warn(
-          `REST /book rétabli (${this.restFailureStreak} échec(s) consécutif(s) surmonté(s)). ` +
-            `ok=${this.restRequestsOk} failed=${this.restRequestsFailed}`
-        );
-      }
-      this.restBackoffMs = 0;
-      this.restFailureStreak = 0;
-      this.restWarnedAt = 0;
-    }
 
-    this.scheduleRestPoll(this.config.restPollIntervalMs + this.restBackoffMs);
+      this.scheduleRestPoll(this.config.restPollIntervalMs + this.restBackoffMs);
+    }
   }
 
   /** Récupère un carnet via REST et le normalise au format OrderbookSnapshot. */
@@ -1615,6 +1655,9 @@ export class RealtimeServiceV2 extends EventEmitter {
     restOk: number;
     restFailed: number;
     lastOrderbookAgoMs: number | null;
+    /** Taille des caches par-token (surveillance de fuite mémoire). */
+    bookCacheSize: number;
+    priceCacheSize: number;
   } {
     return {
       orderbookSource: this.config.orderbookSource,
@@ -1627,6 +1670,8 @@ export class RealtimeServiceV2 extends EventEmitter {
       restOk: this.restRequestsOk,
       restFailed: this.restRequestsFailed,
       lastOrderbookAgoMs: this.lastOrderbookAt ? Date.now() - this.lastOrderbookAt : null,
+      bookCacheSize: this.bookCache.size,
+      priceCacheSize: this.priceCache.size,
     };
   }
 

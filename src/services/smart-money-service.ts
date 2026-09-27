@@ -950,7 +950,15 @@ export class SmartMoneyService {
     const minTradeSize = options.minTradeSize ?? 10;
     const sideFilter = options.sideFilter;
     const delay = options.delay ?? 0;
-    const dryRun = options.dryRun ?? false;
+    // Fail-safe: un ordre réel ne peut partir qu'en opt-in EXPLICITE.
+    // - options.dryRun fourni  -> respecté tel quel
+    // - sinon DRY_RUN présent  -> lu depuis l'environnement (défaut: paper)
+    // - sinon                  -> paper (défaut sûr)
+    const dryRun = options.dryRun ?? (process.env.DRY_RUN !== 'false');
+
+    if (!dryRun) {
+      console.warn('[SmartMoneyService] ⚠️ LIVE COPY TRADING: dryRun=false, des ordres RÉELS seront envoyés.');
+    }
 
     // Subscribe
     const subscription = this.subscribeSmartMoneyTrades(

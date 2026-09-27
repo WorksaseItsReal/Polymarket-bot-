@@ -131,39 +131,84 @@ export class AuthorizationService {
     const usdc = new ethers.Contract(USDC_CONTRACT, ERC20_ABI, this.provider);
     const conditionalTokens = new ethers.Contract(CONDITIONAL_TOKENS, ERC1155_ABI, this.provider);
 
-    // Check USDC balance
-    const balance = await usdc.balanceOf(walletAddress);
-    const balanceFormatted = ethers.utils.formatUnits(balance, 6);
+    const issues: string[] = [];
 
-    // Check ERC20 allowances
+    // --- Solde USDC ---------------------------------------------------------
+    // FAIL-CLOSED : si la lecture on-chain échoue, on ne renvoie JAMAIS un
+    // résultat « prêt à trader ». On marque l'issue et on continue pour que
+    // l'appelant reçoive toujours un objet exploitable (jamais une exception qui
+    // serait avalée en amont et laisserait le bot croire que tout va bien).
+    let balanceFormatted = '0.00';
+    try {
+      const balance = await usdc.balanceOf(walletAddress);
+      balanceFormatted = ethers.utils.formatUnits(balance, 6);
+    } catch (err) {
+      issues.push(`ERC20: lecture du solde USDC impossible — ${this.errMsg(err)}`);
+    }
+
+    // --- Allowances ERC20 ---------------------------------------------------
     const erc20Allowances: AllowanceInfo[] = [];
     for (const spender of ERC20_SPENDERS) {
-      const allowance = await usdc.allowance(walletAddress, spender.address);
-      const allowanceNum = parseFloat(ethers.utils.formatUnits(allowance, 6));
-      const isUnlimited = allowanceNum > 1e12;
+      try {
+        const allowance = await usdc.allowance(walletAddress, spender.address);
+        const allowanceNum = parseFloat(ethers.utils.formatUnits(allowance, 6));
+        const isUnlimited = allowanceNum > 1e12;
 
-      erc20Allowances.push({
-        contract: spender.name,
-        address: spender.address,
-        approved: isUnlimited,
-        allowance: isUnlimited ? 'unlimited' : allowanceNum.toFixed(2),
-      });
+        erc20Allowances.push({
+          contract: spender.name,
+          address: spender.address,
+          approved: isUnlimited,
+          allowance: isUnlimited ? 'unlimited' : allowanceNum.toFixed(2),
+        });
+      } catch (err) {
+        // Vérification impossible ⇒ NOT approved (jamais « approved par défaut »).
+        erc20Allowances.push({
+          contract: spender.name,
+          address: spender.address,
+          approved: false,
+          allowance: 'unknown',
+        });
+        issues.push(`ERC20: vérification ${spender.name} impossible — ${this.errMsg(err)}`);
+      }
     }
 
-    // Check ERC1155 approvals
+    // --- Approbations ERC1155 ----------------------------------------------
     const erc1155Approvals: AllowanceInfo[] = [];
     for (const operator of ERC1155_OPERATORS) {
-      const isApproved = await conditionalTokens.isApprovedForAll(walletAddress, operator.address);
-
-      erc1155Approvals.push({
-        contract: operator.name,
-        address: operator.address,
-        approved: isApproved,
-      });
+      try {
+        const isApproved = await conditionalTokens.isApprovedForAll(walletAddress, operator.address);
+        erc1155Approvals.push({
+          contract: operator.name,
+          address: operator.address,
+          approved: isApproved,
+        });
+      } catch (err) {
+        erc1155Approvals.push({
+          contract: operator.name,
+          address: operator.address,
+          approved: false,
+        });
+        issues.push(`ERC1155: vérification ${operator.name} impossible — ${this.errMsg(err)}`);
+      }
     }
 
-    // Determine issues
-    const issues: string[] = [];
+    // --- Garde anti-état vide / absent (fail-closed) ------------------------
+    // Une liste vide ⇒ la boucle correspondante n'a rien vérifié. `issues` serait
+    // vide et `tradingReady` vaudrait `true` alors que RIEN n'a été contrôlé :
+    // c'est exactement le mode d'échec « autorisation absente = autorisation
+    // ouverte ». On refuse explicitement.
+    if (ERC20_SPENDERS.length === 0 || erc20Allowances.length !== ERC20_SPENDERS.length) {
+      issues.push(
+        `ERC20: contrôle incomplet (${erc20Allowances.length}/${ERC20_SPENDERS.length} dépensiers vérifiés)`
+      );
+    }
+    if (ERC1155_OPERATORS.length === 0 || erc1155Approvals.length !== ERC1155_OPERATORS.length) {
+      issues.push(
+        `ERC1155: contrôle incomplet (${erc1155Approvals.length}/${ERC1155_OPERATORS.length} opérateurs vérifiés)`
+      );
+    }
+
+    // --- Détermination des manques -----------------------------------------
     for (const a of erc20Allowances) {
       if (!a.approved) {
         issues.push(`ERC20: ${a.contract} needs USDC approval`);
@@ -185,6 +230,12 @@ export class AuthorizationService {
       tradingReady,
       issues,
     };
+  }
+
+  /** Message d'erreur borné (évite les dumps ethers de plusieurs Ko). */
+  private errMsg(err: unknown, maxLen = 200): string {
+    const raw = (err instanceof Error ? err.message : String(err)).replace(/\s+/g, ' ').trim();
+    return raw.length <= maxLen ? raw : raw.slice(0, maxLen) + '…';
   }
 
   /**
@@ -273,7 +324,12 @@ export class AuthorizationService {
     }
 
     const allApproved =
-      erc20Results.every((r) => r.success) && erc1155Results.every((r) => r.success);
+      ERC20_SPENDERS.length > 0 &&
+      ERC1155_OPERATORS.length > 0 &&
+      erc20Results.length === ERC20_SPENDERS.length &&
+      erc1155Results.length === ERC1155_OPERATORS.length &&
+      erc20Results.every((r) => r.success) &&
+      erc1155Results.every((r) => r.success);
 
     const newApprovals = [...erc20Results, ...erc1155Results].filter((r) => r.txHash).length;
 
