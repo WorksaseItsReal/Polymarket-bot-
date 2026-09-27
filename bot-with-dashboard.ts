@@ -266,7 +266,22 @@ function canTrade(): boolean {
   state.currentDrawdown = (state.peakCapital - state.currentCapital) / state.peakCapital;
 
   // Check temporary pause
-  if (state.isPaused && Date.now() < state.pauseUntil) return false;
+  if (state.isPaused && Date.now() < state.pauseUntil) {
+    // ⚠️ FIX 2026-09-27 : ce retour etait MUET. Le bot pouvait rester bloque des
+    // heures (voire 7 ou 30 jours selon la couche) sans la moindre ligne de log :
+    // impossible de diagnostiquer « le bot ne fait plus rien ». On trace la raison
+    // et le temps restant, au maximum une fois par minute.
+    const minsLeft = Math.ceil((state.pauseUntil - Date.now()) / 60000);
+    if (Date.now() - (state._lastPauseLog || 0) > 60000) {
+      state._lastPauseLog = Date.now();
+      log('WARN', `⏸️ Trading en pause (risque) — reprise dans ${minsLeft} min `
+        + `(pnl=$${state.totalPnL.toFixed(2)} daily=$${state.dailyPnL.toFixed(2)} `
+        + `monthly=$${state.monthlyPnL.toFixed(2)} dd=${(state.currentDrawdown * 100).toFixed(1)}% `
+        + `capital=$${state.currentCapital.toFixed(2)} pic=$${state.peakCapital.toFixed(2)})`);
+      updateDashboard();
+    }
+    return false;
+  }
   if (state.isPaused && Date.now() >= state.pauseUntil) {
     state.isPaused = false;
     log('INFO', 'Bot resumed after cooldown');
@@ -861,7 +876,13 @@ async function setupDipArb(sdk: PolymarketSDK) {
       // Taux de profit estimé du signal (leg1: estimatedProfitRate, leg2: expectedProfitRate)
       const profitRate = (s as any).estimatedProfitRate ?? (s as any).expectedProfitRate;
       let estProfit = 0;
-      if (typeof profitRate === 'number' && Number.isFinite(profitRate)) {
+      // ⚠️ FIX 2026-09-27 : `Number.isFinite(0)` est VRAI. Un `estimatedProfitRate`
+      // non calculé valait 0 -> `stake * (0 - 1)` = -stake = une PERTE TOTALE de la
+      // mise enregistrée pour chaque signal (2 514 signalements mesurés). Le PnL en
+      // mémoire s'effondrait, `currentCapital` avec lui, et le garde-fou de drawdown
+      // (25 % -> pause 7 JOURS, silencieuse) se déclenchait : le bot arrêtait de
+      // trader sans rien logger. Un ratio de profit valide est > 1.
+      if (typeof profitRate === 'number' && Number.isFinite(profitRate) && profitRate > 1) {
         estProfit = stake * (profitRate - 1);  // profitRate en ratio (ex 1.08 -> +8%)
       } else if ((s.currentPrice || 0) > 0) {
         // rendement d'une mise de 1€ sur un up/down: si le bon côté gagne, retour = 1/prix
@@ -1157,7 +1178,14 @@ async function setupLLMAnalysis(sdk: PolymarketSDK) {
             // ⚠️ ask_YES + ask_NO ≈ 1 + spread : afficher les deux bruts donnait
             // « UP 54% / DOWN 47% » (= 101 %). On normalise pour sommer à 100 %.
             const _totImp = (_yesImp + _noImp) || 1;
-            log('SIGNAL',   `   ↳ ${spotLine} · ${market.name?.slice(0, 30)} ~50/50 (UP ${(100 * _yesImp / _totImp).toFixed(0)}% / DOWN ${(100 * _noImp / _totImp).toFixed(0)}%) → HOLD (pas de LLM)`);
+            // ⚠️ FIX 2026-09-27 : le libelle disait « ~50/50 » alors que les valeurs
+            // affichees pouvaient etre 26 % / 74 %. On dit ce qui est vrai : aucune
+            // des deux faces n'est dans la fenetre [MIN, MAX], et on affiche l'ask BRUT
+            // (c'est lui qui decide) a cote du pourcentage normalise (qui sert a lire).
+            const _why = (_yesAsk > STRONG_MAX2 || _noAsk > STRONG_MAX2)
+              ? `favori hors fenetre (ask brut UP ${_yesAsk.toFixed(2)} / DOWN ${_noAsk.toFixed(2)} > ${STRONG_MAX2})`
+              : `aucun favori dans [${STRONG_MIN2} - ${STRONG_MAX2}] (ask brut UP ${_yesAsk.toFixed(2)} / DOWN ${_noAsk.toFixed(2)})`;
+            log('SIGNAL',   `   ↳ ${spotLine} · ${market.name?.slice(0, 30)} ${_why} — UP ${(100 * _yesImp / _totImp).toFixed(0)}% / DOWN ${(100 * _noImp / _totImp).toFixed(0)}% → HOLD`);
             logLearning({ roundId: market.slug || currentRoundId, market: market.name?.slice(0, 40), side: 'HOLD', price: 0, estGain: 0, conf: 0, coin: market.underlying, conditionId: market.conditionId });
             continue;
           }
