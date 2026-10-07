@@ -1160,6 +1160,7 @@ async function setupFairValueStrategy(sdk: PolymarketSDK) {
   await setupTelegram();
 
   const discovery = new RoundDiscovery();
+  let lastFallbackScan = 0;
   // Mesure continue « modèle vs carnet » sur tous les rounds observés (bilan Telegram).
   const shadow = new ShadowTracker({ path: polyDir() + '/fv-shadow.json', fetchOutcome: slug => fetchRoundOutcome(slug) });
   shadowTracker = shadow;
@@ -1185,6 +1186,10 @@ async function setupFairValueStrategy(sdk: PolymarketSDK) {
     scanMarkets: async () => {
       const found: ScannedMarket[] = await discovery.current(Date.now(), FV_COINS);
       if (found.length >= FV_COINS.length) return found;
+      // Repli lourd (scan Gamma + CLOB) : au plus une fois par minute, même si un coin
+      // manque durablement (sinon il tournerait toutes les 10 s).
+      if (Date.now() - lastFallbackScan < 60_000) return found;
+      lastFallbackScan = Date.now();
       try {
         const scanned = (await withTimeout(sdk.dipArb.scanUpcomingMarkets({
           coin: 'all', duration: '5m', minMinutesUntilEnd: 0, maxMinutesUntilEnd: 6, limit: 12,
