@@ -10,6 +10,7 @@
  */
 
 import type { LedgerStats } from './paper-ledger.js';
+import type { ShadowStats } from '../strategy/shadow-tracker.js';
 
 export function escapeHtml(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -143,7 +144,22 @@ export function msgTradeClosed(i: TradeClosedInfo): string {
   ].join('\n');
 }
 
-export function msgSummary(stats: LedgerStats, capital: number): string {
+/** « Le modèle bat-il le carnet ? » en une ligne honnête. */
+export function shadowLine(sh: ShadowStats): string {
+  if (sh.n < 50 || sh.brierModel === null || sh.brierMarket === null) {
+    return `Modèle vs carnet : trop tôt (${sh.n} rounds observés, il en faut ≥ 50)`;
+  }
+  const b = (x: number) => x.toFixed(4).replace('.', ',');
+  const t = sh.tDiff === null ? '' : `, t = ${sh.tDiff.toFixed(1).replace('.', ',')}`;
+  const verdict = sh.tDiff !== null && sh.tDiff <= -2
+    ? 'le modèle prédit MIEUX que le carnet ✅'
+    : sh.tDiff !== null && sh.tDiff >= 2
+      ? 'le carnet prédit mieux que le modèle ❌ (pas d\'edge)'
+      : 'pas de différence significative';
+  return `Modèle vs carnet (${sh.n} rounds) : erreur ${b(sh.brierModel)} vs ${b(sh.brierMarket)}${t} → ${verdict}`;
+}
+
+export function msgSummary(stats: LedgerStats, capital: number, shadow?: ShadowStats): string {
   const expected = stats.avgModelProb === null ? '' : ` (attendu par le modèle : ${pct(stats.avgModelProb)})`;
   return [
     '📊 <b>BILAN</b> — stratégie juste valeur (papier)',
@@ -151,6 +167,7 @@ export function msgSummary(stats: LedgerStats, capital: number): string {
     `Taux de réussite : ${stats.winRate === null ? '—' : pct(stats.winRate)}${expected}`,
     `PnL : <b>${money(stats.pnl)}</b> · capital : ${amount(capital + stats.pnl)} · pire baisse : ${money(-stats.maxDrawdown)}`,
     `Fiabilité : ${reliability(stats)}`,
+    ...(shadow ? [shadowLine(shadow)] : []),
   ].join('\n');
 }
 

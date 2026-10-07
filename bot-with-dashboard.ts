@@ -35,6 +35,7 @@ import { DecisionJournal } from './src/services/decision-journal.js';
 import { MoveScheduler } from './src/strategy/move-scheduler.js';
 import { withTimeout } from './src/utils/with-timeout.js';
 import { PersistentGuard, evaluateGuard } from './src/strategy/performance-guard.js';
+import { ShadowTracker } from './src/strategy/shadow-tracker.js';
 import { TelegramClient, telegramConfigFromEnv } from './src/services/telegram.js';
 import { isValidTimeZone, msgAlert, msgStartup, msgSummary } from './src/services/telegram-messages.js';
 
@@ -901,6 +902,7 @@ const FV_POLL_MS = Math.min(300, Math.max(5, Number(process.env.FV_POLL_SEC ?? '
 const FV_MOVE_BPS = Math.min(50, Math.max(1, Number(process.env.FV_MOVE_BPS ?? '') || 3));
 let spotStream: SpotStream | null = null;
 let decisionJournal: DecisionJournal | null = null;
+let shadowTracker: ShadowTracker | null = null;
 const FV_EXIT_EDGE = (() => {
   const v = Number(process.env.FV_EXIT_EDGE ?? '');
   return Number.isFinite(v) && v >= 0 && v <= 0.5 && (process.env.FV_EXIT_EDGE ?? '').trim() !== '' ? v : FV_CFG.minEdge;
@@ -1096,10 +1098,11 @@ async function setupTelegram() {
   let lastKey = '';
   setInterval(() => {
     const st = ledgerStats();
-    const key = `${st.n}|${st.open}`;
-    if (key === lastKey || (st.n === 0 && st.open === 0)) return;
+    const sh = shadowTracker?.stats();
+    const key = `${st.n}|${st.open}|${sh?.n ?? 0}`;
+    if (key === lastKey || (st.n === 0 && st.open === 0 && !sh?.n)) return;
     lastKey = key;
-    notify(msgSummary(st, CONFIG.capital.totalUsd));
+    notify(msgSummary(st, CONFIG.capital.totalUsd, sh));
   }, everyMin * 60_000);
 }
 
@@ -1150,6 +1153,10 @@ async function setupFairValueStrategy(sdk: PolymarketSDK) {
   await setupTelegram();
 
   const discovery = new RoundDiscovery();
+  // Mesure continue « modèle vs carnet » sur tous les rounds observés (bilan Telegram).
+  const shadow = new ShadowTracker({ path: polyDir() + '/fv-shadow.json', fetchOutcome: slug => fetchRoundOutcome(slug) });
+  shadowTracker = shadow;
+  setInterval(() => { void shadow.resolveDue(); }, 30_000).unref?.();
   const journal = (process.env.FV_JOURNAL ?? 'true').toLowerCase() === 'false'
     ? null
     : new DecisionJournal({ dir: polyDir() + '/journal', log: m => log('WARN', m) });
@@ -1191,7 +1198,7 @@ async function setupFairValueStrategy(sdk: PolymarketSDK) {
     notify,
     log: (level, msg) => log(level, msg),
     timeZone: TG_TZ,
-    onEvaluation: r => { journal?.record(r); },
+    onEvaluation: r => { journal?.record(r); shadow.observe(r); },
     entryBlock: () => perfGuard(),
     onRiskStop: reason => {
       const streak = /pertes consécutives/.test(reason);
