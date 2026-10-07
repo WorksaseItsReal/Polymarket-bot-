@@ -123,6 +123,24 @@ async function main() {
   console.log('\n   ⚠️ 36 couples testés : un t < 2,9 sur le meilleur couple peut être du hasard (Bonferroni).');
   console.log('   Ne retenir un réglage que s\'il est positif sur LES DEUX moitiés.');
 
+  // 3b. Où est l'avantage ? (réglage actuel, par coin et par temps restant)
+  const fmtRow = (label: string, rs: typeof rounds) => {
+    const r = replay(rs, cfg.minEdge, cfg.minProb, params);
+    const [a, b] = halves(rs);
+    const ra = replay(a, cfg.minEdge, cfg.minProb, params);
+    const rb = replay(b, cfg.minEdge, cfg.minProb, params);
+    console.log(`   ${label.padEnd(12)} n=${String(r.n).padStart(5)}  WR ${pct(r.winRate).padStart(7)}  EV/$ ${num(r.evPerDollar, 4).padStart(8)}  t ${num(r.tStat, 1).padStart(5)}  | moitiés ${num(ra.evPerDollar, 3)} / ${num(rb.evPerDollar, 3)}`);
+  };
+  console.log(`\n3b) Réglage actuel (edge ${cfg.minEdge}, pmin ${cfg.minProb}) par coin`);
+  for (const coin of [...new Set(resolved.map(r => r.coin))].sort()) {
+    fmtRow(coin, rounds.filter(l => l[0].coin === coin));
+  }
+  console.log('    … et par temps restant au moment de l\'évaluation (s)');
+  for (const [lo, hi] of [[45, 90], [90, 150], [150, 210], [210, 270]]) {
+    const rs = rounds.map(l => l.filter(r => r.tau >= lo && r.tau < hi)).filter(l => l.length);
+    fmtRow(`τ ${lo}-${hi}`, rs);
+  }
+
   // 4. Trades réellement pris
   const buys = resolved.filter(r => r.act === 'buy' && r.side);
   if (buys.length) {
