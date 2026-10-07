@@ -191,7 +191,18 @@ Tout vit dans **`~/.polymarket/`** (`/root/.polymarket/`) :
 
 ## 4. Comment lire son PnL (sans se tromper)
 
-### 4.1 Le chiffre officiel
+### 4.0 Le PnL de la stratégie actuelle (registre du bot)
+
+```bash
+npx tsx scripts/analysis/ledger.ts          # bilan + derniers trades
+npx tsx scripts/analysis/fv-report.ts --days 7   # le modèle a-t-il un edge ?
+```
+
+`~/.polymarket/fv-ledger.json` est la source de vérité : le bot y résout lui-même ses
+rounds. Les fichiers `pnl.json` / `cumulative.json` ci-dessous viennent des scripts Hermes
+externes (ancienne chaîne) et ne pilotent plus la stratégie.
+
+### 4.1 Le chiffre officiel (ancienne chaîne Hermes)
 
 ```bash
 cat ~/.polymarket/pnl.json
@@ -250,7 +261,8 @@ Bilan : 12 trades · 9 ✅ / 3 ❌ (75 %) · PnL +1,84 $
 ```
 
 plus un message de démarrage, un **📊 BILAN** périodique (taux de réussite réel vs attendu par
-le modèle, PnL, pire baisse, fiabilité statistique) et des **⚠️ ALERTES** (pause de risque,
+le modèle, PnL, pire baisse, fiabilité statistique, et **« modèle vs carnet »** : sur tous les
+rounds observés, le modèle prédit-il mieux que les prix Polymarket ? — la condition pour gagner) et des **⚠️ ALERTES** (pause de risque,
 registre illisible), au plus une par motif toutes les 6 h.
 
 > ⚠️ **Ancien recap Hermes** (`paperbot-recap-telegram` → `/root/.hermes/scripts/paperbot-recap.py`,
