@@ -19,6 +19,7 @@
 
 import { realizedVolPerSqrtSec } from './fair-value.js';
 import type { SpotCoin } from './spot-price-service.js';
+import type { LivePrice } from './spot-stream.js';
 
 interface Candle {
   openTimeMs: number;
@@ -44,7 +45,12 @@ const PAIRS: Record<SpotCoin, { binance: string; coinbase: string }> = {
 };
 
 const FETCH_TIMEOUT_MS = 3500;
+/** Sans flux temps réel, le spot vient de la bougie courante : cache court. */
 const CACHE_MS = 3000;
+/** Avec flux temps réel, les bougies ne servent qu'au strike et à la vol : cache long. */
+const CACHE_MS_WITH_LIVE = 30_000;
+/** Un prix temps réel plus vieux que ça est ignoré (repli sur la bougie). */
+const LIVE_MAX_AGE_MS = 3000;
 /** Une bougie « courante » plus vieille que ça signifie un flux figé. */
 const MAX_CANDLE_AGE_MS = 120_000;
 
@@ -130,15 +136,44 @@ const cache = new Map<SpotCoin, { ts: number; value: { candles: Candle[]; source
 /**
  * Données du round commencé à `slotSec` pour `coin`. null si le round n'a pas
  * commencé, si les sources sont indisponibles ou si le flux est périmé.
+ *
+ * `live` : prix temps réel (flux WebSocket Binance). Utilisé comme spot UNIQUEMENT si
+ * les bougies viennent aussi de Binance (même marché que le strike) et s'il a moins de
+ * 3 s ; sinon le spot reste la clôture de la bougie courante.
  */
-export async function getRoundMarketData(coin: SpotCoin, slotSec: number, nowMs = Date.now()): Promise<RoundMarketData | null> {
+export async function getRoundMarketData(
+  coin: SpotCoin,
+  slotSec: number,
+  nowMs = Date.now(),
+  live: LivePrice | null = null,
+): Promise<RoundMarketData | null> {
   if (slotSec * 1000 > nowMs) return null; // round pas encore ouvert : strike inconnu
+  const liveOk = !!live && live.price > 0 && live.ageMs >= 0 && live.ageMs <= LIVE_MAX_AGE_MS;
   const hit = cache.get(coin);
-  let loaded = hit && nowMs - hit.ts < CACHE_MS ? hit.value : undefined;
+  const maxAge = liveOk && hit?.value?.source.startsWith('binance') ? CACHE_MS_WITH_LIVE : CACHE_MS;
+  let loaded = hit && nowMs - hit.ts < maxAge ? hit.value : undefined;
+  const fromCache = loaded !== undefined;
   if (loaded === undefined) {
     loaded = await fetchCandles(coin);
     cache.set(coin, { ts: nowMs, value: loaded });
   }
   if (!loaded) return null;
-  return deriveRoundData(loaded.candles, slotSec, nowMs, loaded.source);
+  let base = deriveRoundData(loaded.candles, slotSec, nowMs, loaded.source);
+  if (!base && fromCache) {
+    // Cache antérieur au début du round (bougie du strike absente) : on relit une fois.
+    loaded = await fetchCandles(coin);
+    cache.set(coin, { ts: nowMs, value: loaded });
+    if (!loaded) return null;
+    base = deriveRoundData(loaded.candles, slotSec, nowMs, loaded.source);
+  }
+  if (!base) return null;
+  if (liveOk && loaded.source.startsWith('binance')) {
+    return { ...base, spot: (live as LivePrice).price, source: `${loaded.source}+ws` };
+  }
+  return base;
+}
+
+/** Vide le cache (tests). */
+export function clearRoundDataCache(): void {
+  cache.clear();
 }

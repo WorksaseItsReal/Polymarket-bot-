@@ -29,6 +29,8 @@ import { getRoundMarketData } from './src/services/round-market-data.js';
 import { computeStats, fetchRoundOutcome, loadLedger, type LedgerStats } from './src/services/paper-ledger.js';
 import { FairValueRunner, STRATEGY_COINS, type ScannedMarket } from './src/strategy/fair-value-runner.js';
 import { RoundDiscovery } from './src/services/round-discovery.js';
+import { SpotStream } from './src/services/spot-stream.js';
+import { MoveScheduler } from './src/strategy/move-scheduler.js';
 import { TelegramClient, telegramConfigFromEnv } from './src/services/telegram.js';
 import { msgAlert, msgStartup, msgSummary } from './src/services/telegram-messages.js';
 
@@ -868,6 +870,9 @@ let currentRoundId: string = '';
 // Paramètres de la stratégie juste valeur (src/services/fair-value.ts, surchargeables par .env).
 const FV_CFG = fairValueConfigFromEnv(process.env);
 const FV_POLL_MS = Math.min(300, Math.max(5, Number(process.env.FV_POLL_SEC ?? '') || 10)) * 1000;
+/** Mouvement du spot (points de base) qui déclenche une évaluation immédiate. */
+const FV_MOVE_BPS = Math.min(50, Math.max(1, Number(process.env.FV_MOVE_BPS ?? '') || 3));
+let spotStream: SpotStream | null = null;
 const FV_EXIT_EDGE = (() => {
   const v = Number(process.env.FV_EXIT_EDGE ?? '');
   return Number.isFinite(v) && v >= 0 && v <= 0.5 && (process.env.FV_EXIT_EDGE ?? '').trim() !== '' ? v : FV_CFG.minEdge;
@@ -1087,6 +1092,11 @@ async function setupFairValueStrategy(sdk: PolymarketSDK) {
   await setupTelegram();
 
   const discovery = new RoundDiscovery();
+  // Prix spot temps réel (WebSocket Binance) ; sans lui, repli automatique sur le REST.
+  const stream = (process.env.FV_SPOT_STREAM ?? 'true').toLowerCase() === 'false'
+    ? null
+    : new SpotStream({ coins: STRATEGY_COINS, moveBps: FV_MOVE_BPS, log: (l, m) => log(l, m) });
+  spotStream = stream;
   const runner = new FairValueRunner({
     cfg: FV_CFG,
     exitEdge: FV_EXIT_EDGE,
@@ -1111,7 +1121,9 @@ async function setupFairValueStrategy(sdk: PolymarketSDK) {
     },
     marketsRefreshMs: 10_000,
     getBook: tokenId => sdk.markets.getTokenOrderbook(tokenId),
-    getRoundData: (coin, slot, now) => (isSpotCoin(coin) ? getRoundMarketData(coin as SpotCoin, slot, now) : Promise.resolve(null)),
+    getRoundData: (coin, slot, now) => (isSpotCoin(coin)
+      ? getRoundMarketData(coin as SpotCoin, slot, now, stream?.price(coin) ?? null)
+      : Promise.resolve(null)),
     fetchOutcome: slug => fetchRoundOutcome(slug),
     notify,
     log: (level, msg) => log(level, msg),
@@ -1145,9 +1157,21 @@ async function setupFairValueStrategy(sdk: PolymarketSDK) {
 
   // Seul le mode PAPER est implémenté : en LIVE (bascule possible depuis le dashboard)
   // la stratégie n'écrit RIEN — un trade journalisé sans ordre réel fausserait le PnL.
-  const tick = () => (CONFIG.dryRun && state.paper ? runner.tick() : Promise.resolve());
+  const tick = (coins?: readonly string[]) => (CONFIG.dryRun && state.paper ? runner.tick(coins) : Promise.resolve(true));
   await tick();
   setInterval(() => { void tick(); }, FV_POLL_MS);
+
+  if (stream) {
+    // Réaction immédiate à un mouvement du spot : c'est là que le carnet Polymarket est
+    // le plus souvent en retard. Au plus une évaluation par coin toutes les 1,5 s.
+    const scheduler = new MoveScheduler({ run: coins => tick(coins) });
+    stream.on('move', (coin: string) => scheduler.onMove(coin));
+    stream.on('clockSkew', (ms: number) => {
+      log('WARN', `⏱️ Horloge suspecte : réception − horodatage Binance = ${ms} ms (médiane). Le temps restant des rounds peut être faux : synchronise l'heure du serveur (NTP).`);
+      alertOnce('clock', `horloge du serveur décalée d'environ ${(ms / 1000).toFixed(1)} s par rapport à Binance — active la synchro NTP (timedatectl set-ntp true)`);
+    });
+    stream.start();
+  }
 }
 
 async function setupBinanceAnalysis(sdk: PolymarketSDK) {

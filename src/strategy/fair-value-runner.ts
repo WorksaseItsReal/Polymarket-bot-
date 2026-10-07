@@ -106,6 +106,7 @@ export class FairValueRunner {
   private readonly traded = new Set<string>();
   private readonly lastHoldLog = new Map<string, number>();
   private readonly unresolvedWarned = new Set<string>();
+  private lastExitCheck = 0;
   private markets: ScannedMarket[] = [];
   private marketsTs = 0;
   private marketsSlot = -1;
@@ -164,20 +165,26 @@ export class FairValueRunner {
 
   // ---------------------------------------------------------------- tick
 
-  async tick(): Promise<void> {
-    if (this.running) return; // un tick lent ne chevauche jamais le suivant
+  /**
+   * Un passage complet. `coins` restreint les ENTRÉES à ces coins (tick déclenché par un
+   * mouvement du spot) ; résolution et sorties portent toujours sur tout le registre.
+   * Renvoie false si un tick était déjà en cours (rien n'a été fait).
+   */
+  async tick(coins?: readonly string[]): Promise<boolean> {
+    if (this.running) return false; // un tick lent ne chevauche jamais le suivant
     this.running = true;
     try {
       await this.resolveFinishedRounds();
-      if (!this.d.canTrade()) return;
-      if (this.trades() === null) return;
+      if (!this.d.canTrade()) return true;
+      if (this.trades() === null) return true;
       await this.checkExits();
-      await this.enterNewTrades();
+      await this.enterNewTrades(coins);
     } catch (err) {
       this.d.log('WARN', `Stratégie juste valeur : tick en échec (${String((err as Error)?.message ?? err).slice(0, 160)}) — nouvel essai au prochain tick`);
     } finally {
       this.running = false;
     }
+    return true;
   }
 
   /** Règle les trades dont le round est terminé et annonce le résultat. */
@@ -219,6 +226,10 @@ export class FairValueRunner {
   async checkExits(): Promise<void> {
     const { cfg } = this.d;
     const now = this.d.now();
+    // Les ticks déclenchés par le spot peuvent être rapprochés : la revue des sorties
+    // (un carnet par position) est bornée à une fois toutes les 5 s.
+    if (now - this.lastExitCheck < 5000) return;
+    this.lastExitCheck = now;
     for (const pos of (this.trades() ?? []).filter(t => t.status === 'open')) {
       const tauSec = (pos.endMs - now) / 1000;
       // En fin de round le modèle n'est pas fiable : on garde jusqu'à la résolution.
@@ -268,10 +279,11 @@ export class FairValueRunner {
     this.marketsTs = now;
   }
 
-  async enterNewTrades(): Promise<void> {
+  async enterNewTrades(coins?: readonly string[]): Promise<void> {
     const { cfg } = this.d;
     await this.refreshMarkets();
     for (const market of this.markets) {
+      if (coins && !coins.includes(market.underlying)) continue;
       if (this.traded.has(market.conditionId)) continue;
       const slot = slotOf(market) as number;
       const endMs = slot * 1000 + 300_000;

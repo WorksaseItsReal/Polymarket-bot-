@@ -118,7 +118,9 @@ Variables (nom → rôle) :
 | `FV_STRIKE_NOISE_SEC` | `10` | Incertitude du strike (open de bougie 1 min ≠ point Chainlink), en secondes de variance. |
 | `FV_TWAP_WINDOW_SEC` | `0` | Résolution ponctuelle (règle officielle : prix Chainlink à la fin vs au début). |
 | `FV_TAILS` | `normal` | Loi des rendements. `t4` est **plus** confiante pour \|z\| < 2 (pas plus prudente). |
-| `FV_POLL_SEC` | `10` | Période de scrutation (bornée à [5 ; 300] s). |
+| `FV_POLL_SEC` | `10` | Période de scrutation de fond (bornée à [5 ; 300] s). |
+| `FV_SPOT_STREAM` | `true` | Prix spot temps réel par WebSocket Binance (`false` = REST seul). |
+| `FV_MOVE_BPS` | `3` | Mouvement du spot (points de base) qui déclenche une évaluation immédiate du coin. |
 
 Les anciennes variables `P_STRONG_MIN`, `P_STRONG_MAX`, `P_MIN_PRICE`, `P_TAKE_PROFIT`,
 `P_STOP_LOSS`, `EDGE_FILTER_ENABLED`, `LEARN_COOLDOWN_AGE_H` ne sont **plus lues** par la
@@ -227,22 +229,26 @@ peut pas créer d'edge ; le cooldown/« fenêtre apprise » par coin réagissait
 même rapport). L'objectif n'est **pas** le win rate (acheter des favoris à 0,95 donne 95 % de WR
 et zéro gain) mais l'**espérance par trade après frais**.
 
-Toutes les ~10 s, pour chaque round 5 min ouvert (au plus **une entrée par round**) :
+En continu (évaluation sur mouvement du spot + passage de fond toutes les ~10 s), pour chaque round 5 min ouvert (au plus **une entrée par round**) :
 
-1. **Données** (une seule source de bougies 1 min, Binance → binance.vision → Coinbase) :
-   strike = ouverture de la bougie du slot, spot = dernier prix, σ = max(vol réalisée 60 min,
-   15 min). Flux absent ou figé → pas de mise.
-2. **Probabilité** : `P(Up) = Φ(ln(S/K) / √(σ²·(τ + bruit_strike) + basis²))` — résolution
+1. **Marchés** : le round en cours de chaque coin est trouvé directement par son slug
+   `<coin>-updown-5m-<slot>` (Gamma `events?slug=`), tokens Up/Down associés par libellé.
+2. **Données** : strike = ouverture de la bougie 1 min Binance du slot ; σ = max(vol réalisée
+   60 min, 15 min) ; spot = **flux WebSocket Binance temps réel** (repli : dernière bougie
+   REST, puis binance.vision, puis Coinbase). Chaque mouvement ≥ `FV_MOVE_BPS` déclenche une
+   évaluation immédiate du coin (au plus une toutes les 1,5 s). Flux absent ou figé → pas de
+   mise. L'horloge du serveur est contrôlée contre les horodatages Binance (alerte si décalée).
+3. **Probabilité** : `P(Up) = Φ(ln(S/K) / √(σ²·(τ + bruit_strike) + basis²))` — résolution
    ponctuelle Chainlink (« Up » si prix final ≥ prix d'ouverture).
-3. **Coût réel** d'une part = ask + frais taker `0,07·p·(1−p)`. Edge = P(côté) − coût.
+4. **Coût réel** d'une part = ask + frais taker `0,07·p·(1−p)`. Edge = P(côté) − coût.
    Entrée seulement si **P(côté) ≥ `FV_MIN_PROB` (0,60)**, edge ≥ `FV_MIN_EDGE`,
    τ ∈ [45 ; 270] s et ask ∈ [0,08 ; 0,92].
-4. **Mise** : `computeStake` (Kelly ×0,25, probabilité du modèle **shrinkée de moitié** vers le
+5. **Mise** : `computeStake` (Kelly ×0,25, probabilité du modèle **shrinkée de moitié** vers le
    prix, plafonds durs 1 % du capital/trade, 10 % d'exposition, modérateurs drawdown et
    **série de pertes réelle** lus dans `fv-ledger.json`).
-5. **Exécution simulée réaliste** : la mise consomme le carnet niveau par niveau (VWAP) ; si la
+6. **Exécution simulée réaliste** : la mise consomme le carnet niveau par niveau (VWAP) ; si la
    profondeur manque ou si l'edge au VWAP passe sous le seuil → pas de mise.
-6. **Sortie** : on garde jusqu'à la résolution, sauf si `bid − frais > p_modèle + FV_EXIT_EDGE`
+7. **Sortie** : on garde jusqu'à la résolution, sauf si `bid − frais > p_modèle + FV_EXIT_EDGE`
    (le marché paie plus que la position ne vaut). Plus de TP/SL en % (vendre au bid coûte
    spread + frais, et le stop-loss était inerte sur un binaire).
 
