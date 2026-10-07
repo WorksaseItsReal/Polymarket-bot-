@@ -22,9 +22,18 @@ import { CTFClient } from './src/clients/ctf-client.js';
 import { startDashboard, dashboardEmitter } from './src/dashboard/index.js';
 import type { BotState, BotConfig, LogLevel, DipArbSignal, SmartMoneySignal } from './src/dashboard/types.js';
 import { addSession, createSessionFromState, type TradeRecord } from './src/dashboard/session-history.js';
-import { analyzeMarket, isEnabled } from './src/deepseek-analyzer.js';
 import { getSpotPrice, formatSpotPrice, isSpotCoin, type SpotCoin } from './src/services/spot-price-service.js';
 import { computeStake } from './src/services/stake-sizing.js';
+import {
+  binaryPayoff,
+  decide,
+  effectiveCostPerShare,
+  estimateFill,
+  fairValueConfigFromEnv,
+  probUp,
+  takerFeePerShare,
+} from './src/services/fair-value.js';
+import { getRoundMarketData } from './src/services/round-market-data.js';
 
 // ============================================================================
 // CONFIGURATION (same as bot-config.ts)
@@ -364,7 +373,7 @@ function recordTrade(profit: number, strategy: string, creditPnl = true) {
   updateDashboard();
 }
 
-function logLearning(e: { roundId?: string; market?: string; side: string; price: number; estGain: number; conf: number; coin?: string; winProb?: number; conditionId?: string; stake?: number }) {
+function logLearning(e: { roundId?: string; market?: string; side: string; price: number; estGain: number; conf: number; coin?: string; winProb?: number; conditionId?: string; stake?: number; [extra: string]: unknown }) {
   try {
     // ⚠️ FIX 2026-09-25 : ne JAMAIS écrire les HOLD dans history.json.
     // Avant ce fix : 298 HOLD / 300 entrées (99,3 %) → la fenêtre de 300 ne
@@ -375,12 +384,15 @@ function logLearning(e: { roundId?: string; market?: string; side: string; price
     // history.json, que le résolveur PnL lit.
     if (e.side === 'HOLD') return;
 
-    const PATH = (process.env.HOME || '/root') + '/.polymarket/history.json';
-    const h: any[] = existsSync(PATH) ? JSON.parse(readFileSync(PATH, 'utf-8')) : [];
+    const h = readHistory();
+    if (h === null) {
+      log('WARN', 'learning store: history.json illisible — décision NON journalisée (fichier préservé)');
+      return;
+    }
     h.push({ ...e, ts: new Date().toISOString(), realized: 0 });
     if (h.length > 300) h.splice(0, h.length - 300);
-    mkdirSync((process.env.HOME || '/root') + '/.polymarket', { recursive: true });
-    writeFileSync(PATH, JSON.stringify(h, null, 2));
+    mkdirSync(polyDir(), { recursive: true });
+    writeFileSync(polyDir() + '/history.json', JSON.stringify(h, null, 2));
   } catch (err) { log('WARN', `learning store: ${(err as Error).message}`); }
 }
 
@@ -397,130 +409,45 @@ function roundEndMsFromSlug(slug: string | undefined): number | null {
   return slot * 1000 + 300 * 1000; // round 5m
 }
 
-// === APPRENTISSAGE AUTO-ADAPTATIF (déterministe, zéro LLM) ===
-// Lit history.json et apprend de ses RÉSULTATS RÉELS (TP/SL/résolutions) :
-//  - sizing KELLY : fraction de mise optimale f* = p - (1-p)/b, où p = winrate,
-//    b = gain_moyen / perte_moyenne (croissance exponentielle optimale).
-//  - cooldown : si une coin est en dessous du seuil de survie, on ne mise plus.
-//  - fenêtre par bucket de prix : on mesure la winrate par intervalle de prix
-//    (0.55-0.60, 0.60-0.65, …) et on recentre la sweet-spot vers les buckets gagnants.
-type CoinLearn = { sizeFactor: number; skip: boolean; recent: number; wr: number; pnl: number };
-// Fenêtres de prix recommandées (résultat de l'apprentissage global).
-type BucketStat = { bucket: string; lo: number; hi: number; n: number; wr: number; score: number };
-let learnedMin = 0.58; let learnedMax = 0.65; let learnedBuckets: BucketStat[] = [];
-// C6 (2026-09-26) : plafond Kelly ramené de 0.25 → 0.05 tant que n_resolus < 200.
-// f* mesuré = 0.0205 → sizeFactor ≈ 1.04. Avec 0.25 la prod tournait à ×1.30/×1.50
-// (= 12× la fraction mesurée). Voir docs/STRATEGY-REVIEW.md C6.
-const kellyCeil = 0.05;     // jamais plus de 5% du risque sur une mise (prudence, n<200)
-const kellyFloor = 0;
-
-function computeCoinLearning(): Record<string, CoinLearn> {
-  const out: Record<string, CoinLearn> = {};
-  const allPriced: { price: number; realized: number }[] = [];
-  try {
-    const PATH = (process.env.HOME || '/root') + '/.polymarket/history.json';
-    const h: any[] = existsSync(PATH) ? JSON.parse(readFileSync(PATH, 'utf-8')) : [];
-    const byCoin: Record<string, any[]> = {};
-    for (const t of h) {
-      if (!t || !t.coin || t.side === 'HOLD') continue;
-      if (typeof t.realized !== 'number') continue;   // seul un résultat final compte
-      const price = typeof t.price === 'number' && t.price > 0 ? t.price : 0;
-      (byCoin[t.coin] = byCoin[t.coin] || []).push(t);
-      if (price > 0) allPriced.push({ price, realized: t.realized || 0 });
-    }
-    for (const coin of Object.keys(byCoin)) {
-      const list = byCoin[coin].slice(-20);           // fenêtre: 20 derniers résolus
-      const staff = list.filter(t => t.realized !== 0 && (t.realized > 0 || t.realized < 0));
-      const pnl = list.reduce((s, t) => s + (t.realized || 0), 0);
-      // ⚠️ ANTI-BLOCAGE (2026-09-26) : le cooldown ne doit JAMAIS être éternel.
-      // Une coin en cooldown ne mise plus → ne produit plus de trade résolu → sa
-      // fenêtre ne bouge plus → elle restait en cooldown POUR TOUJOURS. Observé en
-      // prod : ETH/DOGE/XRP figées, le bot ne misait plus que sur BTC et SOL.
-      // Correctif : ne juger la santé que sur des résultats RÉCENTS ; si la coin n'a
-      // plus assez de résultats récents, on la ré-autorise pour regénérer l'échantillon.
-      const COOLDOWN_MAX_AGE_H = Number(process.env.LEARN_COOLDOWN_AGE_H ?? '') || 6;
-      const _nowMs = Date.now();
-      const recent = staff.filter(t => {
-        const ts = Date.parse(String(t.ts || ''));
-        return Number.isFinite(ts) && (_nowMs - ts) <= COOLDOWN_MAX_AGE_H * 3_600_000;
-      });
-      // Sans assez de résultats RÉCENTS on NE juge PAS : `skip` reste false et la coin
-      // peut re-miser. C'est le cœur du correctif : replier sur la fenêtre complète
-      // réappliquait le cooldown sur des résultats vieux de 7 à 25 h → blocage éternel.
-      const n = recent.length;
-      const p = n ? recent.filter(t => t.realized > 0).length / n : 0;
-      let sizeFactor = 1;
-      let skip = false;
-      if (n >= 5) {
-        const hWins = recent.filter(t => t.realized > 0);
-        const hLosses = recent.filter(t => t.realized < 0);
-        const avgWin = hWins.length ? hWins.reduce((s, t) => s + t.realized, 0) / hWins.length : 0;
-        const avgLoss = hLosses.length ? Math.abs(hLosses.reduce((s, t) => s + t.realized, 0)) / hLosses.length : 0.5;
-        // Kelly : f* = p - (1-p)/b. Si l'espérance est <= 0 → cooldown.
-        const b = avgLoss > 0 ? avgWin / avgLoss : 1;
-        const edge = p * b - (1 - p);
-        if (edge <= 0) {
-          skip = true;
-        } else {
-          let kelly = p - (1 - p) / (b || 1);
-          kelly = Math.max(kellyFloor, Math.min(kellyCeil, kelly));
-          // Sécurités: ne jamais exploser la mise, levier progressif sur échantillon.
-          sizeFactor = 1 + (kelly * 2);   // mise de base = forme déterministe
-          if (sizeFactor < 0.5) sizeFactor = 0.65;
-          if (sizeFactor > 2) sizeFactor = 2;
-          if (n < 10) sizeFactor = Math.min(1.2, sizeFactor); // prudence si peu d'échantillon
-        }
-      }
-      // Affichage = fenêtre complète (information) ; la DÉCISION ne porte que sur le récent.
-      const nAll = staff.length;
-      const pAll = nAll ? staff.filter(t => t.realized > 0).length / nAll : 0;
-      out[coin] = { sizeFactor, skip, recent: nAll, wr: Math.round(pAll * 100), pnl: Math.round(pnl * 100) / 100 };
-    }
-    // === Apprentissage global : buckets de prix ===
-    if (allPriced.length >= 25) {
-      const buckets: BucketStat[] = [
-        { bucket: '0.55-0.60', lo: 0.55, hi: 0.60, n: 0, wr: 0, score: 0 },
-        { bucket: '0.60-0.65', lo: 0.60, hi: 0.65, n: 0, wr: 0, score: 0 },
-        { bucket: '0.65-0.70', lo: 0.65, hi: 0.70, n: 0, wr: 0, score: 0 },
-        { bucket: '0.70-0.75', lo: 0.70, hi: 0.75, n: 0, wr: 0, score: 0 },
-      ];
-      for (const { price, realized } of allPriced) {
-        const b = buckets.find(x => price >= x.lo && price < x.hi);
-        if (b) { b.n++; if (realized > 0) b.wr += 1; }
-      }
-      for (const b of buckets) if (b.n) b.wr /= b.n;
-      // score = WR pondéré par la taille de l'échantillon (prudence sur données faibles)
-      for (const b of buckets) {
-        b.score = b.n >= 5 ? (b.wr - 0.50) * Math.min(1, b.n / 15) : 0;
-      }
-      // Recentre la fenêtre sur LES buckets gagnants (score > 0), sinon garde défaut.
-      const good = buckets.filter(b => b.score > 0 && b.n >= 5);
-      learnedBuckets = buckets;
-      if (good.length) {
-        const cfgMin = Number(process.env.P_STRONG_MIN ?? '') || 0.58;
-        const cfgMax = Number(process.env.P_STRONG_MAX ?? '') || 0.65;
-        learnedMin = Math.min(...good.map(b => b.lo));
-        learnedMax = Math.max(...good.map(b => b.hi));
-        // Fenêtre auto-adaptative BORNÉE par la config .env (C2 2026-09-26).
-        // Sans ce clamp, l'apprentissage repoussait le plafond à 0.75-0.80 et
-        // annulait P_STRONG_MAX=0.65 (cf. docs/STRATEGY-REVIEW.md C2).
-        learnedMin = Math.max(cfgMin, learnedMin);
-        learnedMax = Math.min(cfgMax, learnedMax);
-      } else {
-        learnedMin = (Number(process.env.P_STRONG_MIN ?? '') || 0.58);
-        learnedMax = (Number(process.env.P_STRONG_MAX ?? '') || 0.65);
-      }
-    }
-  } catch (err) { log('WARN', `learning: ${(err as Error).message}`); }
-  return out;
+/** Dossier d'état local du bot (history.json, pnl.json). */
+function polyDir(): string {
+  return (process.env.HOME || '/root') + '/.polymarket';
 }
-function showLearningSummary(l: Record<string, CoinLearn>) {
-  const lines = Object.entries(l).map(([c, v]) =>
-    `${c}: WR ${v.wr}% (${v.recent}) ${v.skip ? '❄️ cooldown' : `×${v.sizeFactor.toFixed(2)}`}`
-  );
-  if (lines.length) log('LEARN', `Auto-adaptation coins → ${lines.join(' | ')}`);
-  // montre aussi la fenêtre apprise
-  log('LEARN', `Fenêtre apprise → [${learnedMin.toFixed(2)} - ${learnedMax.toFixed(2)}] (étude ${learnedBuckets.map(b => `${b.bucket}:${b.n?Math.round(b.wr*100):0}%`).join(' ')})`);
+
+/**
+ * history.json : [] s'il est absent, null s'il existe mais est illisible/tronqué.
+ * Un appelant qui ÉCRIT doit s'arrêter sur null : réécrire le fichier à partir d'un
+ * tableau vide effacerait tout l'historique des trades.
+ */
+function readHistory(): any[] | null {
+  const path = polyDir() + '/history.json';
+  if (!existsSync(path)) return [];
+  try {
+    const h = JSON.parse(readFileSync(path, 'utf-8'));
+    return Array.isArray(h) ? h : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Début du round (s epoch) encodé dans un slug `<coin>-updown-5m-<slot>`, ou null. */
+function slotFromSlug(slug: string | undefined): number | null {
+  const end = roundEndMsFromSlug(slug);
+  return end === null ? null : end / 1000 - 300;
+}
+
+/**
+ * Pertes consécutives RÉELLES (trades résolus de history.json, du plus récent au plus
+ * ancien). `state.consecutiveLosses` ne bouge jamais en paper (aucun PnL réalisé ne
+ * transite par recordTrade) : le modérateur « série de pertes » du sizing était inerte.
+ */
+function realLossStreak(): number {
+  const resolved = (readHistory() ?? [])
+    .filter(t => t && t.side !== 'HOLD' && typeof t.realized === 'number' && t.realized !== 0)
+    .sort((x, y) => String(x.ts).localeCompare(String(y.ts)));
+  let streak = 0;
+  for (let i = resolved.length - 1; i >= 0 && resolved[i].realized < 0; i--) streak++;
+  return streak;
 }
 
 function simulateTrade(profit: number, strategy: string, description: string) {
@@ -540,80 +467,48 @@ function simulateTrade(profit: number, strategy: string, description: string) {
   recordTrade(profit, strategy, false);
 }
 
-// === VENTE au take-profit (paper) ===
-// Pour chaque position ouverte, on vérifie le prix live : si le gain projeté
-// atteint P_TAKE_PROFIT (défaut 100% = on ne vend plus 1% sous la résolution,
-// cf. C3), on clique la position et on lock le gain.
-// ⚠️ Le stop-loss (P_STOP_LOSS) de la même boucle est INERTE sur un round
-// binaire tout-ou-rien (voir le commentaire détaillé plus bas) : ne pas le
-// présenter comme un contrôle de risque.
-async function checkPaperTakeProfit(sdk: PolymarketSDK) {
+// === SORTIE ANTICIPÉE (paper) fondée sur l'espérance ===
+// Remplace le take-profit / stop-loss en % (P_TAKE_PROFIT / P_STOP_LOSS) : vendre un
+// binaire au bid coûte le demi-spread + les frais taker ; ce n'est rentable QUE si le
+// marché paie plus que ce que la position vaut selon le modèle. Règle :
+//   vendre ⟺ (bid − frais) − p_modèle(côté détenu) ≥ FV_EXIT_EDGE
+// Dans la fenêtre TWAP finale (τ < FV_MIN_TAU_SEC) le modèle n'est pas fiable : on
+// garde jusqu'à la résolution. Un round terminé est laissé au résolveur.
+async function checkPaperExits(sdk: PolymarketSDK) {
   if (!CONFIG.dryRun || !state.paper || paperOpen.length === 0) return;
-  const tpPct = (Number(process.env.P_TAKE_PROFIT ?? '') || 100) / 100;
-  const slPct = (Number(process.env.P_STOP_LOSS ?? '') || 40) / 100;
+  const now = Date.now();
   const stillOpen: typeof paperOpen = [];
   for (const pos of paperOpen) {
-    // ⚠️ FIX 2026-09-25 : ne JAMAIS réinterroger l'orderbook d'un round TERMINÉ.
-    // Le round est binaire et résolu : ses token ids sont périmés et la requête
-    // CLOB renvoie `404 No orderbook exists for the requested token id` (côté
-    // lib clob-client → console.error → paperbot.error.log). Avant ce fix, la
-    // position restait dans paperOpen pour toujours et était re-demandée toutes
-    // les 5 min (1564 occurrences par token, 6 tokens distincts). La résolution
-    // du round (PnL) n'est PAS faite ici : elle appartient au résolveur.
-    const roundEnd = roundEndMsFromSlug(pos.slug);
-    if (roundEnd !== null && Date.now() > roundEnd + 30_000) {
-      continue;  // round terminé → position abandonnée au résolveur, plus de requête
-    }
+    if (now > pos.endMs + 30_000) continue; // round terminé → résolveur
+    const tauSec = (pos.endMs - now) / 1000;
+    if (tauSec < FV_CFG.minTauSec) { stillOpen.push(pos); continue; }
     try {
-      const ob = await sdk.getOrderbook(pos.conditionId);
-      const price = pos.side === 'YES' ? (ob.yes?.bid || pos.entry) : ((ob.no?.bid ?? Math.min(1 - (ob.yes?.bid || pos.entry), 0.999)) || pos.entry);
-      // Gain projeté si on vend maintenant : (prix_vente - prix_entrée)
-      const gain = price - pos.entry;             // sur 1€ de côté acheté
-      const gainPct = (price / pos.entry) - 1;
-      // Take-profit ADAPTATIF : on prend le gain dès qu'on a capturé une part
-      // significative (30%) du gain MAX possible jusqu'à la fin du round
-      // (1/entry - 1). Fixe à % du max → réalisable même sur un entry cher à 0.85.
-      const maxGainPct = (1 / pos.entry) - 1;
-      const tpReached = maxGainPct > 0 && gainPct >= maxGainPct * tpPct;
-      if (tpReached) {
-        // On vend : profit = gain sur la part (1/entry actions, vendues à price)
-        const profit = (1 / pos.entry) * price - 1;   // gain net sur 1€ de mise
-        state.paper.pnl += profit;
-        state.paper.balance += profit;
-        log('TRADE', `[SIMULATION] 💰 VENTE au take-profit: ${pos.coin} ${pos.side} @ $${price.toFixed(3)} (gain +$${profit.toFixed(2)}, ~${(gainPct*100).toFixed(0)}%) — position clôturée`);
-        log('TRADE', `[SIMULATION] VENTE ${pos.coin} ${pos.side} @ $${price.toFixed(3)} (round ${pos.slug || pos.conditionId.slice(0,10)}) — gain réalisé +$${profit.toFixed(2)}`);
-        // Marque la sortie dans le history (le résolveur PnL ne re-résoudra pas)
-        try {
-          const HPATH = (process.env.HOME || '/root') + '/.polymarket/history.json';
-          const h: any[] = existsSync(HPATH) ? JSON.parse(readFileSync(HPATH, 'utf-8')) : [];
-          const entry = h.find(x => x.conditionId === pos.conditionId && x.side === pos.side && !x.soldTp);
-          if (entry) { entry.realized = Math.round(profit * 10000) / 10000; entry.soldTp = true; entry.tpPct = Math.round(gainPct * 100); }
-          writeFileSync(HPATH, JSON.stringify(h, null, 2));
-        } catch { /* non bloquant */ }
-      } else if (gainPct <= -slPct) {
-        // ⚠️ STOP-LOSS — INERTE sur un round binaire (documenté, ne pas vendre
-        // comme contrôle de risque). Mesure 2026-09-25 sur 63 trades résolus :
-        // 20/20 pertes à −1,0000 exactement, ZÉRO perte coupée par ce gate.
-        // Un round « Up/Down 5m » est tout-ou-rien : le token ne glisse pas
-        // continûment vers un prix de sortie, il vaut ~entry puis paie
-        // 1/entry−1 ou −1. Le SEUL levier de perte est le PRIX D'ENTRÉE (filtre
-        // d'edge `p > entry`) — pas ce stop. Code conservé car inoffensif
-        // (il ne peut se déclencher que sur un orderbook intermédiaire réel).
-        const loss = (1 / pos.entry) * price - 1;  // perte nette sur 1€
-        state.paper.pnl += loss;
-        state.paper.balance += loss;
-        log('TRADE', `[SIMULATION] ⛔ STOP-LOSS: ${pos.coin} ${pos.side} @ $${price.toFixed(3)} (perte $${loss.toFixed(2)}, ~${(gainPct*100).toFixed(0)}%) — position coupée`);
-        log('TRADE', `[SIMULATION] STOP-LOSS ${pos.coin} ${pos.side} @ $${price.toFixed(3)} (round ${pos.slug || pos.conditionId.slice(0,10)}) — perte limitée $${loss.toFixed(2)}`);
-        try {
-          const HPATH = (process.env.HOME || '/root') + '/.polymarket/history.json';
-          const h: any[] = existsSync(HPATH) ? JSON.parse(readFileSync(HPATH, 'utf-8')) : [];
-          const entry = h.find(x => x.conditionId === pos.conditionId && x.side === pos.side && !x.soldTp);
-          if (entry) { entry.realized = Math.round(loss * 10000) / 10000; entry.soldTp = true; entry.sl = true; }
-          writeFileSync(HPATH, JSON.stringify(h, null, 2));
-        } catch { /* non bloquant */ }
-      } else {
-        stillOpen.push(pos);
-      }
+      const data = await getRoundMarketData(pos.coin as SpotCoin, pos.slot, now);
+      const pUp = data ? probUp({ ...data, tauSec }, FV_CFG) : null;
+      const book = await sdk.markets.getTokenOrderbook(pos.tokenId);
+      const best = book.bids[0];
+      if (pUp === null || !best || !(best.price > 0)) { stillOpen.push(pos); continue; }
+      const pHeld = pos.side === 'YES' ? pUp : 1 - pUp;
+      const bidNet = best.price - takerFeePerShare(best.price, FV_CFG.takerFeeRate);
+      if (bidNet - pHeld < FV_EXIT_EDGE || best.size < pos.shares) { stillOpen.push(pos); continue; }
+
+      const profit = pos.shares * bidNet - pos.stake;
+      state.paper.pnl += profit;
+      state.paper.balance += profit;
+      log('TRADE', `[SIMULATION] VENTE ${pos.coin} ${pos.side} @ $${best.price.toFixed(3)} (net frais ${bidNet.toFixed(3)} > p_modèle ${pHeld.toFixed(3)} + ${FV_EXIT_EDGE}) `
+        + `round ${pos.slug} — PnL réalisé ${profit >= 0 ? '+' : ''}$${profit.toFixed(4)}`);
+      try {
+        const h = readHistory();
+        if (h === null) throw new Error('history.json illisible');
+        const entry = h.find(x => x.conditionId === pos.conditionId && x.side === pos.side && !x.soldTp);
+        if (entry) {
+          entry.realized = Math.round(profit * 10000) / 10000;
+          entry.soldTp = true;
+          entry.exitPrice = best.price;
+          entry.exitModelProb = Math.round(pHeld * 10000) / 10000;
+        }
+        writeFileSync(polyDir() + '/history.json', JSON.stringify(h, null, 2));
+      } catch { /* non bloquant : le résolveur reste la source de vérité */ }
     } catch {
       stillOpen.push(pos);
     }
@@ -999,8 +894,22 @@ async function setupDipArb(sdk: PolymarketSDK) {
 
 let swapService: SwapService | null = null;
 let currentRoundId: string = '';
-// Positions paper ouvertes (achat simulé) — clôturées au take-profit ou à la résolution.
-let paperOpen: Array<{ side: string; entry: number; conditionId: string; slug: string; coin: string; stake: number }> = [];
+// Positions paper ouvertes (achat simulé) — clôturées par la sortie EV ou à la résolution.
+// `entry` = coût réel par part (VWAP + frais taker), `shares` = parts détenues.
+let paperOpen: Array<{
+  side: string; entry: number; shares: number; conditionId: string; slug: string; coin: string; stake: number;
+  tokenId: string; slot: number; endMs: number;
+}> = [];
+// Rounds déjà joués : au plus UNE entrée par round (la scrutation est fréquente).
+const tradedMarkets = new Set<string>();
+
+// Paramètres de la stratégie juste valeur (src/services/fair-value.ts, surchargeables par .env).
+const FV_CFG = fairValueConfigFromEnv(process.env);
+const FV_POLL_MS = Math.min(300, Math.max(5, Number(process.env.FV_POLL_SEC ?? '') || 10)) * 1000;
+const FV_EXIT_EDGE = (() => {
+  const v = Number(process.env.FV_EXIT_EDGE ?? '');
+  return Number.isFinite(v) && v >= 0 && v <= 0.5 && (process.env.FV_EXIT_EDGE ?? '').trim() !== '' ? v : FV_CFG.minEdge;
+})();
 
 /**
  * Drawdown REEL, lu sur le PnL du resolveur (`~/.polymarket/pnl.json`), la seule
@@ -1012,7 +921,7 @@ let paperOpen: Array<{ side: string; entry: number; conditionId: string; slug: s
  */
 function realPnl(): number | null {
   try {
-    const p = JSON.parse(readFileSync('/root/.polymarket/pnl.json', 'utf8')) as { pnl?: number };
+    const p = JSON.parse(readFileSync(polyDir() + '/pnl.json', 'utf8')) as { pnl?: number };
     const v = Number(p?.pnl);
     return Number.isFinite(v) ? v : null;
   } catch {
@@ -1044,7 +953,7 @@ function syncRealizedPnl() {
 
 function realDrawdownPct(): number {
   try {
-    const p = JSON.parse(readFileSync('/root/.polymarket/pnl.json', 'utf8')) as { pnl?: number };
+    const p = JSON.parse(readFileSync(polyDir() + '/pnl.json', 'utf8')) as { pnl?: number };
     const cap = Number(process.env.PAPER_CAPITAL ?? '') || 50;
     const pnl = Number(p?.pnl);
     if (Number.isFinite(pnl) && cap > 0 && pnl < 0) return Math.min(1, -pnl / cap);
@@ -1176,220 +1085,173 @@ async function setupOnchain() {
   }
 }
 
-async function setupLLMAnalysis(sdk: PolymarketSDK) {
-  const enabled = isEnabled();
-  log('INFO', `🤖 DeepSeek LLM analysis module: ${enabled ? 'ENABLED (remote analysis)' : 'DEGRADED (local HOLD — no API key / not enabled)'}`);
+// ============================================================================
+// STRATÉGIE PRINCIPALE — juste valeur Up/Down 5 min (src/services/fair-value.ts)
+// ============================================================================
+// Remplace la règle « acheter le favori si son ask ∈ [0,58 ; 0,65] » : mesurée sur
+// 1 411 décisions, elle n'a AUCUN edge (marché calibré, WR 63,2 % < prix payé 64,9 %,
+// docs/EDGE-VALIDATION.md §5). On n'achète désormais un côté que si la probabilité
+// calculée depuis le spot, le strike, la vol et le temps restant dépasse son coût
+// RÉEL (VWAP du carnet + frais taker) d'au moins FV_MIN_EDGE. Au plus une entrée par
+// round. La décision et ses entrées sont journalisées pour mesurer la calibration.
+async function setupFairValueStrategy(sdk: PolymarketSDK) {
+  log('INFO', `📐 Stratégie juste valeur : edge min ${(FV_CFG.minEdge * 100).toFixed(1)} pt après frais `
+    + `(taker ${FV_CFG.takerFeeRate}), τ ∈ [${FV_CFG.minTauSec}, ${FV_CFG.maxTauSec}] s, ask ∈ [${FV_CFG.minAsk}, ${FV_CFG.maxAsk}], `
+    + `queues ${FV_CFG.tails}, sortie si bid net > p_modèle + ${FV_EXIT_EDGE}, scrutation ${FV_POLL_MS / 1000} s`);
+  if (!CONFIG.dryRun) {
+    log('WARN', 'Stratégie juste valeur : exécution LIVE non implémentée — décisions journalisées, AUCUN ordre envoyé.');
+  }
 
-  async function runAnalysisLoop() {
-    // Recale la compta affichee sur le PnL REEL du resolveur AVANT la porte de risque :
-    // sinon le controle evalue un chiffre issu de projections (cf. audit dashboard) et les
-    // garde-fous deviennent inertes.
-    syncRealizedPnl();
-    // Respect multi-layer risk gate: no trade activity if broker is halted/paused
-    if (!canTrade()) return;
+  type ScannedMarket = { conditionId: string; name: string; slug: string; underlying: string; durationMinutes: number; upTokenId: string; downTokenId: string };
+  let markets: ScannedMarket[] = [];
+  let marketsTs = 0;
+  let running = false;
+  const lastHoldLog = new Map<string, number>();
 
+  const holdLog = (cid: string, msg: string) => {
+    const now = Date.now();
+    if (now - (lastHoldLog.get(cid) ?? 0) < 60_000) return;
+    lastHoldLog.set(cid, now);
+    if (lastHoldLog.size > 200) {
+      for (const [k, t] of lastHoldLog) if (now - t > 600_000) lastHoldLog.delete(k);
+    }
+    log('SIGNAL', msg);
+  };
+
+  async function tick() {
+    if (running) return; // un tick lent ne doit jamais se chevaucher avec le suivant
+    running = true;
     try {
-      // Clôture les positions paper au take-profit (vérifie les gains projetés)
-      await checkPaperTakeProfit(sdk);
-      // Analyser TUNIQUEMENT les marchés BTC & ETH Up/Down 5m (ceux demandés),
-      // pas les "trending" globaux (Fed/ATP).
-      const upcoming = (await sdk.dipArb.scanUpcomingMarkets({
-        coin: 'all',
-        duration: '5m',
-        minMinutesUntilEnd: 0,
-        maxMinutesUntilEnd: 6,
-        limit: 8,
-      }) as Array<{ conditionId: string; name: string; underlying: string; durationMinutes: number; slug: string; endTime: Date } | undefined>)
-        .filter((m): m is NonNullable<typeof m> => !!m)
-        .filter(m => m.underlying === 'BTC' || m.underlying === 'ETH' || m.underlying === 'SOL' || m.underlying === 'XRP' || m.underlying === 'DOGE');
+      // Compta recalée sur le PnL RÉALISÉ avant la porte de risque (sinon garde-fous inertes).
+      syncRealizedPnl();
+      // Seul le mode PAPER est implémenté : en LIVE (bascule possible depuis le dashboard)
+      // on n'écrit RIEN — un trade journalisé sans ordre réel fausserait le PnL résolu.
+      if (!CONFIG.dryRun || !state.paper) return;
+      if (!canTrade()) return;
+      await checkPaperExits(sdk);
 
-      // === APPRENTISSAGE AUTO-ADAPTATIF (1x par tick, zéro LLM) ===
-      // Le bot analyse ses RÉSULTATS RÉELS (TP/SL/résolutions) par coin et
-      // ajuste: cooldown (skip) si win rate < 40% sur les 15 derniers,
-      // taille ×0.65/×1.10/×1.30 selon la santé de la coin.
-      const coinLearn = computeCoinLearning();
-      showLearningSummary(coinLearn);
+      if (Date.now() - marketsTs > 60_000 || markets.length === 0) {
+        const scanned = await sdk.dipArb.scanUpcomingMarkets({
+          coin: 'all', duration: '5m', minMinutesUntilEnd: 0, maxMinutesUntilEnd: 6, limit: 12,
+        });
+        markets = (scanned as Array<ScannedMarket | undefined>)
+          .filter((m): m is ScannedMarket => !!m && !!m.conditionId && m.durationMinutes === 5 && isSpotCoin(m.underlying));
+        marketsTs = Date.now();
+      }
 
-      for (const market of upcoming) {
-        if (!market.conditionId) continue;
+      for (const market of markets) {
+        if (tradedMarkets.has(market.conditionId)) continue;
+        // Slug exact `<coin>-updown-5m-<slot>` : parseUnderlyingFromSlug retombe sur 'BTC'
+        // pour un slug inconnu — on ne laisse jamais un autre marché passer pour un round BTC.
+        if (!new RegExp(`^${market.underlying.toLowerCase()}-updown-5m-\\d{9,}$`).test(market.slug)) continue;
+        const slot = slotFromSlug(market.slug);
+        if (slot === null) continue;
+        const endMs = slot * 1000 + 300_000;
+        const now = Date.now();
+        const tauSec = (endMs - now) / 1000;
+        // Filtre sans réseau : hors fenêtre de τ, rien à évaluer (et pas de log).
+        if (tauSec < FV_CFG.minTauSec || tauSec > FV_CFG.maxTauSec) continue;
+        const coin = market.underlying as SpotCoin;
 
         try {
-          // Prix live du sous-jacent via REST (Binance→Coinbase→Kraken).
-          // Le WebSocket Polymarket est mort côté serveur (0 message) : sans ce
-          // flux le bot n'avait aucun prix réel. Affiché dans CHAQUE ligne de
-          // scan pour prouver que les prix sont vivants.
-          const spotCoin = isSpotCoin(market.underlying) ? (market.underlying as SpotCoin) : null;
-          const spot = spotCoin ? await getSpotPrice(spotCoin).catch(() => null) : null;
-          const spotLine = spotCoin
-            ? `📈 ${spotCoin}/USD ${spot ? formatSpotPrice(spotCoin, spot.price) : 'n/a'}`
-            : `📈 ${market.underlying}/USD n/a`;
-
-          const orderbook = await sdk.getOrderbook(market.conditionId);
-
-          // --- Filtrage en amont (avant tout appel LLM) ---
-          const yes = orderbook.yes;
-          const spreadPct = yes.bid > 0 ? (yes.ask - yes.bid) / yes.bid : 1;
-          const liquidity = Math.max(
-            orderbook.yes.bidDepth,
-            orderbook.yes.askDepth,
-            orderbook.no.bidDepth,
-            orderbook.no.askDepth
-          );
-
-          // spread < 15% ET liquidité > 100$ : garde minimale sans bloquer les
-          // marchés à orderbook clairsemé (favori extrême). Moins strict qu'avant
-          // (5%/1000$) — sinon tous les rounds 5-min passent en HOLD silencieux.
-          if (!(spreadPct < 0.15) || !(liquidity > 100)) {
-            log('SIGNAL', `   ↳ ${spotLine} · ${market.slug} spread ${(spreadPct * 100).toFixed(1)}% / liq $${liquidity.toFixed(0)} → skip (filtre spread/liquidité)`);
+          const data = await getRoundMarketData(coin, slot, now);
+          if (!data) {
+            holdLog(market.conditionId, `   ↳ ${market.slug} : spot/strike/vol indisponibles ou périmés → pas de mise`);
+            continue;
+          }
+          const [upBook, downBook] = await Promise.all([
+            sdk.markets.getTokenOrderbook(market.upTokenId),
+            sdk.markets.getTokenOrderbook(market.downTokenId),
+          ]);
+          const upAsk = upBook.asks[0]?.price ?? null;
+          const downAsk = downBook.asks[0]?.price ?? null;
+          const decision = decide({ ...data, tauSec, upAsk, downAsk }, FV_CFG);
+          const ctx = `${coin} spot ${formatSpotPrice(coin, data.spot)} vs strike ${formatSpotPrice(coin, data.strike)} `
+            + `(${data.source}), σ1m ${(data.sigmaPerSqrtSec * Math.sqrt(60) * 100).toFixed(3)} %, τ ${Math.round(tauSec)} s`;
+          if (!decision.side || !decision.best) {
+            holdLog(market.conditionId, `   ↳ ${ctx} → HOLD : ${decision.reason}`);
             continue;
           }
 
-          // === ÉCONOMIE D'APPELS LLM (budget 30/jour) ===
-          // N'appeler le modèle QUE si l'ordre montre déjà un favori net (edge ≥ seuil).
-          // Sinon marché ~50/50 → HOLD direct SANS dépenser un appel (le LLM dirait HOLD de toute façon).
-          const _yesAsk = orderbook.yes?.ask || 0.5;
-          const _noAsk = orderbook.no?.ask ?? Math.min(1 - _yesAsk, 0.99);
-          // Sur Polymarket binaire, le PRIX du token = sa probabilité.
-          // Prix du token YES ≈ P(UP), prix du token NO ≈ P(DOWN).
-          const _yesImp = _yesAsk;          // proba UP
-          const _noImp = _noAsk;            // proba DOWN
-          const STRONG_MIN2 = Number(process.env.P_STRONG_MIN ?? '') || 0.58;
-          const STRONG_MAX2 = Number(process.env.P_STRONG_MAX ?? '') || 0.65;
-          const MIN_PRICE2 = Number(process.env.P_MIN_PRICE ?? '') || 0.25;
-          // Sweet spot : favori entre MIN et MAX (≥58% favori, mais jamais écrasant à
-          // 0.89+ dont le gain est inutilement petit). Où le gain compense les pertes.
-          const _yesIn = _yesImp >= STRONG_MIN2 && _yesImp <= STRONG_MAX2 && _yesAsk >= MIN_PRICE2;
-          const _noIn = _noImp >= STRONG_MIN2 && _noImp <= STRONG_MAX2 && _noAsk >= MIN_PRICE2;
-          const hasEdge = _yesIn || _noIn;
-          if (!hasEdge) {
-            // ~50/50 → pas d'edge → HOLD sans appeler le LLM (économie d'appels)
-            // ⚠️ ask_YES + ask_NO ≈ 1 + spread : afficher les deux bruts donnait
-            // « UP 54% / DOWN 47% » (= 101 %). On normalise pour sommer à 100 %.
-            const _totImp = (_yesImp + _noImp) || 1;
-            // ⚠️ FIX 2026-09-27 : le libelle disait « ~50/50 » alors que les valeurs
-            // affichees pouvaient etre 26 % / 74 %. On dit ce qui est vrai : aucune
-            // des deux faces n'est dans la fenetre [MIN, MAX], et on affiche l'ask BRUT
-            // (c'est lui qui decide) a cote du pourcentage normalise (qui sert a lire).
-            const _why = (_yesAsk > STRONG_MAX2 || _noAsk > STRONG_MAX2)
-              ? `favori hors fenetre (ask brut UP ${_yesAsk.toFixed(2)} / DOWN ${_noAsk.toFixed(2)} > ${STRONG_MAX2})`
-              : `aucun favori dans [${STRONG_MIN2} - ${STRONG_MAX2}] (ask brut UP ${_yesAsk.toFixed(2)} / DOWN ${_noAsk.toFixed(2)})`;
-            log('SIGNAL',   `   ↳ ${spotLine} · ${market.name?.slice(0, 30)} ${_why} — UP ${(100 * _yesImp / _totImp).toFixed(0)}% / DOWN ${(100 * _noImp / _totImp).toFixed(0)}% → HOLD`);
-            logLearning({ roundId: market.slug || currentRoundId, market: market.name?.slice(0, 40), side: 'HOLD', price: 0, estGain: 0, conf: 0, coin: market.underlying, conditionId: market.conditionId });
+          const q = decision.best;
+          const capital = Number(process.env.PAPER_CAPITAL ?? '') || 50;
+          const stakeRes = computeStake({
+            capital,
+            entryPrice: q.cost,
+            // Probabilité du MODÈLE, shrinkée vers le prix par computeStake (λ = 0,5) :
+            // un modèle non validé ne reçoit que la moitié de sa propre conviction.
+            bookProb: q.prob,
+            consecutiveLosses: realLossStreak(),
+            drawdownCurrent: realDrawdownPct(),
+            openExposureEur: paperOpen.reduce((s, o) => s + (Number(o.stake) || 0), 0),
+            openPositions: paperOpen.length,
+          });
+          if (stakeRes.skipped || !(stakeRes.stake > 0)) {
+            holdLog(market.conditionId, `   ↳ ${ctx} → PAS de mise : ${stakeRes.rationale}`);
             continue;
           }
 
-          // === DÉCISION 100% DÉTERMINISTE (basée uniquement sur l'orderbook) ===
-          // Aucun appel LLM ni réseau externe : on mise le CÔTÉ LE PLUS PROBABLE
-          // (le favori de l'ordre) dans la fenêtre "sweet spot". Zéro coût LLM,
-          // décision stable, winrate lié à la qualité des probabilités du marché.
-          if (CONFIG.dryRun && state.paper) {
-            const yesAsk = orderbook.yes?.ask || 0.5;
-            const noAsk = orderbook.no?.ask ?? Math.min(1 - yesAsk, 0.99);
-            // Prix d'un token = sa probabilité. yes.ask ≈ P(UP), no.ask ≈ P(DOWN).
-            const yesImp = yesAsk;   // probabilité implicite UP
-            const noImp = noAsk;     // probabilité implicite DOWN
+          // Prix RÉEL : on consomme le carnet pour la mise (le meilleur ask ne contient
+          // souvent que 5 parts, COSTS.md §1.1) et on re-vérifie l'edge au VWAP.
+          const book = decision.side === 'UP' ? upBook : downBook;
+          const fill = estimateFill(book.asks, stakeRes.stake, FV_CFG.maxAsk);
+          if (!fill.complete || fill.avgPrice === null) {
+            holdLog(market.conditionId, `   ↳ ${ctx} → PAS de mise : profondeur insuffisante pour $${stakeRes.stake.toFixed(2)} sous ${FV_CFG.maxAsk}`);
+            continue;
+          }
+          const entryCost = effectiveCostPerShare(fill.avgPrice, FV_CFG.takerFeeRate);
+          const edgeAtFill = q.prob - entryCost;
+          if (edgeAtFill < FV_CFG.minEdge) {
+            holdLog(market.conditionId, `   ↳ ${ctx} → PAS de mise : edge au VWAP ${(edgeAtFill * 100).toFixed(1)} pt < ${(FV_CFG.minEdge * 100).toFixed(1)} pt`);
+            continue;
+          }
 
-            // Comment on décide (sans LLM) :
-            //  - On ne mise QUE le favori (côté avec la proba la plus haute) s'il est
-            //    dans la fenêtre [STRONG_MIN, STRONG_MAX]. Le favori net gagne plus
-            //    souvent que 50% → winrate élevé.
-            //  - 0.89+ (favori écrasant) → gain trop petit (+$0.1) → on saute
-            //    (ça ne vaut pas le risque d'une perte -$1).
-            //  - < 0.58 (~50/50) → pas un vrai favori → on refuse (winrate ≈ 50%).
-            let side: 'YES' | 'NO' | null = null;
-            let reason = '';
-            // Fenêtre sweet-spot : celle APPRISE (auto-adaptative) sinon config .env.
-            const STRONG_MIN = learnedMax ? learnedMin : ((Number(process.env.P_STRONG_MIN ?? '') || 0.58));
-            const STRONG_MAX = learnedMin ? learnedMax : ((Number(process.env.P_STRONG_MAX ?? '') || 0.65));
-            const MIN_PRICE = Number(process.env.P_MIN_PRICE ?? '') || 0.25;
-            const yesIn = yesImp >= STRONG_MIN && yesImp <= STRONG_MAX && yesAsk >= MIN_PRICE;
-            const noIn = noImp >= STRONG_MIN && noImp <= STRONG_MAX && noAsk >= MIN_PRICE;
-
-            if (yesIn && yesImp >= noImp) {
-              side = 'YES'; reason = ' (favori ordre)';
-            } else if (noIn) {
-              side = 'NO'; reason = ' (favori ordre)';
-            } else {
-              // Idem : normaliser (ask_YES + ask_NO ≈ 1 + spread → sinon 101 %).
-              const _totImp2 = (yesImp + noImp) || 1;
-              log('SIGNAL', `   ↳ ${spotLine} · ${market.name?.slice(0, 30)} pas de favori net (UP ${(100 * yesImp / _totImp2).toFixed(0)}% / DOWN ${(100 * noImp / _totImp2).toFixed(0)}%) → PAS de mise`);
-              logLearning({ roundId: market.slug || currentRoundId, market: market.name?.slice(0, 40), side: 'HOLD', price: 0, estGain: 0, conf: 0, coin: market.underlying, conditionId: market.conditionId });
-            }
-            if (side) {
-              const buyPrice = side === 'YES' ? yesAsk : noAsk;
-              // === APPRENTISSAGE : cooldown automatique ===
-              // Si la coin est en "cooldown santé" (espérance négative), on refuse.
-              const learn = coinLearn[market.underlying];
-              if (learn && learn.skip) {
-                log('LEARN', `   ↳ ${market.name?.slice(0, 30)} coin ${market.underlying} en cooldown (WR ${learn.wr}%) → PAS de mise`);
-                continue;
-              }
-              // === FILTRE D'EDGE STRICT (C5 — DÉSACTIVÉ par défaut) ===
-              // ⚠️ C5 (2026-09-26) : le `wr` par coin était calculé sur des `realized`
-              // FAUX (résolveur PnL cassé, cf. C1 : 44,4 % affiché vs 68,3 % réel) →
-              // ce filtre bloquait des coins gagnants. Backtest séquentiel sur les
-              // 63 trades : filtre actif = 42 trades, −1,678 € ; sans filtre = 63
-              // trades, +0,619 €. Neutralisé derrière EDGE_FILTER_ENABLED (défaut
-              // false) pour pouvoir le ré-activer quand les données seront fiables.
-              const EDGE_FILTER_ENABLED = (process.env.EDGE_FILTER_ENABLED ?? 'false').toLowerCase() === 'true';
-              if (EDGE_FILTER_ENABLED && learn && learn.recent >= 8 && learn.wr > 0) {
-                const requiredWr = (buyPrice + 0.10) * 100;   // doit battre prix +10pts
-                if (learn.wr < requiredWr) {
-                  log('LEARN', `   ↳ ${market.name?.slice(0, 30)} ${market.underlying} WR ${learn.wr}% < edge requis ${requiredWr.toFixed(0)}% (prix $${buyPrice.toFixed(2)}+10pts) → PAS de mise (edge négatif)`);
-                  continue;
-                }
-              }
-              const conf = side === 'YES' ? yesImp : noImp;
-              // === MISE ADAPTATIVE (2026-09-27) : plus de mise fixe a 5 EUR ===
-              // `computeStake` (module pur + teste : src/services/stake-sizing.ts) calcule la
-              // mise a partir du capital, du prix, de la confiance du carnet, du track record
-              // de la coin (avec shrinkage de credibilite : n=0 => aucun edge invente) et de
-              // l'etat de risque. Plafonds DURS : 1 % du capital par trade, 10 % d'exposition
-              // cumulee (5 coins peuvent etre ouverts en meme temps), et la limite quotidienne
-              // doit exiger >= 3 pertes. Edge nul ou negatif => mise 0 => on ne mise pas.
-              // Remplace `BET_STAKE` ET `sizeFactor` : le track record de la coin est deja
-              // integre par le shrinkage, multiplier les deux compterait double.
-              const stakeRes = computeStake({
-                capital: Number(process.env.PAPER_CAPITAL ?? '') || 50,
-                entryPrice: buyPrice,
-                bookProb: conf,
-                winRateRecent: learn && learn.wr > 0 ? learn.wr / 100 : null,
-                recentTrades: learn ? learn.recent : null,
-                consecutiveLosses: state.consecutiveLosses,
-                drawdownCurrent: realDrawdownPct(),
-                openExposureEur: paperOpen.reduce((s, o) => s + (Number(o.stake) || 0), 0),
-                openPositions: paperOpen.length,
-              });
-              if (stakeRes.skipped || !(stakeRes.stake > 0)) {
-                log('LEARN', `   ↳ ${market.name?.slice(0, 30)} ${market.underlying} -> PAS de mise : ${stakeRes.rationale}`);
-                continue;
-              }
-              const BET_STAKE = stakeRes.stake;
-              const sizeFactor = 1; // neutralise : le sizing le remplace (garde pour le log)
-              // ⚠️ AVANT (2026-09-26) : `sizeFactor` était calculé puis affiché dans le
-              // message, mais `simulateTrade()` recevait `(1/buyPrice) - 1` — le Kelly
-              // auto-adaptatif (×0.65 / ×1.10) n'était donc JAMAIS crédité au PnL :
-              // purement cosmétique. On applique maintenant sizeFactor ET la mise de base.
-              // gain si le côté choisi gagne: retour = 1/prix sur la mise
-              const estProfit = ((1 / buyPrice) - 1) * BET_STAKE;
-              simulateTrade(estProfit, 'dipArb', `${spotLine} → Décision ${side} @ $${buyPrice.toFixed(3)} (round ${market.slug || market.name?.slice(-22)}, conf ${conf.toFixed(2)}, mise $${BET_STAKE.toFixed(2)} : ${stakeRes.rationale})${reason} — gain est. $${estProfit.toFixed(4)} si ${side} gagne (x${(1 / buyPrice).toFixed(2)})`);
-              logLearning({ roundId: market.slug || currentRoundId, market: market.name?.slice(0, 40), side, price: buyPrice, estGain: ((1 / buyPrice) - 1) * BET_STAKE, conf, coin: market.underlying, stake: BET_STAKE, conditionId: market.conditionId, winProb: conf });
-              // Ouvre la position paper (sera clôturée au take-profit ou résolue à la fin du round)
-              paperOpen.push({ side, entry: buyPrice, conditionId: market.conditionId, slug: market.slug || '', coin: market.underlying, stake: BET_STAKE });
-            }
+          const stake = stakeRes.stake;
+          const { shares, winProfit: estProfit } = binaryPayoff(stake, entryCost); // frais inclus
+          const side = decision.side === 'UP' ? 'YES' : 'NO';
+          tradedMarkets.add(market.conditionId);
+          simulateTrade(estProfit, 'dipArb',
+            `📈 ${ctx} → Décision ${side} (${decision.side}) @ VWAP $${fill.avgPrice.toFixed(3)} + frais = $${entryCost.toFixed(4)}/part, `
+            + `p_modèle ${q.prob.toFixed(3)}, edge ${(edgeAtFill * 100).toFixed(1)} pt, mise $${stake.toFixed(2)} (${stakeRes.bindingConstraint}) `
+            + `— gain $${estProfit.toFixed(4)} si ${decision.side} / perte $${stake.toFixed(2)} sinon`);
+          logLearning({
+            roundId: market.slug, market: market.name?.slice(0, 40), side,
+            // `price` = coût RÉEL par part (VWAP + frais) : le PnL résolu inclut donc les frais.
+            price: Math.round(entryCost * 10000) / 10000,
+            estGain: estProfit, conf: q.prob, winProb: q.prob, coin, stake, conditionId: market.conditionId,
+            strategy: 'fair-value', ask: fill.avgPrice, feePerShare: entryCost - fill.avgPrice,
+            modelProb: q.prob, edge: edgeAtFill, tauSec: Math.round(tauSec),
+            spot: data.spot, strike: data.strike, sigma1m: data.sigmaPerSqrtSec * Math.sqrt(60), priceSource: data.source,
+          });
+          paperOpen.push({
+            side, entry: entryCost, shares, conditionId: market.conditionId, slug: market.slug, coin, stake,
+            tokenId: decision.side === 'UP' ? market.upTokenId : market.downTokenId, slot, endMs,
+          });
+          if (tradedMarkets.size > 500) {
+            const first = tradedMarkets.values().next().value;
+            if (first) tradedMarkets.delete(first);
           }
           updateDashboard();
-        } catch {
-          /* skip market — analyse non bloquante */
+        } catch (err) {
+          holdLog(market.conditionId, `   ↳ ${market.slug} : erreur d'analyse (${String((err as Error)?.message ?? err).slice(0, 160)}) → pas de mise`);
         }
       }
-    } catch {
-      /* trending markets indisponibles — on retente au prochain tick */
+    } catch (err) {
+      log('WARN', `Stratégie juste valeur : tick en échec (${String((err as Error)?.message ?? err).slice(0, 160)}) — nouvel essai au prochain tick`);
+    } finally {
+      running = false;
     }
   }
 
-  await runAnalysisLoop();
-  setInterval(runAnalysisLoop, 5 * 60 * 1000);
+  // Après un redémarrage, ne pas re-jouer un round déjà joué (la mémoire est perdue,
+  // history.json non) : on recharge les conditionId des 15 dernières minutes.
+  const since = Date.now() - 15 * 60_000;
+  for (const t of readHistory() ?? []) {
+    if (t && typeof t.conditionId === 'string' && Date.parse(String(t.ts)) >= since) tradedMarkets.add(t.conditionId);
+  }
+
+  await tick();
+  setInterval(() => { void tick(); }, FV_POLL_MS);
 }
 
 async function setupBinanceAnalysis(sdk: PolymarketSDK) {
@@ -1721,7 +1583,7 @@ async function main() {
   await setupSmartMoney(sdk);
   await setupArbitrage(sdk);
   await setupDipArb(sdk);
-  await setupLLMAnalysis(sdk);
+  await setupFairValueStrategy(sdk);
 
   // Periodic state update
   setInterval(() => {

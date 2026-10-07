@@ -11,6 +11,8 @@ export interface BotState {
   tradesExecuted: number;
   isPaused: boolean;
   pauseUntil: number;
+  /** Horodatage (ms) du dernier log de pause : borne le log à 1/min. */
+  _lastPauseLog?: number;
 
   // 🔴 NEW v3.1: Enhanced risk tracking
   monthlyPnL: number;
@@ -84,6 +86,8 @@ export interface BotState {
     pnl: number;
     trades: number;
     totalVolume: number;
+    /** Somme des gains ESPÉRÉS (projection, jamais créditée au PnL réalisé). */
+    estimatedPnl?: number;
   };
 }
 

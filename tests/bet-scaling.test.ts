@@ -1,68 +1,44 @@
 /**
- * (2) SCALING DE LA MISE — CONTRAT DU 2026-09-27 (mise ADAPTATIVE).
+ * (2) SCALING DE LA MISE — CONTRAT DU 2026-10-07 (stratégie juste valeur).
  *
- * AVANT : `estProfit = ((1/prix) - 1) * sizeFactor * BET_STAKE`, `BET_STAKE` lu dans le
- * `.env` → la mise était FIGÉE (5 EUR sur chaque décision, quelle que soit la situation).
- * L'utilisateur a demandé que le bot « détecte la meilleure mise en fonction de la chose ».
- *
- * MAINTENANT : la mise vient de `computeStake` (module pur + testé,
- * `src/services/stake-sizing.ts`) et le gain reste linéaire en la mise. `sizeFactor` a été
- * retiré de la formule : le track record de la coin est déjà intégré par le shrinkage de
- * crédibilité du module — le multiplier une 2e fois compterait double.
- *
- * Le calcul vit DANS le monolithe `bot-with-dashboard.ts`, non importable sans démarrer le
- * bot : on extrait donc l'expression EXACTE du source au moment du test.
+ * La mise vient de `computeStake` (module pur, `src/services/stake-sizing.ts`) et
+ * l'issue d'un trade de `binaryPayoff` (module pur, `src/services/fair-value.ts`) :
+ * gain = parts − mise, perte = mise, le tout LINÉAIRE en la mise et frais inclus.
+ * Le monolithe n'étant pas importable sans démarrer le bot, on vérifie par extraction
+ * de source qu'il passe bien par ces deux fonctions, et on teste les fonctions elles-mêmes.
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { extractFromBot, pySourcesAvailable, runHarness } from './harness.ts';
+import { binaryPayoff, effectiveCostPerShare } from '../src/services/fair-value.ts';
 
-// Expression réelle (entrée principale) : `const estProfit = ((1 / buyPrice) - 1) * BET_STAKE;`
-const EST_PROFIT_RE = /const estProfit = \(\(1 \/ buyPrice\) - 1\) \* BET_STAKE;/;
-// La mise doit venir du module de sizing, plus d'une valeur figée du .env.
-const STAKE_SOURCE_RE = /const BET_STAKE = stakeRes\.stake;/;
-
-function estProfit(buyPrice: number, BET_STAKE: number): number {
-  const stmt = extractFromBot(EST_PROFIT_RE, 'estProfit (scaling de la mise)');
-  const fn = new Function('buyPrice', 'BET_STAKE', `${stmt}\nreturn estProfit;`);
-  return fn(buyPrice, BET_STAKE) as number;
-}
-
-test('la mise vient du module de sizing, plus de BET_STAKE figé dans le .env', () => {
-  const stmt = extractFromBot(STAKE_SOURCE_RE, 'source de BET_STAKE');
-  assert.match(stmt, /stakeRes\.stake/, 'BET_STAKE doit venir de computeStake');
-  // NON-RÉGRESSION : l'ancienne lecture figée ne doit pas revenir. `extractFromBot`
-  // LÈVE quand le motif est absent du source — c'est exactement ce qu'on veut prouver.
-  assert.throws(
-    () =>
-      extractFromBot(
-        /const BET_STAKE = Number\(process\.env\.BET_STAKE/,
-        'ancienne lecture .env',
-      ),
-    'la mise NE DOIT PLUS être lue directement dans process.env.BET_STAKE',
+test('la mise vient du module de sizing et le gain de binaryPayoff (pas de mise figée)', () => {
+  assert.match(extractFromBot(/const stake = stakeRes\.stake;/, 'source de la mise'), /stakeRes\.stake/);
+  assert.match(
+    extractFromBot(/binaryPayoff\(stake, entryCost\)/, 'gain via binaryPayoff'),
+    /binaryPayoff/,
   );
 });
 
 test('le gain est linéaire en la mise (5 € = 5× 1 €)', () => {
-  const p = 0.6;
-  const g1 = estProfit(p, 1);
-  const g5 = estProfit(p, 5);
-  assert.ok(Math.abs(g1 - (1 / p - 1)) < 1e-12, 'à 1€ : gain = 1/prix − 1');
-  assert.ok(Math.abs(g5 / g1 - 5) < 1e-12, `gain(5€)/gain(1€) doit valoir 5, obtenu ${g5 / g1}`);
-  assert.ok(Math.abs(g5 - (1 / 0.6 - 1) * 5) < 1e-9, 'gain à 5€ pour prix 0,60 ≈ 3,333');
+  const c = effectiveCostPerShare(0.6, 0.07);
+  const g1 = binaryPayoff(1, c);
+  const g5 = binaryPayoff(5, c);
+  assert.ok(Math.abs(g5.winProfit - 5 * g1.winProfit) < 1e-12);
+  assert.ok(Math.abs(g5.loss - 5 * g1.loss) < 1e-12);
+  assert.ok(Math.abs(g1.winProfit - (1 / c - 1)) < 1e-12, 'gain = 1/coût − 1 par € misé');
 });
 
-test('sizeFactor ne module PLUS le gain (il est intégré par le sizing)', () => {
-  const stmt = extractFromBot(EST_PROFIT_RE, 'estProfit (scaling de la mise)');
-  // Si sizeFactor revenait dans la formule, la coin serait modulée DEUX fois
-  // (une par le shrinkage de computeStake, une par sizeFactor).
-  assert.doesNotMatch(stmt, /sizeFactor/, 'sizeFactor ne doit plus multiplier le gain');
+test('les frais réduisent le gain : coût réel > ask', () => {
+  assert.ok(binaryPayoff(1, effectiveCostPerShare(0.6, 0.07)).winProfit < binaryPayoff(1, 0.6).winProfit);
 });
 
-test('une mise adaptative reste bornée : 0 € ne produit aucun gain, jamais un négatif', () => {
-  const p = 0.6;
-  assert.equal(estProfit(p, 0), 0, 'mise 0 → gain 0');
-  assert.ok(estProfit(p, 0.5) > 0, 'une petite mise positive produit un gain positif');
+test('une mise nulle ou un coût invalide ne produit ni gain ni perte, jamais un négatif', () => {
+  for (const [stake, cost] of [[0, 0.6], [1, 0], [1, 1], [1, NaN], [-1, 0.6]] as const) {
+    const r = binaryPayoff(stake, cost);
+    assert.deepEqual(r, { shares: 0, winProfit: 0, loss: 0 }, `stake=${stake} cost=${cost}`);
+  }
+  assert.ok(binaryPayoff(0.5, 0.6).winProfit > 0);
 });
 
 test('le résolveur Python applique la même échelle de mise (cohérence)', {

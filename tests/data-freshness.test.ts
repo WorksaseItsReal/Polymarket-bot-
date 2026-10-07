@@ -6,16 +6,14 @@
  * 0.5, qui est une probabilité parfaitement légitime (marché à 50/50). Confondre
  * les deux fait « décider » sur une donnée qui n'existe pas.
  *
- * On teste trois comportements RÉELS, sans les caricaturer :
+ * On teste des comportements RÉELS, sans les caricaturer :
  *
- *  1. `orderbook.yes?.ask || 0.5` (bot-with-dashboard.ts) — l'opérateur `||`
- *     s'effondre sur TOUTE valeur falsy : `undefined` ET `0` deviennent 0.5.
- *     C'est le TROU : absent et « vrai 0.5 » sont indistinguables. On l'épingle.
- *  2. `orderbook.no?.ask ?? …` — l'opérateur `??` ne se replie QUE sur
- *     null/undefined : un `ask` valant réellement 0 est PRÉSERVÉ. Ici, absent et
- *     valeur réelle sont bien distinguables. On le prouve.
- *  3. `typeof t.realized !== 'number'` (apprentissage) — une mesure ABSENTE est
- *     rejetée, une mesure valant réellement 0 est conservée. Distinguable.
+ *  1. `upBook.asks[0]?.price ?? null` (stratégie juste valeur, bot-with-dashboard.ts) :
+ *     un ask absent reste null, une mesure réelle de 0,5 est préservée ; `decide()`
+ *     refuse de trader sur un ask absent. (L'ancien `yes.ask || 0.5`, qui confondait
+ *     les deux, a été supprimé avec la stratégie « fenêtre favori ».)
+ *  3. Série de pertes : seul un `realized` numérique NON NUL est un résultat ;
+ *     absent ou 0 (PENDING) n'est jamais compté comme une perte.
  *
  * Plus `fmt_live()` (paperbot-recap.py) : un prix live ABSENT s'affiche « n/a »,
  * jamais remplacé par un prix par défaut maquillé en mesure.
@@ -28,88 +26,57 @@ import {
   pySourcesAvailable,
   runHarnessV2,
 } from './harness-v2.ts';
+import { decide } from '../src/services/fair-value.ts';
 
 // ---------------------------------------------------------------------------
-// 1. `yes.ask || 0.5` — le trou documenté
+// 1. Asks du carnet : `asks[0]?.price ?? null` — absent ≠ valeur réelle
 // ---------------------------------------------------------------------------
+// L'ancien `orderbook.yes?.ask || 0.5` (trou documenté : absent et « vrai 0,5 »
+// confondus) a disparu avec la stratégie « fenêtre favori ». La stratégie juste
+// valeur lit le meilleur ask avec `?? null`, et `decide()` refuse tout ask absent.
 
-const YES_ASK_RE = /const _yesAsk = orderbook\.yes\?\.ask \|\| 0\.5;/;
+const UP_ASK_RE = /const upAsk = upBook\.asks\[0\]\?\.price \?\? null;/;
 
-function yesAsk(orderbook: { yes?: { ask?: number } }): number {
-  const stmt = extractFromBot(YES_ASK_RE, 'yes.ask || 0.5 (prix d’ask YES)');
-  return evalExtracted(stmt, ['orderbook'], [orderbook], '_yesAsk') as number;
+function upAsk(upBook: { asks: Array<{ price: number }> }): number | null {
+  const stmt = extractFromBot(UP_ASK_RE, 'upBook.asks[0]?.price ?? null');
+  return evalExtracted(stmt, ['upBook'], [upBook], 'upAsk') as number | null;
 }
 
-test('CONSTAT : `yes.ask || 0.5` rend absent et « vrai 0.5 » INDISTINGUABLES', () => {
-  const absent = yesAsk({ yes: {} });                  // champ manquant
-  const undef = yesAsk({ yes: { ask: undefined } });   // undefined explicite
-  const nul = yesAsk({ yes: { ask: null as unknown as number } }); // null
-  const vraiDemi = yesAsk({ yes: { ask: 0.5 } });      // mesure RÉELLE de 0.5
-  const vraiZero = yesAsk({ yes: { ask: 0 } });        // mesure réelle de 0
+test('ask absent → null (jamais un prix inventé) ; une mesure réelle est préservée', () => {
+  assert.equal(upAsk({ asks: [] }), null, 'carnet sans ask → null');
+  assert.equal(upAsk({ asks: [{ price: 0.5 }] }), 0.5, 'mesure réelle 0.5 préservée');
+  assert.notEqual(upAsk({ asks: [] }), upAsk({ asks: [{ price: 0.5 }] }), 'absent et 0.5 réel DISTINGUABLES');
+});
 
-  assert.equal(absent, 0.5, 'absent → replié sur 0.5 (défaut)');
-  assert.equal(undef, 0.5, 'undefined → 0.5');
-  assert.equal(nul, 0.5, 'null → 0.5');
-  assert.equal(vraiDemi, 0.5, 'mesure réelle 0.5');
-  assert.equal(vraiZero, 0.5, 'un ask RÉEL de 0 est écrasé par le défaut');
-  // Le trou : les quatre sorties sont identiques — impossible de savoir si l'on
-  // lit une mesure ou un défaut. Le test échouera si un jour la distinction est
-  // introduite (et il faudra alors le retourner en test positif).
-  assert.equal(absent, vraiDemi, 'CONSTAT : absent et vrai 0.5 sont confondus (trou de fraîcheur)');
+test('decide() ne trade JAMAIS sur un ask absent', () => {
+  const base = { spot: 100.2, strike: 100, sigmaPerSqrtSec: 0.0005 / Math.sqrt(60), tauSec: 120 };
+  assert.equal(decide({ ...base, upAsk: null, downAsk: null }).side, null);
+  // Côté UP absent : le modèle (très UP) ne peut pas se rabattre sur un faux prix.
+  const d = decide({ ...base, upAsk: null, downAsk: 0.3 });
+  assert.notEqual(d.side, 'UP');
 });
 
 // ---------------------------------------------------------------------------
-// 2. `no.ask ?? …` — distinguable (le code le fait correctement ici)
+// 3. Série de pertes : un trade non résolu (`realized` absent ou 0) n'est PAS une perte
 // ---------------------------------------------------------------------------
 
-const NO_ASK_RE =
-  /const _noAsk = orderbook\.no\?\.ask \?\? Math\.min\(1 - _yesAsk, 0\.99\);/;
+const STREAK_FILTER_RE = /\.filter\(t => t && t\.side !== 'HOLD' && typeof t\.realized === 'number' && t\.realized !== 0\)/;
 
-function noAsk(orderbook: { no?: { ask?: number } }, _yesAsk: number): number {
-  const stmt = extractFromBot(NO_ASK_RE, 'no.ask ?? min(1 − yesAsk, 0.99)');
-  return evalExtracted(stmt, ['orderbook', '_yesAsk'], [orderbook, _yesAsk], '_noAsk') as number;
-}
-
-test('`no.ask ?? défaut` PRÉSERVE une mesure réelle de 0 (distinguable de l’absence)', () => {
-  const zeroReel = noAsk({ no: { ask: 0 } }, 0.5);
-  const absent = noAsk({ no: {} }, 0.5);
-  assert.equal(zeroReel, 0, 'un ask NO valant réellement 0 est conservé tel quel');
-  assert.notEqual(zeroReel, absent, 'valeur réelle 0 ≠ valeur de repli : DISTINGUABLE');
-  assert.ok(Math.abs(absent - Math.min(1 - 0.5, 0.99)) < 1e-12, 'absent → repli calculé');
-  // Une mesure réelle de 0,5 n’est jamais remplacée par le repli non plus.
-  const demi = noAsk({ no: { ask: 0.5 } }, 0.2);
-  assert.equal(demi, 0.5, 'mesure réelle 0.5 préservée');
-  assert.notEqual(demi, Math.min(1 - 0.2, 0.99), '0.5 réel ≠ repli 0.8');
-});
-
-// ---------------------------------------------------------------------------
-// 3. `typeof t.realized !== 'number'` — mesuré vs non mesuré
-// ---------------------------------------------------------------------------
-
-const REALIZED_GUARD_RE = /if \(typeof t\.realized !== 'number'\) continue;/;
-
-/** true si l'entrée porte une mesure de realized exploitable. */
-function realizedIsMeasured(t: unknown): boolean {
-  const stmt = extractFromBot(REALIZED_GUARD_RE, 'typeof t.realized !== "number"');
-  const js = stmt.replace('continue;', 'return false;');
-  const fn = new Function('t', `${js}\nreturn true;`);
+function countsAsResolved(t: unknown): boolean {
+  const stmt = extractFromBot(STREAK_FILTER_RE, 'filtre des trades résolus (série de pertes)');
+  const body = stmt.replace(/^\.filter\(/, '').replace(/\)$/, '');
+  const fn = new Function('x', `return Boolean((${body})(x));`);
   return (fn as (x: unknown) => boolean)(t);
 }
 
-test('une mesure ABSENTE est distinguable d’une mesure valant réellement 0 ou 0.5', () => {
-  assert.equal(realizedIsMeasured({}), false, 'champ realized absent → PAS une mesure');
-  assert.equal(realizedIsMeasured({ realized: undefined }), false, 'undefined → PAS une mesure');
-  assert.equal(realizedIsMeasured({ realized: null }), false, 'null → PAS une mesure');
-  assert.equal(realizedIsMeasured({ realized: '0.5' }), false, 'chaîne → PAS une mesure');
-  assert.equal(realizedIsMeasured({ realized: NaN }), true, 'NaN EST un number (limite connue)');
-  assert.equal(realizedIsMeasured({ realized: 0 }), true, 'zéro RÉEL est une mesure');
-  assert.equal(realizedIsMeasured({ realized: 0.5 }), true, '0.5 RÉEL est une mesure');
-  // Distinguabilité exigée : absent ≠ valeur réelle.
-  assert.notEqual(
-    realizedIsMeasured({}),
-    realizedIsMeasured({ realized: 0.5 }),
-    'absent et 0.5 réel doivent être distinguables',
-  );
+test('une mesure ABSENTE ou PENDING n’entre pas dans la série de pertes', () => {
+  assert.equal(countsAsResolved({ side: 'YES' }), false, 'realized absent → non résolu');
+  assert.equal(countsAsResolved({ side: 'YES', realized: null }), false, 'null → non résolu');
+  assert.equal(countsAsResolved({ side: 'YES', realized: '0.5' }), false, 'chaîne → non résolu');
+  assert.equal(countsAsResolved({ side: 'YES', realized: 0 }), false, '0 = PENDING, jamais une perte');
+  assert.equal(countsAsResolved({ side: 'HOLD', realized: -1 }), false, 'HOLD ignoré');
+  assert.equal(countsAsResolved({ side: 'NO', realized: -0.5 }), true, 'perte réelle comptée');
+  assert.equal(countsAsResolved({ side: 'YES', realized: 0.4 }), true, 'gain réel compté');
 });
 
 // ---------------------------------------------------------------------------

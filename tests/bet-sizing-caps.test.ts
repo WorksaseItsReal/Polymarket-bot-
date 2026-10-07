@@ -1,20 +1,21 @@
 /**
  * (2) DIMENSIONNEMENT DE MISE — plafonds, bornes et cas dégénérés.
  *
- * Deux logiques RÉELLES sont exercées :
+ * Logique RÉELLE exercée :
  *
- *  A. `calculatePositionSize(baseSize)` dans bot-config.ts — la seule fonction de
- *     dimensionnement dynamique du projet (réduction sur série de pertes, hausse
- *     plafonnée sur série de gains, puis plancher/plafond
+ *  A. `calculatePositionSize(baseSize)` dans bot-config.ts (réduction sur série de
+ *     pertes, hausse plafonnée sur série de gains, puis plancher/plafond
  *     `minPositionPct`/`maxPositionPct`).
- *  B. Le clamp du multiplicateur de mise `sizeFactor` dans bot-with-dashboard.ts
- *     (Kelly plafonné : `sizeFactor` doit rester dans [0,5 ; 2]).
+ *
+ * (L'ancienne section B — clamp `sizeFactor` de bot-with-dashboard.ts — a été retirée
+ * avec le code qu'elle testait : la mise du bot principal vient de `computeStake`,
+ * couvert par tests/stake-sizing.test.ts.)
  *
  * Plus les PLAFONDS de configuration (maxPerTradePct, maxPerMarketPct,
  * maxTotalExposurePct) extraits du source : ils doivent rester ≤ leurs bornes
  * historiques — un relèvement accidentel doit casser ce fichier.
  *
- * LIMITE : ces deux fichiers ne sont PAS importables (leur top-level démarre le
+ * LIMITE : bot-config.ts n'est PAS importable (leur top-level démarre le
  * SDK/WebSocket). On extrait le texte et on l'évalue via `new Function` dans un
  * scope neuf — voir REPORT-v2.md.
  */
@@ -26,7 +27,6 @@ import {
   extractFunction,
   extractNumber,
   extractFrom,
-  extractFromBot,
   stripTsAnnotations,
 } from './harness-v2.ts';
 
@@ -131,38 +131,4 @@ test('GAP : une mise de base NaN ou infinie — Infinity est plafonnée, NaN NE 
     Number.isNaN(calcSize(NaN)),
     'CONSTAT : un baseSize NaN traverse le plancher/plafond sans être rattrapé (trou de robustesse)',
   );
-});
-
-// ===========================================================================
-// B. Clamp du multiplicateur de mise (sizeFactor) — bot-with-dashboard.ts
-// ===========================================================================
-
-const SIZE_FACTOR_RE =
-  /let kelly = p - \(1 - p\) \/ \(b \|\| 1\);[\s\S]*?if \(n < 10\) sizeFactor = Math\.min\(1\.2, sizeFactor\);/;
-
-function sizeFactor(p: number, b: number, n: number): number {
-  const block = extractFromBot(SIZE_FACTOR_RE, 'clamp sizeFactor (Kelly)');
-  const fn = new Function(
-    'p', 'b', 'n', 'kellyFloor', 'kellyCeil',
-    `let sizeFactor = 1;\n${block}\nreturn sizeFactor;`,
-  );
-  return (fn as (p: number, b: number, n: number, f: number, c: number) => number)(p, b, n, 0, 0.05);
-}
-
-test('le multiplicateur de mise reste dans [0,5 ; 2] et fini', () => {
-  for (const p of [0, 0.01, 0.25, 0.5, 0.58, 0.65, 0.9, 1]) {
-    for (const b of [0, 0.5, 1, 1.5, 3, 100]) {
-      for (const n of [0, 1, 5, 9, 10, 50, 1000]) {
-        const sf = sizeFactor(p, b, n);
-        assert.ok(Number.isFinite(sf), `p=${p} b=${b} n=${n} → sf non fini (${sf})`);
-        assert.ok(sf >= 0.5 - 1e-12 && sf <= 2 + 1e-12,
-          `p=${p} b=${b} n=${n} → sf=${sf} hors [0.5, 2]`);
-      }
-    }
-  }
-});
-
-test('peu d’échantillon (n < 10) borne le multiplicateur à 1,2', () => {
-  const sf = sizeFactor(0.8, 3, 5);
-  assert.ok(sf <= 1.2 + 1e-12, `n=5 → sf ≤ 1,2, obtenu ${sf}`);
 });

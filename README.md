@@ -26,10 +26,11 @@ Détail complet et sources : [`docs/rebuild/strategy/EDGE.md`](docs/rebuild/stra
 
 - **Marchés** : les marchés binaires **« Up or Down 5 minutes »** de Polymarket (résolution
   toutes les 5 min sur le prix crypto). Le bot lit le carnet d'ordres CLOB (côté `YES`/`NO`).
-- **Décision** : 100 % **déterministe**. Il ne mise que si la probabilité implicite du côté
-  favori tombe dans une **fenêtre dite « sweet spot »** (bornes `.env` `P_STRONG_MIN` /
-  `P_STRONG_MAX`, ~[0,58 ; 0,65]) et si le prix est ≥ `P_MIN_PRICE`. Sinon → **HOLD**
-  (aucune mise).
+- **Décision** : 100 % **déterministe**, par **juste valeur** (`src/services/fair-value.ts`) :
+  P(Up) est calculée depuis le spot, le strike (ouverture du round), la volatilité réalisée et
+  le temps restant ; le bot n'achète un côté que si cette probabilité dépasse son **coût réel**
+  (VWAP du carnet + frais taker) d'au moins `FV_MIN_EDGE`. Sinon → **HOLD** (aucune mise).
+  L'ancienne règle « favori dans [0,58 ; 0,65] » a été retirée : mesurée sans edge (§5).
 - **Mode** : **PAPER** (`DRY_RUN=true`). Aucune transaction, aucune clé privée utilisée ;
   chaque décision gagnante/perdante est simulée et enregistrée.
 - **Coins** : BTC, ETH, SOL, XRP, DOGE.
@@ -88,7 +89,7 @@ Variables (nom → rôle) :
 | `DRY_RUN` | `true` = 100 % paper (aucun ordre) · `false` = réel. **Le bot est en paper.** |
 | `CAPITAL_USD` | Capital de référence (dimensionne les limites de risque). |
 | `PAPER_CAPITAL` | Capital virtuel de départ pour la simulation paper. |
-| `BET_STAKE` | **Mise de base paper** (défaut code : 1). La mise effective par trade = `BET_STAKE × sizeFactor` (voir §7). |
+| `BET_STAKE` | **Plus lue.** La mise est calculée par `computeStake` (`src/services/stake-sizing.ts`) à partir de `PAPER_CAPITAL`, de l'edge du modèle et de l'état de risque (§5). |
 
 **Accès réseau / secrets — [REDACTED]**
 
@@ -103,16 +104,23 @@ Variables (nom → rôle) :
 `DEEPSEEK_ANALYZER_ENABLED`, `DEEPSEEK_MODEL`, `DEEPSEEK_API_URL`, `DEEPSEEK_MAX_CALLS_PER_DAY`,
 `DEEPSEEK_MAX_TOKENS`, `DEEPSEEK_MIN_TOKENS`, `DEEPSEEK_MIN_CONF`, `DEEPSEEK_TIMEOUT_MS`.
 
-**Stratégie (`P_*`)**
+**Stratégie juste valeur (`FV_*`, toutes optionnelles)**
 
-| Variable | Rôle |
-|---|---|
-| `P_STRONG_MIN` | Borne **basse** de la fenêtre d'entrée (favori net minimal). |
-| `P_STRONG_MAX` | Borne **haute** de la fenêtre d'entrée (au-delà, gain insuffisant → HOLD). |
-| `P_MIN_PRICE` | Prix d'achat minimal (rejette les cotes extrêmes type 0,01). |
-| `P_TAKE_PROFIT` | % de gain projeté déclenchant la vente paper anticipée (100 = ne pas vendre avant la résolution). |
-| `P_STOP_LOSS` | Seuil de stop-loss. **Inerte sur un round binaire** (voir §7). |
-| `EDGE_FILTER_ENABLED` | Filtre d'edge par coin. **Désactivé** tant que les `realized` ne sont pas fiables. |
+| Variable | Défaut | Rôle |
+|---|---|---|
+| `FV_MIN_EDGE` | `0.04` | Edge minimal exigé (probabilité modèle − coût réel par part), **après frais**. |
+| `FV_EXIT_EDGE` | = `FV_MIN_EDGE` | Vente anticipée si `bid − frais` dépasse `p_modèle` d'au moins cette marge. |
+| `FV_MIN_TAU_SEC` / `FV_MAX_TAU_SEC` | `60` / `270` | Fenêtre de temps restant où l'on peut entrer (pas d'entrée dans la fenêtre TWAP finale). |
+| `FV_MIN_ASK` / `FV_MAX_ASK` | `0.08` / `0.92` | Bornes d'ask achetable (au-delà, gain minuscule et erreur de modèle dominante). |
+| `FV_TAKER_FEE_RATE` | `0.07` | Taux `crypto_fees_v2` : frais = parts · taux · p · (1−p). |
+| `FV_BASIS_BPS` | `2` | Écart de flux Binance/Coinbase vs Chainlink (bps), ajouté à l'incertitude. |
+| `FV_TWAP_WINDOW_SEC` | `60` | Fenêtre du TWAP Chainlink de résolution. |
+| `FV_TAILS` | `t4` | Queues des rendements : `t4` (épaisses, prudent) ou `normal`. |
+| `FV_POLL_SEC` | `10` | Période de scrutation (bornée à [5 ; 300] s). |
+
+Les anciennes variables `P_STRONG_MIN`, `P_STRONG_MAX`, `P_MIN_PRICE`, `P_TAKE_PROFIT`,
+`P_STOP_LOSS`, `EDGE_FILTER_ENABLED`, `LEARN_COOLDOWN_AGE_H` ne sont **plus lues** par la
+stratégie principale.
 
 **Feature flags** : `DIPARB_ENABLED`, `SMARTMONEY_ENABLED`.
 
@@ -174,22 +182,42 @@ UP/DOWN du round, PnL réalisé, win rate et une ligne **📐 Edge** (moyenne/mi
 
 ---
 
-## 5. Stratégie en clair (déterministe)
+## 5. Stratégie en clair (juste valeur, déterministe)
 
-1. À chaque round, le bot lit le meilleur ask du côté favori (`orderbook.yes.ask` / `no.ask`).
-2. Il retient le côté si son prix est dans `[P_STRONG_MIN ; P_STRONG_MAX]` **et** ≥ `P_MIN_PRICE`,
-   **et** hors cooldown santé du coin (voir §6).
-3. **Sizing** : `f* = p − (1−p)/b`, `kelly = clamp(f*, 0, kellyCeil)`,
-   `sizeFactor = clamp(1 + 2·kelly, 0.65, 2)`, plafonné à 1,2 si `n < 10`.
-   Avec `kellyCeil = 0.05`, la mise effective est **bornée** (voir `RISK.md`).
-4. Sinon → **HOLD**, rien n'est misé et rien n'est écrit.
+**Pourquoi l'ancienne règle a été retirée.** « Acheter le favori si son ask ∈ [0,58 ; 0,65] »
+a été mesurée sur 1 411 décisions : le marché est **calibré** par niveau de prix (WR 63,2 % <
+prix payé 64,9 %, `docs/EDGE-VALIDATION.md` §5). Une règle fondée sur le seul prix d'entrée ne
+peut pas créer d'edge ; le cooldown/« fenêtre apprise » par coin réagissait à du bruit (§9 du
+même rapport). L'objectif n'est **pas** le win rate (acheter des favoris à 0,95 donne 95 % de WR
+et zéro gain) mais l'**espérance par trade après frais**.
 
-**Deux points d'honnêteté du code :**
-- **Le bot ne regarde jamais la profondeur** du carnet avant de miser (il fixe son prix sur
-  `…ask` sans contrôler `askDepth`) → voir §8.
-- **Le stop-loss est inerte** sur un round binaire tout-ou-rien : mesuré 20/20 pertes à
-  −1,00 exactement, 0 perte coupée. Ce n'est pas un contrôle de risque. Le seul levier réel est
-  **le prix d'entrée face à la win rate**.
+Toutes les ~10 s, pour chaque round 5 min ouvert (au plus **une entrée par round**) :
+
+1. **Données** (une seule source de bougies 1 min, Binance → binance.vision → Coinbase) :
+   strike = ouverture de la bougie du slot, spot = dernier prix, σ = max(vol réalisée 60 min,
+   15 min). Flux absent ou figé → pas de mise.
+2. **Probabilité** : `P(Up) = F(ln(S/K) / √(σ²·(τ_TWAP + W/3) + basis²))`, `F` = Student t4
+   réduite (queues épaisses), `τ_TWAP` = variance restante du TWAP de résolution.
+3. **Coût réel** d'une part = ask + frais taker `0,07·p·(1−p)`. Edge = P(côté) − coût.
+   Entrée seulement si edge ≥ `FV_MIN_EDGE`, τ ∈ [60 ; 270] s et ask ∈ [0,08 ; 0,92].
+4. **Mise** : `computeStake` (Kelly ×0,25, probabilité du modèle **shrinkée de moitié** vers le
+   prix, plafonds durs 1 % du capital/trade, 10 % d'exposition, modérateurs drawdown et
+   **série de pertes réelle** lue dans `history.json`).
+5. **Exécution simulée réaliste** : la mise consomme le carnet niveau par niveau (VWAP) ; si la
+   profondeur manque ou si l'edge au VWAP passe sous le seuil → pas de mise.
+6. **Sortie** : on garde jusqu'à la résolution, sauf si `bid − frais > p_modèle + FV_EXIT_EDGE`
+   (le marché paie plus que la position ne vaut). Plus de TP/SL en % (vendre au bid coûte
+   spread + frais, et le stop-loss était inerte sur un binaire).
+
+`history.json` enregistre pour chaque trade `modelProb`, `edge`, `tauSec`, `spot`, `strike`,
+`sigma1m`, `ask` et `feePerShare` ; `price` y est le **coût réel par part, frais inclus**, donc
+le PnL résolu inclut les frais. C'est ce qui permet de **mesurer la calibration** du modèle
+(`modelProb` moyen vs taux de réussite réel par tranche).
+
+**Limites honnêtes** : le modèle n'a **pas** été validé sur historique (aucune donnée
+spot+carnet horodatée n'existe) ; le strike est approché (ouverture Binance/Coinbase, pas le
+TWAP Chainlink) ; en réel, les asks « en retard » sur le spot sont aussi visés par des bots plus
+rapides, donc le paper **surestime** les exécutions sur ces opportunités.
 
 ---
 
@@ -230,14 +258,13 @@ UP/DOWN du round, PnL réalisé, win rate et une ligne **📐 Edge** (moyenne/mi
   est insuffisante dans **17,7 %** des cas en zone de mise ; la part du PnL paper qui survivrait
   au réel est **≈ 0 %** (le paper a déjà une EV négative, le réel ≈ double la perte).
   → `docs/rebuild/execution/COSTS.md`.
-- **Filtre d'edge par coin** (`EDGE_FILTER_ENABLED`) et `kellyCeil=0.05` sont **provisoires** :
-  à ré-évaluer quand `n ≥ 200` et `realized` fiables (`docs/CHANGES-APPLIED.md` §7).
+- **Modèle juste valeur non validé** : juger sur `n ≥ 200` trades résolus la calibration
+  (`modelProb` vs résultat) **et** la t-stat du PnL, jamais le win rate seul.
 - **Topics WS `clob_market`** à retirer proprement une fois DipArb/Arbitrage migrés vers REST
   (`docs/rebuild/code/REPORT.md`).
-- **Import orphelin** `analyzeMarket` dans `bot-with-dashboard.ts` (non supprimable en sécurité).
-- **Dérive live à réconcilier** : les rapports mesurent la mise sur une base de 1 €, tandis que
-  les entrées récentes de `history.json` enregistrent un champ `stake` (voir §9). La valeur de
-  base**actuelle** est `BET_STAKE` dans `.env` — à lire sur place.
+- **Mise** : les rapports historiques mesurent sur une base de 1 € ; chaque entrée de
+  `history.json` enregistre désormais sa mise réelle (`stake`) et son coût par part frais inclus
+  (`price`). La mise vient de `computeStake` (voir §5), plus de `BET_STAKE`.
 
 ---
 
