@@ -253,9 +253,15 @@ export class FairValueRunner {
     // Ouverts à régler, et reventes dont on relève l'issue du round (calibration, sans
     // toucher au PnL). Gamma est réinterrogé au plus toutes les 8 s par trade (< période
     // du tick de fond, pour ne pas sauter un passage sur une gigue de minuterie).
-    const due = (this.trades() ?? []).filter(t => now > t.endMs + 15_000
-      && now - (this.lastResolveTry.get(t.id) ?? -Infinity) >= 8_000
-      && (t.status === 'open' || (t.status === 'sold' && t.outcomeUpWon === undefined && now - t.endMs < 2 * 3_600_000)));
+    for (const [id, at] of this.lastResolveTry) if (now - at > 3 * 3_600_000) this.lastResolveTry.delete(id);
+    const all = this.trades() ?? [];
+    const open = all.filter(t => t.status === 'open' && now > t.endMs + 15_000
+      && now - (this.lastResolveTry.get(t.id) ?? -Infinity) >= 8_000);
+    // Reventes : simple relevé pour la calibration → peu prioritaire (2 par passage, une
+    // fois par minute au plus) pour ne pas allonger le passage quand Gamma est lent.
+    const sold = all.filter(t => t.status === 'sold' && t.outcomeUpWon === undefined && now > t.endMs + 15_000
+      && now - t.endMs < 2 * 3_600_000 && now - (this.lastResolveTry.get(t.id) ?? -Infinity) >= 60_000).slice(0, 2);
+    const due = [...open, ...sold];
     for (const t of due) {
       this.lastResolveTry.set(t.id, now);
       const outcome = await this.d.fetchOutcome(t.slug);
@@ -268,7 +274,7 @@ export class FairValueRunner {
         continue;
       }
       if (!outcome.resolved) {
-        if (now > t.endMs + 30 * 60_000 && !this.unresolvedWarned.has(t.id)) {
+        if (t.status === 'open' && now > t.endMs + 30 * 60_000 && !this.unresolvedWarned.has(t.id)) {
           this.unresolvedWarned.add(t.id);
           this.d.log('WARN', `Round ${t.slug} toujours non réglé 30 min après la fin (${outcome.reason}) — nouvel essai en continu`);
         }
@@ -456,7 +462,7 @@ export class FairValueRunner {
           // (budget d'exposition restant, réduction après drawdown/série de pertes) ?
           const structural = equity * MAX_VARIANCE_PCT < minOrder;
           this.holdLog(market.conditionId, `   ↳ ${ctx} → PAS de mise : ${stakeRes.stake.toFixed(2)} $ < minimum Polymarket ${minOrder} $ `
-            + (structural ? '(capital papier trop petit pour un ordre réel)' : `(plafond temporaire : ${stakeRes.bindingConstraint})`));
+            + (structural ? '(capital papier trop petit pour un ordre réel)' : `(mise réduite : ${stakeRes.bindingConstraint})`));
           if (structural) this.d.onBelowMinOrder?.(stakeRes.stake, minOrder);
           continue;
         }

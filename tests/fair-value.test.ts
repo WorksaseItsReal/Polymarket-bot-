@@ -237,3 +237,11 @@ test('prix limite d\'achat : l\'edge minimal est exactement garanti, frais inclu
   const s = estimateSell([{ price: 0.8, size: 1 }, { price: 0.5, size: 10 }], 2, 0.07, 0.7);
   assert.equal(s.complete, false, 'le bid à 0,50 est sous le plancher');
 });
+
+test('prix limite : stable numériquement même avec un taux de frais minuscule', async () => {
+  const { maxBuyPriceForEdge } = await import('../src/services/fair-value.ts');
+  for (const r of [1e-12, 1e-9, 1e-6, 0.07]) {
+    const lim = maxBuyPriceForEdge(0.8, 0.04, r)!;
+    close(0.8 - effectiveCostPerShare(lim, r), 0.04, 1e-12);
+  }
+});

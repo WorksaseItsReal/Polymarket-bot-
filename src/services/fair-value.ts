@@ -266,7 +266,9 @@ export function maxBuyPriceForEdge(prob: number, minEdge: number, rate: number):
   if (!(rate > 0)) return Math.min(c, 1);
   const disc = (1 + rate) ** 2 - 4 * rate * c;
   if (disc < 0) return null;
-  const p = ((1 + rate) - Math.sqrt(disc)) / (2 * rate);
+  // Forme stable de la petite racine (pas d'annulation quand rate → 0) :
+  // ((1+r) − √disc) / (2r) = 2c / ((1+r) + √disc)
+  const p = (2 * c) / ((1 + rate) + Math.sqrt(disc));
   return p > 0 ? Math.min(p, 1) : null;
 }
 

@@ -163,6 +163,7 @@ export async function getRoundMarketData(
   const maxAge = liveOk && hit?.value?.source.startsWith('binance') ? CACHE_MS_WITH_LIVE : CACHE_MS;
   let loaded = hit && nowMs - hit.ts < maxAge ? hit.value : undefined;
   const fromCache = loaded !== undefined;
+  let loadedAt = fromCache ? (hit as { ts: number }).ts : nowMs;
   if (loaded === undefined) {
     loaded = await fetchCandles(coin);
     cache.set(coin, { ts: nowMs, value: loaded });
@@ -176,6 +177,7 @@ export async function getRoundMarketData(
     // Cache antérieur au début du round (bougie du strike absente) ou trop vieux : on relit.
     loaded = await fetchCandles(coin);
     cache.set(coin, { ts: nowMs, value: loaded });
+    loadedAt = nowMs;
     if (!loaded) return null;
     base = deriveRoundData(loaded.candles, slotSec, nowMs, loaded.source, maxCandleAge());
   }
@@ -186,10 +188,11 @@ export async function getRoundMarketData(
   if (assumedLive && !useLive()) {
     // Le flux temps réel a décroché pendant le chargement : le spot sera la clôture de
     // bougie → mêmes exigences qu'en mode REST (bougie de la minute en cours, cache court).
-    if (nowMs - (cache.get(coin)?.ts ?? 0) >= CACHE_MS) {
-      loaded = await fetchCandles(coin);
-      cache.set(coin, { ts: nowMs, value: loaded });
-      if (!loaded) return null;
+    if (nowMs - loadedAt >= CACHE_MS) {
+      const fresh = await fetchCandles(coin);
+      if (!fresh) return null; // ne pas écraser un cache valide par un échec
+      cache.set(coin, { ts: nowMs, value: fresh });
+      loaded = fresh;
     }
     return deriveRoundData(loaded.candles, slotSec, nowMs, loaded.source, MAX_CANDLE_AGE_SPOT_MS);
   }

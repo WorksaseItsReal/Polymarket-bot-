@@ -1315,8 +1315,11 @@ async function setupFairValueStrategy(sdk: PolymarketSDK) {
   setInterval(() => {
     if (!(CONFIG.dryRun && state.paper)) return;
     // Passage COMPLET (règlements + sorties) : les ticks sur mouvement ne le remplacent pas.
+    // Seuil ≥ 2 périodes de fond (+1 min) ; pas d'alerte « bloquée » si le registre est
+    // illisible (déjà signalé, et un redémarrage ne le réparerait pas).
     const idleMin = (Date.now() - runner.lastFullPassAt) / 60_000;
-    if (runner.lastFullPassAt && idleMin > 3) {
+    const stuckMin = Math.max(3, (2 * FV_POLL_MS + 60_000) / 60_000);
+    if (runner.lastFullPassAt && idleMin > stuckMin && readLedgerShared(ledgerPath()) !== null) {
       log('ERROR', `🐕 Chien de garde : aucun passage complet de la stratégie depuis ${idleMin.toFixed(1)} min`);
       alertOnce('watchdog-stuck', `la stratégie semble bloquée (aucun passage terminé depuis ${idleMin.toFixed(0)} min) — redémarrer le bot (pm2 restart)`);
     }
