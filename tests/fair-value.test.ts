@@ -166,3 +166,12 @@ test('deriveRoundData : strike = open du slot, spot = close courant, flux périm
   assert.equal(deriveRoundData(candles, slot, now + 10 * 60_000, 'test'), null, 'flux figé');
   assert.equal(deriveRoundData(candles, slot + 3600, now, 'test'), null, 'slot absent');
 });
+
+test('deriveRoundData : sans flux temps réel, une bougie de plus de 65 s n\'est pas un spot', () => {
+  const slot = 1_790_000_100;
+  const candles = Array.from({ length: 30 }, (_, i) => ({ openTimeMs: (slot - 25 * 60 + i * 60) * 1000, open: 100, close: 100 * Math.exp((i % 2 ? 1 : -1) * 0.0004) }));
+  const lastOpen = candles[candles.length - 1].openTimeMs;
+  assert.ok(deriveRoundData(candles, slot, lastOpen + 30_000, 't'), 'minute en cours : OK');
+  assert.equal(deriveRoundData(candles, slot, lastOpen + 90_000, 't'), null, 'bougie précédente : spot périmé');
+  assert.ok(deriveRoundData(candles, slot, lastOpen + 90_000, 't', 120_000), 'avec flux temps réel : bougie = strike/vol seulement');
+});

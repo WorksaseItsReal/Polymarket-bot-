@@ -51,8 +51,12 @@ const CACHE_MS = 3000;
 const CACHE_MS_WITH_LIVE = 30_000;
 /** Un prix temps réel plus vieux que ça est ignoré (repli sur la bougie). */
 const LIVE_MAX_AGE_MS = 3000;
-/** Une bougie « courante » plus vieille que ça signifie un flux figé. */
+/** Une bougie « courante » plus vieille que ça signifie un flux figé (bougies = strike/vol). */
 const MAX_CANDLE_AGE_MS = 120_000;
+/** Sans flux temps réel, le spot EST la clôture de la dernière bougie : elle doit être celle
+ *  de la minute en cours (sinon le spot peut avoir 1 à 2 min de retard sur le carnet et
+ *  fabriquer de faux edges juste après un mouvement). */
+const MAX_CANDLE_AGE_SPOT_MS = 65_000;
 
 async function fetchJson(url: string): Promise<unknown | null> {
   const controller = new AbortController();
@@ -114,12 +118,13 @@ export function deriveRoundData(
   slotSec: number,
   nowMs: number,
   source: string,
+  maxCandleAgeMs = MAX_CANDLE_AGE_SPOT_MS,
 ): RoundMarketData | null {
   if (!candles.length || !(slotSec > 0)) return null;
   const last = candles[candles.length - 1];
   const candleAgeMs = nowMs - last.openTimeMs;
-  // Bougie courante = minute en cours (0–60 s), tolérance pour une source un peu lente.
-  if (!(candleAgeMs >= 0 && candleAgeMs <= MAX_CANDLE_AGE_MS)) return null;
+  // Bougie courante = minute en cours (0–60 s), petite tolérance pour une source lente.
+  if (!(candleAgeMs >= 0 && candleAgeMs <= maxCandleAgeMs)) return null;
   const startCandle = candles.find(c => c.openTimeMs === slotSec * 1000);
   if (!startCandle) return null;
   // Vol sur bougies CLOSES uniquement (la courante est partielle).
@@ -158,13 +163,16 @@ export async function getRoundMarketData(
     cache.set(coin, { ts: nowMs, value: loaded });
   }
   if (!loaded) return null;
-  let base = deriveRoundData(loaded.candles, slotSec, nowMs, loaded.source);
+  // Avec un spot temps réel, la bougie ne sert qu'au strike et à la vol : âge toléré plus long.
+  const useLive = () => liveOk && !!loaded && loaded.source.startsWith('binance');
+  const maxCandleAge = () => (useLive() ? MAX_CANDLE_AGE_MS : MAX_CANDLE_AGE_SPOT_MS);
+  let base = deriveRoundData(loaded.candles, slotSec, nowMs, loaded.source, maxCandleAge());
   if (!base && fromCache) {
-    // Cache antérieur au début du round (bougie du strike absente) : on relit une fois.
+    // Cache antérieur au début du round (bougie du strike absente) ou trop vieux : on relit.
     loaded = await fetchCandles(coin);
     cache.set(coin, { ts: nowMs, value: loaded });
     if (!loaded) return null;
-    base = deriveRoundData(loaded.candles, slotSec, nowMs, loaded.source);
+    base = deriveRoundData(loaded.candles, slotSec, nowMs, loaded.source, maxCandleAge());
   }
   if (!base) return null;
   if (liveOk && loaded.source.startsWith('binance')) {

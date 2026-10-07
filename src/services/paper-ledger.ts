@@ -160,6 +160,22 @@ export function computeStats(trades: LedgerTrade[]): LedgerStats {
   };
 }
 
+/**
+ * Pertes consécutives parmi les trades réglés dans les `windowMs` dernières ms.
+ * Une série de pertes met la mise à 0 ; sans fenêtre, elle ne pouvait plus jamais se
+ * résorber (il faut trader pour la casser) → arrêt définitif silencieux. Avec une
+ * fenêtre de 6 h, 8 pertes d'affilée valent une PAUSE de 6 h, puis reprise.
+ */
+export function recentLossStreak(trades: LedgerTrade[], nowMs: number, windowMs: number): number {
+  const recent = trades
+    .filter(t => t.status !== 'open' && typeof t.pnl === 'number' && Number.isFinite(t.pnl)
+      && nowMs - Date.parse(t.resolvedAt ?? t.openedAt) <= windowMs)
+    .sort((a, b) => (a.resolvedAt ?? a.openedAt).localeCompare(b.resolvedAt ?? b.openedAt));
+  let streak = 0;
+  for (let i = recent.length - 1; i >= 0 && (recent[i].pnl as number) < 0; i--) streak++;
+  return streak;
+}
+
 // ---------------------------------------------------------------------------
 // Résolution Gamma
 // ---------------------------------------------------------------------------

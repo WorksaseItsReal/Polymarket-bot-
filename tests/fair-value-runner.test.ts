@@ -260,3 +260,20 @@ test('entrées bloquées (arrêt de sécurité) : aucun pari, mais l\'évaluatio
   assert.deepEqual(evals, ['hold']);
   assert.ok(env.logs.some(l => /entrées bloquées \(perte significative\)/.test(l)));
 });
+
+test('mise à 0 par série de pertes : alerte onRiskStop (plus d\'arrêt silencieux)', async () => {
+  const stops: string[] = [];
+  const env = setup({ onRiskStop: r => stops.push(r) });
+  const now = (SLOT + 180) * 1000;
+  const losses = [...Array(8)].map((_, i) => ({
+    id: `l${i}`, slug: `btc-updown-5m-${SLOT - 300 * (i + 1)}`, coin: 'BTC', side: 'UP' as const, stake: 0.5, costPerShare: 0.6,
+    shares: 0.83, modelProb: 0.7, edge: 0.1, openedAt: new Date(now - 3_600_000).toISOString(), endMs: now - 3_000_000,
+    status: 'lost' as const, pnl: -0.5, resolvedAt: new Date(now - 3_000_000 + i * 1000).toISOString(),
+  }));
+  const { saveLedger } = await import('../src/services/paper-ledger.ts');
+  saveLedger(env.ledgerPath, losses);
+  await env.runner().tick();
+  assert.equal(loadLedger(env.ledgerPath)!.length, 8, 'aucun nouveau pari');
+  assert.equal(stops.length, 1);
+  assert.match(stops[0], /pertes consécutives/);
+});

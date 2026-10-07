@@ -29,6 +29,7 @@ import {
 import {
   computeStats,
   loadLedger,
+  recentLossStreak,
   saveLedger,
   settlePnl,
   type LedgerStats,
@@ -95,7 +96,12 @@ export interface RunnerDeps {
   /** Raison de bloquer les NOUVELLES entrées (arrêt de performance), ou null. Les
    *  évaluations continuent d'être journalisées : on garde l'œil sur le marché. */
   entryBlock?: () => string | null;
+  /** La mise est tombée à 0 à cause d'un modérateur de risque (drawdown, série de pertes). */
+  onRiskStop?: (reason: string) => void;
 }
+
+/** Fenêtre de la série de pertes : 8 pertes d'affilée = pause de 6 h, pas un arrêt définitif. */
+export const LOSS_STREAK_WINDOW_MS = 6 * 3_600_000;
 
 const SLUG_RE = /^(btc|eth|sol|xrp|doge)-updown-5m-(\d{9,})$/;
 
@@ -338,13 +344,16 @@ export class FairValueRunner {
           entryPrice: q.cost,
           // Probabilité du MODÈLE, shrinkée de moitié vers le prix par computeStake (λ = 0,5).
           bookProb: q.prob,
-          consecutiveLosses: stats.lossStreak,
+          consecutiveLosses: recentLossStreak(this.trades() ?? [], now, LOSS_STREAK_WINDOW_MS),
           drawdownCurrent: peakCapital > 0 ? stats.drawdownNow / peakCapital : 0,
           openExposureEur: stats.openExposure,
           openPositions: stats.open,
         });
         if (stakeRes.skipped || !(stakeRes.stake > 0)) {
           this.holdLog(market.conditionId, `   ↳ ${ctx} → PAS de mise : ${stakeRes.rationale}`);
+          if (stakeRes.bindingConstraint === 'drawdown' || stakeRes.bindingConstraint === 'série de pertes') {
+            this.d.onRiskStop?.(stakeRes.rationale);
+          }
           continue;
         }
 

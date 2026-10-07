@@ -37,11 +37,22 @@ export function spotPrice(x: number): string {
   return `${int.replace(/\B(?=(\d{3})+(?!\d))/g, ' ')},${dec} $`;
 }
 
-/** « 14:05 → 14:10 » dans le fuseau demandé (défaut Europe/Paris). */
+/** Fuseau valide ? (un fuseau inconnu fait lever Intl.DateTimeFormat). */
+export function isValidTimeZone(tz: string): boolean {
+  try {
+    new Intl.DateTimeFormat('fr-FR', { timeZone: tz });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** « 14:05 → 14:10 » dans le fuseau demandé (défaut Europe/Paris ; UTC si fuseau invalide). */
 export function roundWindow(slotSec: number, timeZone = 'Europe/Paris'): string {
+  const tz = isValidTimeZone(timeZone) ? timeZone : 'UTC';
   const f = (ms: number) =>
-    new Intl.DateTimeFormat('fr-FR', { hour: '2-digit', minute: '2-digit', timeZone }).format(new Date(ms));
-  return `${f(slotSec * 1000)} → ${f(slotSec * 1000 + 300_000)}`;
+    new Intl.DateTimeFormat('fr-FR', { hour: '2-digit', minute: '2-digit', timeZone: tz }).format(new Date(ms));
+  return `${f(slotSec * 1000)} → ${f(slotSec * 1000 + 300_000)}${tz === timeZone ? '' : ' UTC'}`;
 }
 
 export function duration(sec: number): string {

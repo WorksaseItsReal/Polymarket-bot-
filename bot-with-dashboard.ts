@@ -9,6 +9,7 @@
  */
 
 import 'dotenv/config';
+import axios from 'axios';
 import { ethers } from 'ethers';
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import {
@@ -32,9 +33,10 @@ import { RoundDiscovery } from './src/services/round-discovery.js';
 import { SpotStream } from './src/services/spot-stream.js';
 import { DecisionJournal } from './src/services/decision-journal.js';
 import { MoveScheduler } from './src/strategy/move-scheduler.js';
+import { withTimeout } from './src/utils/with-timeout.js';
 import { PersistentGuard, evaluateGuard } from './src/strategy/performance-guard.js';
 import { TelegramClient, telegramConfigFromEnv } from './src/services/telegram.js';
-import { msgAlert, msgStartup, msgSummary } from './src/services/telegram-messages.js';
+import { isValidTimeZone, msgAlert, msgStartup, msgSummary } from './src/services/telegram-messages.js';
 
 // ============================================================================
 // CONFIGURATION (same as bot-config.ts)
@@ -42,6 +44,9 @@ import { msgAlert, msgStartup, msgSummary } from './src/services/telegram-messag
 
 /** Mode papier : règle unique du projet (isDryRunMode, LIVE seulement si DRY_RUN=false). */
 const DRY_RUN = isDryRunMode();
+// Le client CLOB (@polymarket/clob-client) appelle axios SANS délai : une réponse qui ne
+// vient jamais bloquait la requête pendant des minutes. Délai par défaut pour tout axios.
+axios.defaults.timeout = Number(process.env.HTTP_TIMEOUT_MS ?? '') || 10_000;
 /** Le process a-t-il été DÉMARRÉ en live ? Le dashboard ne peut jamais passer en LIVE sinon. */
 const STARTED_LIVE = !DRY_RUN;
 /**
@@ -273,21 +278,9 @@ function canTrade(): boolean {
     return false;
   }
 
-  // Reset daily PnL if new day
-  const daysSinceReset = (Date.now() - state.lastDailyReset) / (1000 * 60 * 60 * 24);
-  if (daysSinceReset >= 1) {
-    log('INFO', `Daily PnL reset. Previous day: $${state.dailyPnL.toFixed(2)}`);
-    state.dailyPnL = 0;
-    state.lastDailyReset = Date.now();
-  }
-
-  // Reset monthly PnL if new month
-  const daysSinceMonthStart = (Date.now() - state.monthStartTime) / (1000 * 60 * 60 * 24);
-  if (daysSinceMonthStart >= 30) {
-    log('INFO', `Monthly PnL reset. Previous month: $${state.monthlyPnL.toFixed(2)}`);
-    state.monthlyPnL = 0;
-    state.monthStartTime = Date.now();
-  }
+  // Pertes du jour / du mois : recalculées sur jours et mois CALENDAIRES (UTC) depuis le
+  // registre dans syncRealizedPnl(). Les anciennes remises à zéro « 24 h après le
+  // démarrage » pouvaient effacer la perte du jour juste avant ce contrôle : retirées.
 
   // Update current capital and drawdown
   state.currentCapital = CONFIG.capital.totalUsd + state.totalPnL;
@@ -325,7 +318,7 @@ function canTrade(): boolean {
     state.isPaused = true;
     state.pauseUntil = Date.now() + CONFIG.risk.pauseOnBreachMinutes * 60 * 1000;
     log('WARN', `Daily loss limit breached: -$${Math.abs(state.dailyPnL).toFixed(2)} (limit: $${dailyLossLimit.toFixed(2)})`);
-    alertOnce('daily', `perte du jour ${Math.abs(state.dailyPnL).toFixed(2)} $ ≥ limite ${dailyLossLimit.toFixed(2)} $ : pause de ${CONFIG.risk.pauseOnBreachMinutes} min`);
+    alertOnce('daily', `perte du jour ${Math.abs(state.dailyPnL).toFixed(2)} $ ≥ limite ${dailyLossLimit.toFixed(2)} $ : plus de nouvelle position jusqu'à minuit UTC`);
     updateDashboard();
     return false;
   }
@@ -335,8 +328,9 @@ function canTrade(): boolean {
   if (state.monthlyPnL <= -monthlyLossLimit) {
     log('ERROR', `🛑 Monthly loss limit breached: -$${Math.abs(state.monthlyPnL).toFixed(2)} (limit: $${monthlyLossLimit.toFixed(2)})`);
     state.isPaused = true;
-    state.pauseUntil = Date.now() + (30 * 24 * 60 * 60 * 1000);
-    alertOnce('monthly', `perte du mois ≥ ${monthlyLossLimit.toFixed(2)} $ : trading en pause 30 jours`);
+    const n = new Date();
+    state.pauseUntil = Date.UTC(n.getUTCFullYear(), n.getUTCMonth() + 1, 1); // jusqu'au 1er du mois prochain
+    alertOnce('monthly', `perte du mois ≥ ${monthlyLossLimit.toFixed(2)} $ : plus de nouvelle position jusqu'au 1er du mois prochain (UTC)`);
     updateDashboard();
     return false;
   }
@@ -346,7 +340,7 @@ function canTrade(): boolean {
     log('ERROR', `🛑 Maximum drawdown reached: ${(state.currentDrawdown * 100).toFixed(1)}%`);
     state.isPaused = true;
     state.pauseUntil = Date.now() + (7 * 24 * 60 * 60 * 1000);
-    alertOnce('drawdown', `baisse de ${(state.currentDrawdown * 100).toFixed(1)} % depuis le plus haut : trading en pause 7 jours`);
+    alertOnce('drawdown', `baisse de ${(state.currentDrawdown * 100).toFixed(1)} % depuis le plus haut : nouvelles positions bloquées (le plus haut ne s'efface pas : reprise sur décision manuelle — archiver ~/.polymarket/fv-ledger.json ou ajuster PAPER_CAPITAL)`);
     updateDashboard();
     return false;
   }
@@ -475,7 +469,12 @@ function onDashboardCommand(handler: (cmd: { command: string; payload: any }) =>
 
 // === NOTIFICATIONS TELEGRAM (src/services/telegram.ts) ===
 let telegram: TelegramClient | null = null;
-const TG_TZ = process.env.TELEGRAM_TZ || 'Europe/Paris';
+const TG_TZ = (() => {
+  const tz = process.env.TELEGRAM_TZ || 'Europe/Paris';
+  if (isValidTimeZone(tz)) return tz;
+  console.warn(`TELEGRAM_TZ="${tz}" n'est pas un fuseau valide — Europe/Paris utilisé.`);
+  return 'Europe/Paris';
+})();
 /** Alerte de risque, au plus une fois toutes les 6 h par motif (pas de spam horaire). */
 const lastAlertAt = new Map<string, number>();
 function alertOnce(key: string, text: string): void {
@@ -613,7 +612,11 @@ async function initializeSmartMoney(sdk: PolymarketSDK) {
           // simplified placeholder from original file
           // ...
         }
-      });
+      },
+      // ⚠️ FIX 2026-10-07 : sans ce filtre, le flux d'activité délivrait CHAQUE trade de
+      // Polymarket (milliers de lignes de log / minute) au lieu des portefeuilles suivis.
+      { filterAddresses: qualified },
+    );
   }
   isSmartMoneyInitialized = true;
   isSmartMoneyInitializing = false;
@@ -708,7 +711,7 @@ async function setupDipArb(sdk: PolymarketSDK) {
     shares: CONFIG.dipArb.shares,
     sumTarget: CONFIG.dipArb.sumTarget,
     autoExecute: !CONFIG.dryRun,
-    debug: true,
+    debug: process.env.DIPARB_DEBUG === 'true',
   });
 
   // Event handlers - listen to orderbookUpdate for live orderbook data
@@ -851,8 +854,9 @@ async function setupDipArb(sdk: PolymarketSDK) {
     updateDashboard();
   });
 
-  // Enable auto-rotate if configured
-  if (CONFIG.dipArb.autoRotate) {
+  // Enable auto-rotate if configured — UNIQUEMENT si DipArb est activé. Avant : activé même
+  // DipArb désactivé → scan du portefeuille + merge/redeem toutes les 30 s et log en boucle.
+  if (CONFIG.dipArb.enabled && CONFIG.dipArb.autoRotate) {
     sdk.dipArb.enableAutoRotate({
       enabled: true,
       underlyings: ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE'],
@@ -912,16 +916,18 @@ function syncRealizedPnl() {
   const st = computeStats(trades);
   const v = st.pnl;
   state.totalPnL = v;
-  // Pertes du jour / du mois sur fenêtres GLISSANTES (24 h / 30 j), recalculées à chaque
-  // tick depuis le registre : avant, ces compteurs n'étaient jamais alimentés en papier
-  // (aucun PnL réalisé ne passait par recordTrade) → limites journalière et mensuelle
-  // inertes. Fenêtres glissantes = insensibles à un redémarrage.
-  const now = Date.now();
-  const since = (ms: number) => trades
-    .filter(t => t.status !== 'open' && typeof t.pnl === 'number' && Date.parse(t.resolvedAt ?? '') >= now - ms)
+  // Pertes du jour / du mois CALENDAIRES (UTC), recalculées à chaque tick depuis le
+  // registre : avant, ces compteurs n'étaient jamais alimentés en papier (aucun PnL
+  // réalisé ne passait par recordTrade) → limites journalière et mensuelle inertes.
+  // Recalcul depuis le registre = insensible à un redémarrage.
+  const now = new Date();
+  const dayStart = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+  const monthStart = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1);
+  const since = (fromMs: number) => trades
+    .filter(t => t.status !== 'open' && typeof t.pnl === 'number' && Date.parse(t.resolvedAt ?? '') >= fromMs)
     .reduce((acc, t) => acc + (t.pnl as number), 0);
-  state.dailyPnL = since(24 * 3_600_000);
-  state.monthlyPnL = since(30 * 24 * 3_600_000);
+  state.dailyPnL = since(dayStart);
+  state.monthlyPnL = since(monthStart);
   state.currentCapital = CONFIG.capital.totalUsd + v;
   // Plus haut historique (registre) : un redémarrage ne doit pas effacer le drawdown.
   state.peakCapital = Math.max(state.peakCapital, CONFIG.capital.totalUsd + st.peakPnl, state.currentCapital);
@@ -1166,9 +1172,9 @@ async function setupFairValueStrategy(sdk: PolymarketSDK) {
       const found: ScannedMarket[] = await discovery.current(Date.now());
       if (found.length >= STRATEGY_COINS.length) return found;
       try {
-        const scanned = (await sdk.dipArb.scanUpcomingMarkets({
+        const scanned = (await withTimeout(sdk.dipArb.scanUpcomingMarkets({
           coin: 'all', duration: '5m', minMinutesUntilEnd: 0, maxMinutesUntilEnd: 6, limit: 12,
-        })) as ScannedMarket[];
+        }), 20_000, 'scan des marchés')) as ScannedMarket[];
         const have = new Set(found.map(m => m.conditionId));
         return [...found, ...scanned.filter(m => m && !have.has(m.conditionId))];
       } catch {
@@ -1176,7 +1182,8 @@ async function setupFairValueStrategy(sdk: PolymarketSDK) {
       }
     },
     marketsRefreshMs: 10_000,
-    getBook: tokenId => sdk.markets.getTokenOrderbook(tokenId),
+    // Délai garanti : le client CLOB n'en a aucun, une réponse bloquée figeait la boucle.
+    getBook: tokenId => withTimeout(sdk.markets.getTokenOrderbook(tokenId), 8000, 'carnet CLOB'),
     getRoundData: (coin, slot, now) => (isSpotCoin(coin)
       ? getRoundMarketData(coin as SpotCoin, slot, now, stream?.price(coin) ?? null)
       : Promise.resolve(null)),
@@ -1186,6 +1193,12 @@ async function setupFairValueStrategy(sdk: PolymarketSDK) {
     timeZone: TG_TZ,
     onEvaluation: r => { journal?.record(r); },
     entryBlock: () => perfGuard(),
+    onRiskStop: reason => {
+      const streak = /pertes consécutives/.test(reason);
+      alertOnce(streak ? 'risk-streak' : 'risk-drawdown', streak
+        ? `mise suspendue après une série de pertes (${reason.slice(0, 120)}) — reprise automatique quand ces pertes auront plus de 6 h`
+        : `mise suspendue : baisse ≥ 20 % depuis le plus haut. Arrêt de risque maintenu jusqu'à décision manuelle (analyser le journal, puis archiver ~/.polymarket/fv-ledger.json ou ajuster PAPER_CAPITAL)`);
+    },
     onTradeOpened: e => {
       simulateTrade(e.winProfit, 'dipArb', e.description);
       // Journal historique (lu par les outils externes paperbot-pnl.py / recap).
@@ -1366,8 +1379,11 @@ async function setupPortfolioManager(sdk: PolymarketSDK) {
     log('WARN', `Portfolio Sync failed: ${err.message}`);
   }
 
-  // Periodic Position Sync (Every 30s)
+  // Periodic Position Sync (Every 30s) — une passe lente ne doit pas en empiler d'autres.
+  let syncing = false;
   setInterval(async () => {
+    if (syncing) return;
+    syncing = true;
     try {
       const positions = await sdk.wallets.getWalletPositions(sdk.tradingService.getAddress());
 
@@ -1422,6 +1438,8 @@ async function setupPortfolioManager(sdk: PolymarketSDK) {
       updateDashboard();
     } catch (err: any) {
       log('WARN', `Portfolio sync error: ${err.message}`);
+    } finally {
+      syncing = false;
     }
   }, 30 * 1000);
 }
@@ -1494,9 +1512,19 @@ async function main() {
     updateDashboard();
   }
 
-  const sdk = await PolymarketSDK.create({
+  const sdk = new PolymarketSDK({
     privateKey: process.env.POLYMARKET_PRIVATE_KEY,
   });
+  try {
+    await sdk.start({ timeout: 15_000 });
+  } catch (err) {
+    // La stratégie papier n'utilise ni la clé API CLOB (ordres) ni le WebSocket Polymarket :
+    // carnets, marchés et résultats passent par des API publiques. Un échec ici ne doit
+    // pas arrêter le bot en papier (avant : exit 1 → boucle de redémarrages PM2).
+    if (!CONFIG.dryRun) throw err;
+    log('WARN', `Services de trading Polymarket indisponibles au démarrage (${String((err as Error)?.message ?? err).slice(0, 160)}) — `
+      + 'sans effet sur la stratégie papier, on continue (le WebSocket se reconnecte seul).');
+  }
 
   log('INFO', `Wallet: ${sdk.tradingService.getAddress()}`);
 

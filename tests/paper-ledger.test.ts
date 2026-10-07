@@ -105,3 +105,14 @@ test('registre : aller-retour fichier, fichier illisible jamais écrasé', () =>
   assert.equal(loadLedger(path), null, 'tronqué → null (l\'appelant ne doit rien écrire)');
   assert.equal(readFileSync(path, 'utf-8'), '{"version":1,"trades":[{"id":"a"', 'contenu préservé');
 });
+
+test('série de pertes récente : les pertes de plus de 6 h ne comptent plus (pause, pas arrêt définitif)', async () => {
+  const { recentLossStreak } = await import('../src/services/paper-ledger.ts');
+  const now = Date.parse('2026-10-07T12:00:00Z');
+  const at = (h: number, pnl: number) => trade({ status: pnl > 0 ? 'won' : 'lost', pnl, resolvedAt: new Date(now - h * 3_600_000).toISOString() });
+  const eight = [...Array(8)].map((_, i) => at(1 + i * 0.1, -1));
+  assert.equal(recentLossStreak(eight, now, 6 * 3_600_000), 8);
+  assert.equal(recentLossStreak(eight, now + 6 * 3_600_000, 6 * 3_600_000), 0, '6 h plus tard : série résorbée');
+  assert.equal(recentLossStreak([...eight, at(0.5, 0.6)], now, 6 * 3_600_000), 0, 'un gain casse la série');
+  assert.equal(recentLossStreak([...eight, trade({})], now, 6 * 3_600_000), 8, 'un trade ouvert ne compte pas');
+});

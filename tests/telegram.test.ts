@@ -245,3 +245,8 @@ test('fiabilité : un PnL positif sur peu de trades n\'est jamais présenté com
   assert.match(reliability({ n: 250, tStat: 2.4 }), /significatif ✅/);
   assert.match(reliability({ n: 250, tStat: -2.4 }), /perte statistiquement significative/);
 });
+
+test('fuseau invalide : jamais d\'exception, repli UTC signalé', () => {
+  assert.equal(roundWindow(1_790_000_100, 'Mars/Olympus'), '14:15 → 14:20 UTC');
+  noJunk(msgTradeClosed({ coin: 'BTC', side: 'UP', slotSec: 1_790_000_100, outcome: 'won', pnl: 1, stats: stats([1]), timeZone: 'pas/un/fuseau' }));
+});
