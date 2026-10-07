@@ -1232,6 +1232,27 @@ async function setupFairValueStrategy(sdk: PolymarketSDK) {
   await tick();
   setInterval(() => { void tick(); }, FV_POLL_MS);
 
+  const startedAt = Date.now();
+  // Chien de garde : une boucle bloquée (requête sans fin) ou en échec permanent doit se
+  // voir, pas se découvrir des heures plus tard.
+  setInterval(() => {
+    if (!(CONFIG.dryRun && state.paper)) return;
+    const idleMin = (Date.now() - runner.lastTickEndedAt) / 60_000;
+    if (runner.lastTickEndedAt && idleMin > 3) {
+      log('ERROR', `🐕 Chien de garde : aucun passage de la stratégie terminé depuis ${idleMin.toFixed(1)} min`);
+      alertOnce('watchdog-stuck', `la stratégie semble bloquée (aucun passage terminé depuis ${idleMin.toFixed(0)} min) — redémarrer le bot (pm2 restart)`);
+    }
+    const noMarketsMin = (Date.now() - (runner.lastMarketsFoundAt || startedAt)) / 60_000;
+    if (noMarketsMin > 5) {
+      log('ERROR', `🐕 Chien de garde : aucun marché « Up or Down 5 min » trouvé depuis ${noMarketsMin.toFixed(0)} min (Gamma injoignable ?)`);
+      alertOnce('watchdog-markets', `aucun marché 5 min trouvé depuis ${noMarketsMin.toFixed(0)} min — vérifier l'accès réseau à gamma-api.polymarket.com`);
+    }
+    if (runner.consecutiveTickFailures >= 10) {
+      log('ERROR', `🐕 Chien de garde : ${runner.consecutiveTickFailures} passages consécutifs en échec`);
+      alertOnce('watchdog-failing', `${runner.consecutiveTickFailures} passages consécutifs de la stratégie en échec — voir paperbot.log`);
+    }
+  }, 60_000).unref?.();
+
   if (stream) {
     // Réaction immédiate à un mouvement du spot : c'est là que le carnet Polymarket est
     // le plus souvent en retard. Au plus une évaluation par coin toutes les 1,5 s.
@@ -1444,7 +1465,39 @@ async function setupPortfolioManager(sdk: PolymarketSDK) {
   }, 30 * 1000);
 }
 
+// === PROCESS : erreurs non gérées et arrêt propre ===
+let shuttingDown = false;
+/** Arrêt propre : coupe le flux spot, vide la file Telegram et le journal (≤ 5 s). */
+async function shutdown(reason: string, code: number): Promise<void> {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  log(code ? 'ERROR' : 'INFO', `Arrêt du bot (${reason})`);
+  try { spotStream?.stop(); } catch { /* déjà arrêté */ }
+  notify(code ? msgAlert(`bot arrêté sur erreur (${reason}) — PM2 va le relancer`) : `🛑 Bot arrêté (${reason})`);
+  await Promise.race([
+    Promise.all([telegram?.flush(), decisionJournal?.flush()]),
+    new Promise(r => setTimeout(r, 5000)),
+  ]);
+  process.exit(code);
+}
+
+function installProcessHandlers(): void {
+  // Un rejet non géré tuait Node 22 (comportement par défaut) : on le journalise et on
+  // continue — chaque boucle du bot capture déjà ses propres erreurs.
+  process.on('unhandledRejection', (reason) => {
+    log('ERROR', `Rejet de promesse non géré : ${String((reason as Error)?.stack ?? reason).slice(0, 400)}`);
+  });
+  // Une exception synchrone non rattrapée laisse l'état incertain : arrêt propre, PM2 relance.
+  process.on('uncaughtException', (err) => {
+    log('ERROR', `Exception non rattrapée : ${String(err?.stack ?? err).slice(0, 400)}`);
+    void shutdown(`exception : ${String(err?.message ?? err).slice(0, 80)}`, 1);
+  });
+  process.on('SIGTERM', () => { void shutdown('SIGTERM', 0); });
+  process.on('SIGINT', () => { void shutdown('SIGINT', 0); });
+}
+
 async function main() {
+  installProcessHandlers();
   console.clear();
   console.log('╔════════════════════════════════════════════════════════════════════╗');
   console.log('║          POLYMARKET BOT v3.0 + DASHBOARD                           ║');
@@ -1877,7 +1930,7 @@ async function main() {
 }
 
 main().catch((err) => {
-  console.error('Fatal:', err.message);
+  console.error('Fatal:', err?.message ?? err);
   console.error(err);
-  process.exit(1);
+  void shutdown(`erreur fatale : ${String(err?.message ?? err).slice(0, 80)}`, 1);
 });

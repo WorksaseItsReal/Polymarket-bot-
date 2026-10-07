@@ -123,6 +123,11 @@ export class FairValueRunner {
   private marketsTs = 0;
   private marketsSlot = -1;
   private running = false;
+  /** Fin du dernier tick (ms) et échecs consécutifs : alimentent le chien de garde. */
+  lastTickEndedAt = 0;
+  consecutiveTickFailures = 0;
+  /** Dernière fois qu'au moins un marché 5 min a été trouvé (0 = jamais). */
+  lastMarketsFoundAt = 0;
   private ledgerBrokenWarned = false;
 
   constructor(deps: RunnerDeps) {
@@ -191,10 +196,13 @@ export class FairValueRunner {
       if (this.trades() === null) return true;
       await this.checkExits();
       await this.enterNewTrades(coins);
+      this.consecutiveTickFailures = 0;
     } catch (err) {
+      this.consecutiveTickFailures++;
       this.d.log('WARN', `Stratégie juste valeur : tick en échec (${String((err as Error)?.message ?? err).slice(0, 160)}) — nouvel essai au prochain tick`);
     } finally {
       this.running = false;
+      this.lastTickEndedAt = this.d.now();
     }
     return true;
   }
@@ -289,6 +297,7 @@ export class FairValueRunner {
       m => !!m && !!m.conditionId && m.durationMinutes === 5 && (STRATEGY_COINS as readonly string[]).includes(m.underlying) && slotOf(m) !== null,
     );
     this.marketsTs = now;
+    if (this.markets.length) this.lastMarketsFoundAt = now;
   }
 
   async enterNewTrades(coins?: readonly string[]): Promise<void> {

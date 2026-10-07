@@ -277,3 +277,19 @@ test('mise à 0 par série de pertes : alerte onRiskStop (plus d\'arrêt silenci
   assert.equal(stops.length, 1);
   assert.match(stops[0], /pertes consécutives/);
 });
+
+test('chien de garde : fin de passage, échecs consécutifs et dernier marché trouvé sont exposés', async () => {
+  let fail = true;
+  const env = setup({ scanMarkets: async () => { if (fail) throw new Error('gamma down'); return [MARKET]; } });
+  const r = env.runner();
+  await r.tick();
+  await r.tick();
+  assert.equal(r.consecutiveTickFailures, 2);
+  assert.equal(r.lastMarketsFoundAt, 0);
+  assert.ok(r.lastTickEndedAt > 0);
+  fail = false;
+  env.setNow((SLOT + 250) * 1000);
+  await r.tick();
+  assert.equal(r.consecutiveTickFailures, 0);
+  assert.equal(r.lastMarketsFoundAt, (SLOT + 250) * 1000);
+});
