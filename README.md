@@ -38,6 +38,12 @@ npx tsx scripts/telegram/check.ts          # doit afficher « ✅ … Message de
 pm2 restart polymarket-paperbot && pm2 logs polymarket-paperbot --lines 50
 ```
 
+Recommandé une fois pour toutes (les logs PM2 grossissent sans fin sinon) :
+
+```bash
+pm2 install pm2-logrotate && pm2 set pm2-logrotate:max_size 50M && pm2 set pm2-logrotate:retain 7
+```
+
 Puis :
 1. **Désactiver l'ancien recap Hermes** (`paperbot-recap-telegram`) : il décrit l'ancienne règle.
 2. Vérifier dans les logs : `Flux spot temps réel connecté`, `Telegram connecté`, puis des
@@ -179,6 +185,10 @@ Tout vit dans **`~/.polymarket/`** (`/root/.polymarket/`) :
 | Fichier | Contenu | Statut |
 |---|---|---|
 | `fv-ledger.json` | **Registre de la stratégie juste valeur — SOURCE DE VÉRITÉ du bot.** Un trade par round : mise, coût par part, `modelProb`, statut (`open`/`won`/`lost`/`sold`), PnL. Le bot y lit son PnL, son drawdown, sa série de pertes et ses positions ouvertes ; il résout lui-même les rounds (Gamma `events?slug=`). Écriture atomique, jamais écrasé s'il est illisible. | **Autorité (stratégie)** |
+| `journal/decisions-*.jsonl` | Toutes les évaluations (pari ou abstention), 10 jours, pour `fv-report.ts`. | Analyse |
+| `fv-shadow.json` | Agrégats « modèle vs carnet » (bilan Telegram). | Mesure continue |
+| `fv-guard.json` | Présent = **arrêt de sécurité actif** (perte significative). Le supprimer pour reprendre. | Garde-fou |
+| `outcomes-cache.json` | Résultats des rounds déjà réglés (cache du rapport). | Cache |
 | `history.json` | Fenêtre glissante des décisions/mises récentes (avec `roundId`, `side`, `price`, `realized`, `stake`…). Les HOLD ne sont **plus** écrits. | **Fenêtre** (300 max), pas un historique complet |
 | `cumulative.json` | Registre PnL des scripts externes Hermes (ancienne chaîne). Contient `pnl`, `resolved` (par clé), `total_trades`, `wins`, `losses`, `audit_ledger`. | **Autorité** |
 | `pnl.json` | Instantané de sortie (ce que lit le recap) : `trades`, `wins`, `losses`, `win_rate`, `pnl`, `pending`, `window_pnl`. | Dérivé du registre |
