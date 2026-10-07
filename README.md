@@ -113,7 +113,7 @@ Variables (nom → rôle) :
 | `FV_EXIT_EDGE` | = `FV_MIN_EDGE` | Vente anticipée si `bid − frais` dépasse `p_modèle` d'au moins cette marge. |
 | `FV_MIN_TAU_SEC` / `FV_MAX_TAU_SEC` | `45` / `270` | Fenêtre de temps restant où l'on peut entrer (en toute fin de round, latence et écart d'oracle dominent). |
 | `FV_MIN_ASK` / `FV_MAX_ASK` | `0.08` / `0.92` | Bornes d'ask achetable (au-delà, gain minuscule et erreur de modèle dominante). |
-| `FV_TAKER_FEE_RATE` | `0.072` | Taux `crypto_fees_v2` : frais = parts · taux · p · (1−p) (pic 1,8 % à p = 0,5). |
+| `FV_TAKER_FEE_RATE` | `0.07` | Taux officiel `crypto_fees_v2` : frais = parts · taux · p · (1−p) (1,75 $ pour 100 parts à 0,50 $ ; makers non facturés). |
 | `FV_BASIS_BPS` | `2` | Écart de flux Binance/Coinbase vs Chainlink (bps), ajouté à l'incertitude. |
 | `FV_STRIKE_NOISE_SEC` | `10` | Incertitude du strike (open de bougie 1 min ≠ point Chainlink), en secondes de variance. |
 | `FV_TWAP_WINDOW_SEC` | `0` | Résolution ponctuelle (règle officielle : prix Chainlink à la fin vs au début). |
@@ -234,7 +234,7 @@ Toutes les ~10 s, pour chaque round 5 min ouvert (au plus **une entrée par roun
    15 min). Flux absent ou figé → pas de mise.
 2. **Probabilité** : `P(Up) = Φ(ln(S/K) / √(σ²·(τ + bruit_strike) + basis²))` — résolution
    ponctuelle Chainlink (« Up » si prix final ≥ prix d'ouverture).
-3. **Coût réel** d'une part = ask + frais taker `0,072·p·(1−p)`. Edge = P(côté) − coût.
+3. **Coût réel** d'une part = ask + frais taker `0,07·p·(1−p)`. Edge = P(côté) − coût.
    Entrée seulement si **P(côté) ≥ `FV_MIN_PROB` (0,60)**, edge ≥ `FV_MIN_EDGE`,
    τ ∈ [45 ; 270] s et ask ∈ [0,08 ; 0,92].
 4. **Mise** : `computeStake` (Kelly ×0,25, probabilité du modèle **shrinkée de moitié** vers le

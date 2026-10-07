@@ -33,7 +33,8 @@
 
 export interface FairValueConfig {
   /** Taux de frais taker Polymarket `crypto_fees_v2` : fee = parts · rate · p · (1−p).
-   *  0,072 → pic 1,8 % du nominal à p = 0,5 (barème crypto annoncé par Polymarket). */
+   *  Barème officiel crypto : 0,07 (1,75 $ pour 100 parts à 0,50 $) ; makers jamais
+   *  facturés (et 20 % de remise). */
   takerFeeRate: number;
   /** Fenêtre de moyenne du prix de résolution (s). Les règles des marchés « Up or Down »
    *  disent : prix Chainlink BTC/USD à la FIN vs au DÉBUT de la plage → résolution
@@ -67,7 +68,7 @@ export interface FairValueConfig {
 }
 
 export const DEFAULT_FAIR_VALUE_CONFIG: FairValueConfig = {
-  takerFeeRate: 0.072,
+  takerFeeRate: 0.07,
   twapWindowSec: 0,
   strikeNoiseSec: 10,
   basisBps: 2,

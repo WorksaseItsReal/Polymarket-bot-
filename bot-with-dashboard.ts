@@ -28,6 +28,7 @@ import { fairValueConfigFromEnv } from './src/services/fair-value.js';
 import { getRoundMarketData } from './src/services/round-market-data.js';
 import { computeStats, fetchRoundOutcome, loadLedger, type LedgerStats } from './src/services/paper-ledger.js';
 import { FairValueRunner, STRATEGY_COINS, type ScannedMarket } from './src/strategy/fair-value-runner.js';
+import { RoundDiscovery } from './src/services/round-discovery.js';
 import { TelegramClient, telegramConfigFromEnv } from './src/services/telegram.js';
 import { msgAlert, msgStartup, msgSummary } from './src/services/telegram-messages.js';
 
@@ -1085,6 +1086,7 @@ async function setupFairValueStrategy(sdk: PolymarketSDK) {
   }
   await setupTelegram();
 
+  const discovery = new RoundDiscovery();
   const runner = new FairValueRunner({
     cfg: FV_CFG,
     exitEdge: FV_EXIT_EDGE,
@@ -1092,9 +1094,22 @@ async function setupFairValueStrategy(sdk: PolymarketSDK) {
     capital: () => CONFIG.capital.totalUsd,
     now: () => Date.now(),
     canTrade: () => { syncRealizedPnl(); return canTrade(); },
-    scanMarkets: async () => (await sdk.dipArb.scanUpcomingMarkets({
-      coin: 'all', duration: '5m', minMinutesUntilEnd: 0, maxMinutesUntilEnd: 6, limit: 12,
-    })) as ScannedMarket[],
+    // Découverte directe par slug (rapide, cache par round) ; l'ancien scan ne sert
+    // qu'en repli pour les coins que Gamma n'a pas encore exposés.
+    scanMarkets: async () => {
+      const found: ScannedMarket[] = await discovery.current(Date.now());
+      if (found.length >= STRATEGY_COINS.length) return found;
+      try {
+        const scanned = (await sdk.dipArb.scanUpcomingMarkets({
+          coin: 'all', duration: '5m', minMinutesUntilEnd: 0, maxMinutesUntilEnd: 6, limit: 12,
+        })) as ScannedMarket[];
+        const have = new Set(found.map(m => m.conditionId));
+        return [...found, ...scanned.filter(m => m && !have.has(m.conditionId))];
+      } catch {
+        return found;
+      }
+    },
+    marketsRefreshMs: 10_000,
     getBook: tokenId => sdk.markets.getTokenOrderbook(tokenId),
     getRoundData: (coin, slot, now) => (isSpotCoin(coin) ? getRoundMarketData(coin as SpotCoin, slot, now) : Promise.resolve(null)),
     fetchOutcome: slug => fetchRoundOutcome(slug),

@@ -77,6 +77,9 @@ export interface RunnerDeps {
   /** Porte de risque du bot (pause, limites). */
   canTrade: () => boolean;
   scanMarkets: () => Promise<ScannedMarket[]>;
+  /** Âge max de la liste des marchés (ms, défaut 60 s). Toujours rafraîchie à chaque
+   *  nouveau round, pour ne jamais manquer le début de la fenêtre d'entrée. */
+  marketsRefreshMs?: number;
   getBook: (tokenId: string) => Promise<Book>;
   getRoundData: (coin: string, slotSec: number, nowMs: number) => Promise<RoundMarketData | null>;
   fetchOutcome: (slug: string) => Promise<RoundOutcome>;
@@ -105,6 +108,7 @@ export class FairValueRunner {
   private readonly unresolvedWarned = new Set<string>();
   private markets: ScannedMarket[] = [];
   private marketsTs = 0;
+  private marketsSlot = -1;
   private running = false;
   private ledgerBrokenWarned = false;
 
@@ -253,7 +257,10 @@ export class FairValueRunner {
 
   private async refreshMarkets(): Promise<void> {
     const now = this.d.now();
-    if (now - this.marketsTs <= 60_000 && this.markets.length) return;
+    const slot = Math.floor(now / 300_000);
+    const fresh = now - this.marketsTs <= (this.d.marketsRefreshMs ?? 60_000);
+    if (fresh && slot === this.marketsSlot && this.markets.length) return;
+    this.marketsSlot = slot;
     const scanned = await this.d.scanMarkets();
     this.markets = (Array.isArray(scanned) ? scanned : []).filter(
       m => !!m && !!m.conditionId && m.durationMinutes === 5 && (STRATEGY_COINS as readonly string[]).includes(m.underlying) && slotOf(m) !== null,

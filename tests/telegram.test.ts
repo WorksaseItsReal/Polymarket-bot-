@@ -232,7 +232,7 @@ test('messages de résultat, bilan, démarrage et alerte', () => {
   assert.match(sum, /capital : 50,80 \$/);
   assert.match(sum, /trop tôt pour conclure/);
 
-  const start = msgStartup({ capital: 50, minEdge: 0.04, minProb: 0.6, feeRate: 0.072, pollSec: 10, coins: ['BTC', 'ETH'], stats: stats([]) });
+  const start = msgStartup({ capital: 50, minEdge: 0.04, minProb: 0.6, feeRate: 0.07, pollSec: 10, coins: ['BTC', 'ETH'], stats: stats([]) });
   noJunk(start);
   assert.match(start, /mode PAPIER/);
   assert.match(start, /aucun trade pour l'instant/);

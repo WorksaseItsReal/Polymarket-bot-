@@ -204,7 +204,7 @@ test('revente anticipée quand le marché paie plus que la position ne vaut', as
   await r.tick();
   const after = loadLedger(env.ledgerPath)![0];
   assert.equal(after.status, 'sold');
-  assert.ok(after.pnl! > 0 && Math.abs(after.pnl! - (t.shares * (0.8 - 0.072 * 0.8 * 0.2) - t.stake)) < 1e-9);
+  assert.ok(after.pnl! > 0 && Math.abs(after.pnl! - (t.shares * (0.8 - DEFAULT_FAIR_VALUE_CONFIG.takerFeeRate * 0.8 * 0.2) - t.stake)) < 1e-9);
   assert.match(env.messages[env.messages.length - 1], /REVENDU avant la fin/);
 });
 
