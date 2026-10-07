@@ -353,9 +353,10 @@ le PnL résolu inclut les frais. C'est ce qui permet de **mesurer la calibration
 papier encaisserait des prix en retard qu'un bot plus rapide aurait déjà pris en réel.
 
 **Limites honnêtes** : le modèle n'a **pas** été validé sur historique (aucune donnée
-spot+carnet horodatée n'existe) ; le strike est approché (ouverture Binance/Coinbase, pas le
-TWAP Chainlink) ; en réel, les asks « en retard » sur le spot sont aussi visés par des bots plus
-rapides, donc le paper **surestime** les exécutions sur ces opportunités.
+spot+carnet horodatée n'existe) ; le strike est approché (ouverture de la bougie 1 min
+Binance/Coinbase, pas le point Chainlink exact) ; la latence simulée d'1 s retire une partie des
+prix fantômes, mais des bots co-localisés restent plus rapides : le papier peut encore
+**surestimer** les exécutions sur ces opportunités.
 
 ---
 
@@ -387,11 +388,11 @@ ils réagissaient à du bruit (`docs/EDGE-VALIDATION.md` §9).
 | 2 | **Registre PnL stockait `true`** au lieu du montant réalisé (64 entrées) → total non reconstructible (`sum(ledger)=−2,07` vs `pnl=+6,79`). | Le ledger stocke désormais le **montant** ; il est **source de vérité** ; `pnl` recalculé par `sum(ledger)`. | `docs/rebuild/pnl/REPORT.md` (e) |
 | 3 | **RPC Polygon mort** (`polygon-rpc.com` → `API key disabled`). | Remplacement par un endpoint fiable (`1rpc.io/matic`). | commit `d3780ca` (« RPC fiable ») |
 | 4 | **Canal WS `clob_market` déprécié** : le serveur rejette les souscriptions (400, 128–274×/h) → `emit('orderbook')` ne se déclenche jamais. | **Non coupé** (des consommateurs réels l'écoutent) ; commentaire d'audit ajouté. Le cycle des rounds DipArb a été **re-piloté par le flux REST vivant**. | `docs/rebuild/code/REPORT.md` (points 1–2) |
-| 5 | **Cooldown éternel** bloquant des coins (résultats périmés de 7–25 h réappliqués). | Bornage par âge (`LEARN_COOLDOWN_AGE_H`). | code `bot-with-dashboard.ts` (~l.410–424) |
-| 6 | **Probabilités UP/DOWN ≠ 100 %** : les `ask` bruts sommaient ≈ 1 + spread (ex. 0,56 + 0,47 → recap à **103 %**). | Chaque côté divisé par `(yes + no) \|\| 1` → somme exactement 100 %. | `tests/prob-normalization.test.ts`, `docs/rebuild/recap/REPORT.md` |
+| 5 | *(ancienne stratégie, code retiré)* **Cooldown éternel** bloquant des coins (résultats périmés de 7–25 h réappliqués). | Bornage par âge (`LEARN_COOLDOWN_AGE_H`). | code `bot-with-dashboard.ts` (~l.410–424) |
+| 6 | *(ancienne stratégie, code retiré)* **Probabilités UP/DOWN ≠ 100 %** : les `ask` bruts sommaient ≈ 1 + spread (ex. 0,56 + 0,47 → recap à **103 %**). | Chaque côté divisé par `(yes + no) \|\| 1` → somme exactement 100 %. | `docs/rebuild/recap/REPORT.md` |
 | 7 | **Clé de dédup du recap instable** : les prix live/probas changeaient la clé → le recap repartait toutes les 5 min. | Marqueur `VOL` (`\x00`) excluant les lignes volatiles de la clé ; dédup stable prouvée sur 2 appels. | `docs/rebuild/recap/REPORT.md` §4 |
 | 8 | **`history.json` saturé de HOLD** (298/300 → fenêtre de ~4 h). | Les HOLD ne sont plus écrits ; purge → fenêtre couvre plusieurs jours. | `docs/CHANGES-APPLIED.md` §4 |
-| 9 | **Fenêtre apprise écrasait `.env`** : `P_STRONG_MAX` sans effet (log `[0.55 - 0.75]`). | Fenêtre apprise bornée par `[P_STRONG_MIN ; P_STRONG_MAX]`. | `docs/CHANGES-APPLIED.md` §5 |
+| 9 | *(ancienne stratégie, code retiré)* **Fenêtre apprise écrasait `.env`** : `P_STRONG_MAX` sans effet (log `[0.55 - 0.75]`). | Fenêtre apprise bornée par `[P_STRONG_MIN ; P_STRONG_MAX]`. | `docs/CHANGES-APPLIED.md` §5 |
 | 10 | **Dump d'objet ethers ~7,3 Ko/ligne** dans les logs. | Helper `errStr()` borné à 240 caractères sur 10 sites. | `docs/rebuild/code/REPORT.md` (point 4) |
 | 11 | **Tempête de reconnexion WebSocket** (librairie Polymarket : 4 095 tentatives en 0,5 s sur une coupure). | Reconnexion gérée avec délai 1 s → 60 s ; pong natif restauré. | `tests/realtime-reconnect.test.ts` |
 | 12 | **Dashboard** : une requête malformée faisait planter le bot ; écoute sur toutes les interfaces sans auth ; passage en LIVE en un clic (confirmation inversée). | 127.0.0.1 par défaut, jeton, Origin vérifié, LIVE refusé si démarré en papier. | `tests/dashboard-server.test.ts` |
