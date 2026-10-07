@@ -207,3 +207,17 @@ test('fitZScale : retrouve la sur-confiance d\'un modèle simulé', async () => 
   assert.ok(fit.hi < 1, 'sur-confiance détectée');
   assert.equal(fitZScale(byRound(recs.slice(0, 10))), null, 'trop peu de rounds');
 });
+
+test('estimateSell : bids du plus haut au plus bas, frais exacts par niveau, vente partielle signalée', async () => {
+  const { estimateSell, takerFeePerShare } = await import('../src/services/fair-value.ts');
+  const bids = [{ price: 0.5, size: 10 }, { price: 0.8, size: 1 }, { price: 0.7, size: 2 }];
+  const r = estimateSell(bids, 2.5, 0.07);
+  assert.equal(r.complete, true);
+  close(r.shares, 2.5, 1e-12);
+  const expected = 1 * (0.8 - takerFeePerShare(0.8, 0.07)) + 1.5 * (0.7 - takerFeePerShare(0.7, 0.07));
+  close(r.netProceeds, expected, 1e-12);
+  close(r.avgPrice!, (0.8 + 1.5 * 0.7) / 2.5, 1e-12);
+  const partial = estimateSell([{ price: 0.6, size: 1 }], 3, 0.07);
+  assert.equal(partial.complete, false);
+  assert.equal(estimateSell([], 1, 0.07).avgPrice, null);
+});

@@ -86,6 +86,8 @@ export interface StartupInfo {
   pollSec: number;
   coins: string[];
   stats: LedgerStats;
+  /** Avertissement de configuration à afficher en tête (ex. capital trop petit). */
+  warning?: string;
 }
 
 export function msgStartup(i: StartupInfo): string {
@@ -95,6 +97,7 @@ export function msgStartup(i: StartupInfo): string {
     `Règle : pari seulement si la probabilité calculée ≥ ${pct(i.minProb)} ET dépasse le prix payé (frais inclus) d'au moins ${(i.minEdge * 100).toFixed(0)} pts`,
     `Capital papier : ${amount(i.capital)} · vérification toutes les ${i.pollSec} s`,
     i.stats.n || i.stats.open ? `Historique : ${balanceLine(i.stats)}` : 'Historique : aucun trade pour l\'instant',
+    ...(i.warning ? [`⚠️ ${escapeHtml(i.warning)}`] : []),
   ].join('\n');
 }
 
@@ -160,7 +163,9 @@ export function shadowLine(sh: ShadowStats): string {
 }
 
 export function msgSummary(stats: LedgerStats, capital: number, shadow?: ShadowStats): string {
-  const expected = stats.avgModelProb === null ? '' : ` (attendu par le modèle : ${pct(stats.avgModelProb)})`;
+  const expected = stats.avgModelProb === null || stats.heldWinRate === null
+    ? ''
+    : ` · rounds tenus jusqu'au bout : ${pct(stats.heldWinRate)} pour ${pct(stats.avgModelProb)} annoncés par le modèle`;
   return [
     '📊 <b>BILAN</b> — stratégie juste valeur (papier)',
     `Trades terminés : ${stats.n} (${stats.wins} ✅ / ${stats.losses} ❌) · en cours : ${stats.open}`,

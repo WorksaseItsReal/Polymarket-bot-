@@ -98,8 +98,11 @@ test('cycle complet : pari → un seul par round → résolution GAGNÉ → mess
   await r.tick();
   assert.equal(loadLedger(env.ledgerPath)![0].status, 'open');
 
-  // Réglé : UP a gagné.
+  // Réglé : UP a gagné. (Gamma n'est réinterrogé qu'après 10 s pour un même trade.)
   env.setOutcome({ resolved: true, upWon: true });
+  await r.tick();
+  assert.equal(loadLedger(env.ledgerPath)![0].status, 'open', 'pas de nouvelle requête Gamma avant 10 s');
+  env.setNow((SLOT + 341) * 1000);
   await r.tick();
   ledger = loadLedger(env.ledgerPath)!;
   assert.equal(ledger[0].status, 'won');
@@ -328,4 +331,79 @@ test('latence simulée : exécution sur le carnet relu ; opportunité disparue �
   const stable = setup({ fillDelayMs: 1000, sleep: async () => undefined });
   await stable.runner().tick();
   assert.equal(loadLedger(stable.ledgerPath)!.length, 1);
+});
+
+test('tick sur mouvement : pas de règlement ni de sortie (vitesse) ; tick de fond : oui', async () => {
+  let fetches = 0;
+  const env = setup({ fetchOutcome: async () => { fetches++; return { resolved: false, reason: '' }; } });
+  const r = env.runner();
+  await r.tick();
+  env.setNow((SLOT + 330) * 1000);
+  await r.tick(['BTC']);
+  assert.equal(fetches, 0, 'tick sur mouvement : aucun appel Gamma');
+  await r.tick();
+  assert.equal(fetches, 1);
+});
+
+test('pause de risque : les sorties restent actives (vendre réduit le risque)', async () => {
+  let open = true;
+  const env = setup({ canTrade: () => open });
+  const r = env.runner();
+  await r.tick();
+  open = false;
+  env.deps.getRoundData = async () => ({ spot: 100, strike: 100, sigmaPerSqrtSec: SIGMA, source: 'test', candleAgeMs: 0 });
+  env.deps.getBook = async () => ({ asks: [], bids: [{ price: 0.8, size: 1000 }] });
+  env.setNow((SLOT + 200) * 1000);
+  await r.tick();
+  assert.equal(loadLedger(env.ledgerPath)![0].status, 'sold');
+});
+
+test('sortie avec latence : un bid disparu entre-temps n\'est pas vendu', async () => {
+  let reads = 0;
+  const env = setup({ fillDelayMs: 1000, sleep: async () => undefined });
+  const r = env.runner();
+  await r.tick();
+  env.deps.getRoundData = async () => ({ spot: 100, strike: 100, sigmaPerSqrtSec: SIGMA, source: 'test', candleAgeMs: 0 });
+  env.deps.getBook = async () => ({ asks: [], bids: [{ price: reads++ === 0 ? 0.8 : 0.45, size: 1000 }] });
+  env.setNow((SLOT + 200) * 1000);
+  await r.tick();
+  assert.equal(reads, 2, 'carnet relu après le délai');
+  assert.equal(loadLedger(env.ledgerPath)![0].status, 'open', 'le bid à 0,80 avait disparu');
+});
+
+test('mise sur le capital ACTUEL et minimum d\'ordre Polymarket', async () => {
+  const { saveLedger } = await import('../src/services/paper-ledger.ts');
+  const below: number[] = [];
+  const env = setup({ minOrderUsd: 1, onBelowMinOrder: s => below.push(s) });
+  await env.runner().tick();
+  assert.equal(loadLedger(env.ledgerPath)!.length, 0, '1 % de 50 $ = 0,50 $ < 1 $ : pas de pari');
+  assert.equal(below.length, 1);
+  assert.ok(env.logs.some(l => /minimum Polymarket/.test(l)));
+
+  // Capital 200 $ mais 20 $ déjà perdus (sur > 6 h, sans série en cours) : 1 % de 180 $ = 1,80 $.
+  const rich = setup({ capital: () => 200, minOrderUsd: 1 });
+  const old = new Date((SLOT - 86_400) * 1000).toISOString();
+  saveLedger(rich.ledgerPath, [
+    { id: 'x', slug: 'btc-updown-5m-1', coin: 'BTC', side: 'UP', stake: 20, costPerShare: 0.6, shares: 33, modelProb: 0.7, edge: 0.1, openedAt: old, endMs: 0, status: 'lost', pnl: -20, resolvedAt: old },
+    { id: 'y', slug: 'btc-updown-5m-2', coin: 'BTC', side: 'UP', stake: 0, costPerShare: 0.6, shares: 0, modelProb: 0.7, edge: 0.1, openedAt: old, endMs: 0, status: 'won', pnl: 0, resolvedAt: old },
+  ]);
+  await rich.runner().tick();
+  const t = loadLedger(rich.ledgerPath)!.find(x => x.id === MARKET.conditionId)!;
+  assert.ok(t.stake <= 1.8 + 1e-9 && t.stake > 1, `mise ${t.stake} ≤ 1 % de 180 $`);
+});
+
+test('registre réparé en cours de route : un round déjà présent n\'est jamais ré-annoncé', async () => {
+  const { saveLedger } = await import('../src/services/paper-ledger.ts');
+  const env = setup();
+  writeFileSync(env.ledgerPath, '{oups'); // illisible au démarrage : mémoire des rounds vide
+  const r = env.runner();
+  saveLedger(env.ledgerPath, [{
+    id: MARKET.conditionId, slug: MARKET.slug, coin: 'BTC', side: 'UP', stake: 0.5, costPerShare: 0.62, shares: 0.8, modelProb: 0.9,
+    edge: 0.2, openedAt: new Date((SLOT + 100) * 1000).toISOString(), endMs: (SLOT + 300) * 1000, status: 'open', pnl: null,
+  }]);
+  const before = env.messages.length;
+  await r.tick();
+  assert.equal(loadLedger(env.ledgerPath)!.length, 1);
+  assert.equal(env.messages.filter(m => /NOUVEAU PARI/.test(m)).length, 0);
+  assert.ok(env.messages.length - before <= 1, 'au plus l\'alerte registre illisible');
 });

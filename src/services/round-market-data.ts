@@ -150,10 +150,15 @@ export async function getRoundMarketData(
   coin: SpotCoin,
   slotSec: number,
   nowMs = Date.now(),
-  live: LivePrice | null = null,
+  liveInput: LivePrice | null | (() => LivePrice | null) = null,
 ): Promise<RoundMarketData | null> {
   if (slotSec * 1000 > nowMs) return null; // round pas encore ouvert : strike inconnu
-  const liveOk = !!live && live.price > 0 && live.ageMs >= 0 && live.ageMs <= LIVE_MAX_AGE_MS;
+  // Un getter est relu APRÈS le chargement des bougies (qui peut prendre plusieurs
+  // secondes) : sinon le spot temps réel pouvait être plus vieux que le carnet lu ensuite.
+  const readLive = () => (typeof liveInput === 'function' ? liveInput() : liveInput);
+  const liveOk0 = (l: LivePrice | null) => !!l && l.price > 0 && l.ageMs >= 0 && l.ageMs <= LIVE_MAX_AGE_MS;
+  let live = readLive();
+  let liveOk = liveOk0(live);
   const hit = cache.get(coin);
   const maxAge = liveOk && hit?.value?.source.startsWith('binance') ? CACHE_MS_WITH_LIVE : CACHE_MS;
   let loaded = hit && nowMs - hit.ts < maxAge ? hit.value : undefined;
@@ -175,6 +180,8 @@ export async function getRoundMarketData(
     base = deriveRoundData(loaded.candles, slotSec, nowMs, loaded.source, maxCandleAge());
   }
   if (!base) return null;
+  live = readLive();
+  liveOk = liveOk0(live);
   if (liveOk && loaded.source.startsWith('binance')) {
     return { ...base, spot: (live as LivePrice).price, source: `${loaded.source}+ws` };
   }

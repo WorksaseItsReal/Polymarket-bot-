@@ -287,6 +287,47 @@ export function estimateFill(asks: BookLevel[], budget: number, limitPrice = 1):
   };
 }
 
+export interface SellEstimate {
+  /** Parts vendues. */
+  shares: number;
+  /** Produit NET de frais taker (chaque niveau payant ses propres frais). */
+  netProceeds: number;
+  /** Prix moyen brut ; null si rien de vendable. */
+  avgPrice: number | null;
+  /** true si les bids absorbent toutes les parts. */
+  complete: boolean;
+}
+
+/**
+ * Simule la vente au marché de `shares` parts en consommant les bids du plus haut au
+ * plus bas. Les frais sont calculés niveau par niveau (exact, pas d'approximation au prix
+ * moyen). Les niveaux invalides sont ignorés.
+ */
+export function estimateSell(bids: BookLevel[], shares: number, feeRate: number): SellEstimate {
+  const levels = (Array.isArray(bids) ? bids : [])
+    .filter(l => isPos(l?.price) && isPos(l?.size) && l.price < 1)
+    .slice()
+    .sort((a, b) => b.price - a.price);
+  let remaining = isPos(shares) ? shares : 0;
+  let sold = 0;
+  let gross = 0;
+  let net = 0;
+  for (const l of levels) {
+    if (remaining <= 1e-12) break;
+    const q = Math.min(remaining, l.size);
+    sold += q;
+    gross += q * l.price;
+    net += q * (l.price - takerFeePerShare(l.price, feeRate));
+    remaining -= q;
+  }
+  return {
+    shares: sold,
+    netProceeds: net,
+    avgPrice: sold > 0 ? gross / sold : null,
+    complete: isPos(shares) && remaining <= 1e-9,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Décision
 // ---------------------------------------------------------------------------

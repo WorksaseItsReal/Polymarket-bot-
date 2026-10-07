@@ -18,7 +18,7 @@
  * Écriture atomique (fichier temporaire + rename) ; fichier illisible → jamais écrasé.
  */
 
-import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, statSync, writeSync } from 'node:fs';
 import { dirname } from 'node:path';
 
 export type LedgerSide = 'UP' | 'DOWN';
@@ -106,7 +106,15 @@ export function saveLedger(path: string, trades: LedgerTrade[]): void {
   mkdirSync(dirname(path), { recursive: true });
   const tmp = `${path}.tmp-${process.pid}`;
   const body: LedgerFile = { version: 1, trades };
-  writeFileSync(tmp, JSON.stringify(body, null, 2));
+  // Écriture + fsync AVANT le renommage : un arrêt brutal ne peut pas laisser un registre
+  // vide ou tronqué (le renommage est atomique, le contenu est déjà sur disque).
+  const fd = openSync(tmp, 'w');
+  try {
+    writeSync(fd, JSON.stringify(body, null, 2));
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
   renameSync(tmp, path);
   try {
     const st = statSync(path);
@@ -133,7 +141,11 @@ export interface LedgerStats {
   open: number;
   winRate: number | null;
   pnl: number;
-  /** Probabilité modèle moyenne des trades résolus = win rate attendu si calibré. */
+  /** Rounds TENUS jusqu'au bout (gagnés/perdus, hors reventes) : seuls comparables à la
+   *  probabilité annoncée par le modèle (une revente n'est ni un succès ni un échec du modèle). */
+  heldN: number;
+  heldWinRate: number | null;
+  /** Probabilité modèle moyenne des rounds tenus = win rate attendu si le modèle est calibré. */
   avgModelProb: number | null;
   /** t-statistique du PnL par trade (null si n < 2 ou variance nulle). */
   tStat: number | null;
@@ -169,6 +181,7 @@ export function computeStats(trades: readonly LedgerTrade[]): LedgerStats {
 
   let lossStreak = 0;
   for (let i = pnls.length - 1; i >= 0 && pnls[i] < 0; i--) lossStreak++;
+  const held = resolved.filter(t => t.status === 'won' || t.status === 'lost');
 
   let cum = 0;
   let peak = 0;
@@ -186,7 +199,9 @@ export function computeStats(trades: readonly LedgerTrade[]): LedgerStats {
     open: open.length,
     winRate: n ? wins / n : null,
     pnl,
-    avgModelProb: n ? resolved.reduce((s, t) => s + t.modelProb, 0) / n : null,
+    heldN: held.length,
+    heldWinRate: held.length ? held.filter(t => t.status === 'won').length / held.length : null,
+    avgModelProb: held.length ? held.reduce((s, t) => s + t.modelProb, 0) / held.length : null,
     tStat,
     lossStreak,
     openExposure: open.reduce((s, t) => s + t.stake, 0),
@@ -238,7 +253,8 @@ export function parseGammaEvent(data: unknown, slug: string): RoundOutcome {
       return null;
     }
   };
-  const outcomes = (parseArr(m.outcomes) ?? ['Up', 'Down']).map(o => String(o).toLowerCase());
+  // Libellés obligatoires : jamais de repli par position (« Up » = index 0) si illisibles.
+  const outcomes = (parseArr(m.outcomes) ?? []).map(o => String(o).toLowerCase());
   const prices = (parseArr(m.outcomePrices) ?? []).map(Number);
   const upIdx = outcomes.indexOf('up');
   const downIdx = outcomes.indexOf('down');

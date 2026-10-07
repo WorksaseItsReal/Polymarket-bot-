@@ -21,8 +21,8 @@ import {
   decide,
   effectiveCostPerShare,
   estimateFill,
+  estimateSell,
   probUp,
-  takerFeePerShare,
   type BookLevel,
   type FairValueConfig,
 } from '../services/fair-value.js';
@@ -88,6 +88,11 @@ export interface RunnerDeps {
   /** Porte de risque du bot (pause, limites). */
   canTrade: () => boolean;
   scanMarkets: () => Promise<ScannedMarket[]>;
+  /** Mise minimale exécutable (USDC). Polymarket refuse un achat au marché < 1 $ : un pari
+   *  papier plus petit ne serait pas reproductible en réel. 0 = pas de contrôle. */
+  minOrderUsd?: number;
+  /** La mise calculée est sous le minimum exécutable (capital papier trop petit). */
+  onBelowMinOrder?: (stake: number, minOrderUsd: number) => void;
   /** Délai simulé entre décision et exécution (ms) ; le carnet est relu après. 0 = aucun. */
   fillDelayMs?: number;
   /** Attente injectable (tests). */
@@ -133,6 +138,8 @@ export class FairValueRunner {
   private readonly traded = new Set<string>();
   private readonly lastHoldLog = new Map<string, number>();
   private readonly unresolvedWarned = new Set<string>();
+  /** Dernière tentative de règlement par trade (Gamma interrogé au plus toutes les 10 s). */
+  private readonly lastResolveTry = new Map<string, number>();
   private lastExitCheck = 0;
   private markets: ScannedMarket[] = [];
   private marketsTs = 0;
@@ -206,10 +213,14 @@ export class FairValueRunner {
     if (this.running) return false; // un tick lent ne chevauche jamais le suivant
     this.running = true;
     try {
-      await this.resolveFinishedRounds();
-      if (!this.d.canTrade()) return true;
+      // Un tick déclenché par un mouvement du spot (`coins` fourni) va droit aux entrées :
+      // c'est là que la vitesse compte. Règlements et sorties passent au tick de fond.
+      if (!coins) await this.resolveFinishedRounds();
       if (this.trades() === null) return true;
-      await this.checkExits();
+      // Les sorties AVANT la porte de risque : vendre réduit le risque, une pause ne doit
+      // pas empêcher de sortir d'une position.
+      if (!coins) await this.checkExits();
+      if (!this.d.canTrade()) return true;
       await this.enterNewTrades(coins);
       this.consecutiveTickFailures = 0;
     } catch (err) {
@@ -225,8 +236,10 @@ export class FairValueRunner {
   /** Règle les trades dont le round est terminé et annonce le résultat. */
   async resolveFinishedRounds(): Promise<void> {
     const now = this.d.now();
-    const due = (this.trades() ?? []).filter(t => t.status === 'open' && now > t.endMs + 15_000);
+    const due = (this.trades() ?? []).filter(t => t.status === 'open' && now > t.endMs + 15_000
+      && now - (this.lastResolveTry.get(t.id) ?? -Infinity) >= 10_000);
     for (const t of due) {
+      this.lastResolveTry.set(t.id, now);
       const outcome = await this.d.fetchOutcome(t.slug);
       if (!outcome.resolved) {
         if (now > t.endMs + 30 * 60_000 && !this.unresolvedWarned.has(t.id)) {
@@ -247,6 +260,7 @@ export class FairValueRunner {
       });
       if (!saved || !closed) continue;
       this.unresolvedWarned.delete(t.id);
+      this.lastResolveTry.delete(t.id);
       const stats = this.stats();
       this.d.log('TRADE', `[SIMULATION] ${won ? 'GAGNÉ' : 'PERDU'} ${t.coin} ${t.side} (${t.slug}) ${pnl >= 0 ? '+' : ''}$${pnl.toFixed(4)} — `
         + `bilan ${stats.n} trades, WR ${stats.winRate === null ? '—' : (stats.winRate * 100).toFixed(1) + ' %'}, PnL $${stats.pnl.toFixed(2)}`);
@@ -270,28 +284,42 @@ export class FairValueRunner {
       // En fin de round le modèle n'est pas fiable : on garde jusqu'à la résolution.
       if (tauSec < cfg.minTauSec || !pos.tokenId || !pos.slotSec) continue;
       try {
-        const data = await this.d.getRoundData(pos.coin, pos.slotSec, now);
-        const pUp = data ? probUp({ ...data, tauSec }, cfg) : null;
-        if (pUp === null) continue;
-        const best = (await this.d.getBook(pos.tokenId)).bids
-          .filter(l => l.price > 0 && l.size > 0)
-          .sort((a, b) => b.price - a.price)[0];
-        if (!best) continue;
-        const pHeld = pos.side === 'UP' ? pUp : 1 - pUp;
-        const bidNet = best.price - takerFeePerShare(best.price, cfg.takerFeeRate);
-        if (bidNet - pHeld < this.d.exitEdge || best.size < pos.shares) continue;
-
-        const profit = pos.shares * bidNet - pos.stake;
+        // Valeur de la position selon le modèle, et produit NET d'une vente au marché.
+        const valueAndSale = async (atMs: number) => {
+          const data = await this.d.getRoundData(pos.coin, pos.slotSec as number, atMs);
+          const tau = (pos.endMs - atMs) / 1000;
+          const pUp = data && tau > 0 ? probUp({ ...data, tauSec: tau }, cfg) : null;
+          if (pUp === null) return null;
+          const sale = estimateSell((await this.d.getBook(pos.tokenId as string)).bids, pos.shares, cfg.takerFeeRate);
+          if (!sale.complete || sale.avgPrice === null) return null;
+          const pHeld = pos.side === 'UP' ? pUp : 1 - pUp;
+          return { pHeld, sale, netPerShare: sale.netProceeds / pos.shares };
+        };
+        let v = await valueAndSale(now);
+        if (!v || v.netPerShare - v.pHeld < this.d.exitEdge) continue;
+        // Même latence simulée qu'à l'entrée : un bid « trop beau » est souvent un prix en
+        // retard qui aura disparu quand l'ordre arrive. On revalide sur le carnet relu.
+        const delay = this.d.fillDelayMs ?? 0;
+        let at = now;
+        if (delay > 0) {
+          await (this.d.sleep ?? (ms => new Promise(r => setTimeout(r, ms))))(delay);
+          at = this.d.now();
+          v = await valueAndSale(at);
+          if (!v || v.netPerShare - v.pHeld < this.d.exitEdge) continue;
+        }
+        const { pHeld, sale, netPerShare } = v;
+        const exitPrice = sale.avgPrice as number;
+        const profit = sale.netProceeds - pos.stake;
         let closed: LedgerTrade | null = null;
         const saved = this.update(trades => {
           const x = trades.find(y => y.id === pos.id && y.status === 'open');
           if (x) {
-            Object.assign(x, { status: 'sold', pnl: profit, resolvedAt: new Date(now).toISOString(), exitPrice: best.price });
+            Object.assign(x, { status: 'sold', pnl: profit, resolvedAt: new Date(at).toISOString(), exitPrice });
             closed = x;
           }
         });
         if (!saved || !closed) continue;
-        this.d.log('TRADE', `[SIMULATION] VENTE ${pos.coin} ${pos.side} @ $${best.price.toFixed(3)} (net frais ${bidNet.toFixed(3)} > p_modèle ${pHeld.toFixed(3)} + ${this.d.exitEdge}) `
+        this.d.log('TRADE', `[SIMULATION] VENTE ${pos.coin} ${pos.side} @ VWAP $${exitPrice.toFixed(3)} (net frais ${netPerShare.toFixed(3)} > p_modèle ${pHeld.toFixed(3)} + ${this.d.exitEdge}) `
           + `round ${pos.slug} — PnL réalisé ${profit >= 0 ? '+' : ''}$${profit.toFixed(4)}`);
         this.d.notify(msgTradeClosed({ coin: pos.coin, side: pos.side, slotSec: pos.slotSec, outcome: 'sold', pnl: profit, stats: this.stats(), timeZone: this.d.timeZone }));
         this.d.onTradeClosed?.(closed);
@@ -324,7 +352,7 @@ export class FairValueRunner {
       const slot = slotOf(market) as number;
       const endMs = slot * 1000 + 300_000;
       const now = this.d.now();
-      const tauSec = (endMs - now) / 1000;
+      let tauSec = (endMs - now) / 1000;
       if (tauSec < cfg.minTauSec || tauSec > cfg.maxTauSec) continue; // aucun appel réseau hors fenêtre
       const coin = market.underlying;
       let rec: DecisionRecord | null = null; // évaluation journalisée (pari ou abstention)
@@ -335,6 +363,11 @@ export class FairValueRunner {
           continue;
         }
         const [upBook, downBook] = await Promise.all([this.d.getBook(market.upTokenId), this.d.getBook(market.downTokenId)]);
+        // τ recalculé APRÈS les attentes réseau (bougies, carnets) : c'est l'instant où le
+        // carnet a été lu qui compte.
+        const nowBook = this.d.now();
+        tauSec = (endMs - nowBook) / 1000;
+        if (tauSec < cfg.minTauSec || tauSec > cfg.maxTauSec) continue;
         const bestAsk = (b: Book) => b.asks
           .filter(l => l.price > 0 && l.size > 0)
           .reduce<BookLevel | null>((m, l) => (m === null || l.price < m.price ? l : m), null);
@@ -361,10 +394,13 @@ export class FairValueRunner {
 
         const q = decision.best;
         const stats = this.stats();
-        const capital = this.d.capital();
-        const peakCapital = capital + stats.peakPnl;
+        const initialCapital = this.d.capital();
+        // Mise sur le capital ACTUEL (départ + PnL réalisé), pas sur le capital de départ :
+        // après des pertes, « 1 % » doit rester 1 % de ce qui reste.
+        const equity = initialCapital + stats.pnl;
+        const peakCapital = initialCapital + stats.peakPnl;
         const stakeRes = computeStake({
-          capital,
+          capital: equity,
           entryPrice: q.cost,
           // Probabilité du MODÈLE, shrinkée de moitié vers le prix par computeStake (λ = 0,5).
           bookProb: q.prob,
@@ -372,12 +408,21 @@ export class FairValueRunner {
           drawdownCurrent: peakCapital > 0 ? stats.drawdownNow / peakCapital : 0,
           openExposureEur: stats.openExposure,
           openPositions: stats.open,
+          // Deux rounds de 5 coins peuvent se chevaucher (le round fini attend son règlement
+          // Gamma) : 10 positions, l'exposition restant plafonnée à 10 % du capital.
+          maxConcurrentPositions: 10,
         });
         if (stakeRes.skipped || !(stakeRes.stake > 0)) {
           this.holdLog(market.conditionId, `   ↳ ${ctx} → PAS de mise : ${stakeRes.rationale}`);
           if (stakeRes.bindingConstraint === 'drawdown' || stakeRes.bindingConstraint === 'série de pertes') {
             this.d.onRiskStop?.(stakeRes.rationale);
           }
+          continue;
+        }
+        const minOrder = this.d.minOrderUsd ?? 0;
+        if (stakeRes.stake < minOrder) {
+          this.holdLog(market.conditionId, `   ↳ ${ctx} → PAS de mise : ${stakeRes.stake.toFixed(2)} $ < minimum Polymarket ${minOrder} $ (capital papier trop petit pour un ordre réel)`);
+          this.d.onBelowMinOrder?.(stakeRes.stake, minOrder);
           continue;
         }
 
@@ -387,9 +432,23 @@ export class FairValueRunner {
         // prix en retard sont souvent déjà pris. On relit le carnet après `fillDelayMs` et
         // on n'exécute QUE sur ce carnet-là (sinon le papier gonfle les gains).
         const delay = this.d.fillDelayMs ?? 0;
+        // Probabilité au moment de l'exécution : si le spot a bougé pendant la latence, c'est
+        // elle qui compte (et non celle de la décision).
+        let pFill = q.prob;
         if (delay > 0) {
           await (this.d.sleep ?? (ms => new Promise(r => setTimeout(r, ms))))(delay);
-          book = await this.d.getBook(decision.side === 'UP' ? market.upTokenId : market.downTokenId);
+          const atFill = this.d.now();
+          const [bookFill, dataFill] = await Promise.all([
+            this.d.getBook(decision.side === 'UP' ? market.upTokenId : market.downTokenId),
+            this.d.getRoundData(coin, slot, atFill),
+          ]);
+          book = bookFill;
+          const pUpFill = dataFill ? probUp({ ...dataFill, tauSec: (endMs - atFill) / 1000 }, cfg) : null;
+          if (pUpFill === null) {
+            this.holdLog(market.conditionId, `   ↳ ${ctx} → PAS de mise : données indisponibles au moment de l'exécution`);
+            continue;
+          }
+          pFill = decision.side === 'UP' ? pUpFill : 1 - pUpFill;
         }
         const fill = estimateFill(book.asks, stakeRes.stake, cfg.maxAsk);
         if (!fill.complete || fill.avgPrice === null) {
@@ -397,7 +456,7 @@ export class FairValueRunner {
           continue;
         }
         const entryCost = effectiveCostPerShare(fill.avgPrice, cfg.takerFeeRate);
-        const edgeAtFill = q.prob - entryCost;
+        const edgeAtFill = pFill - entryCost;
         if (edgeAtFill < cfg.minEdge) {
           this.holdLog(market.conditionId, `   ↳ ${ctx} → PAS de mise : edge au VWAP ${(edgeAtFill * 100).toFixed(1)} pt < ${(cfg.minEdge * 100).toFixed(1)} pt`
             + (delay > 0 ? ` (carnet relu ${delay} ms après la décision : opportunité disparue)` : ''));
@@ -408,24 +467,32 @@ export class FairValueRunner {
         const { shares, winProfit } = binaryPayoff(stake, entryCost);
         const trade: LedgerTrade = {
           id: market.conditionId, slug: market.slug, coin, side: decision.side, stake, costPerShare: entryCost, shares,
-          modelProb: q.prob, edge: edgeAtFill, openedAt: new Date(now).toISOString(), endMs, status: 'open', pnl: null,
+          modelProb: pFill, edge: edgeAtFill, openedAt: new Date(now).toISOString(), endMs, status: 'open', pnl: null,
           tokenId: decision.side === 'UP' ? market.upTokenId : market.downTokenId, slotSec: slot,
         };
-        if (!this.update(trades => { if (!trades.some(t => t.id === trade.id)) trades.push(trade); })) {
-          this.holdLog(market.conditionId, `   ↳ ${ctx} → PAS de mise : registre non enregistrable`);
+        let pushed = false;
+        const saved = this.update(trades => {
+          if (!trades.some(t => t.id === trade.id)) {
+            trades.push(trade);
+            pushed = true;
+          }
+        });
+        if (saved) this.traded.add(market.conditionId); // déjà présent ou ajouté : round joué
+        if (!saved || !pushed) {
+          // Jamais d'annonce d'un trade non enregistré (ni en double s'il l'était déjà).
+          this.holdLog(market.conditionId, `   ↳ ${ctx} → PAS de mise : ${saved ? 'round déjà présent au registre' : 'registre non enregistrable'}`);
           continue;
         }
-        this.traded.add(market.conditionId);
         if (this.traded.size > 2000) {
           const first = this.traded.values().next().value;
           if (first) this.traded.delete(first);
         }
         const description = `📈 ${ctx} → Décision ${decision.side} @ VWAP $${fill.avgPrice.toFixed(3)} + frais = $${entryCost.toFixed(4)}/part, `
-          + `p_modèle ${q.prob.toFixed(3)}, edge ${(edgeAtFill * 100).toFixed(1)} pt, mise $${stake.toFixed(2)} (${stakeRes.bindingConstraint}) `
+          + `p_modèle ${pFill.toFixed(3)}, edge ${(edgeAtFill * 100).toFixed(1)} pt, mise $${stake.toFixed(2)} (${stakeRes.bindingConstraint}) `
           + `— gain $${winProfit.toFixed(4)} si ${decision.side} / perte $${stake.toFixed(2)} sinon`;
         this.d.notify(msgTradeOpened({
           coin, side: decision.side, slotSec: slot, tauSec, strike: data.strike, spot: data.spot,
-          modelProb: q.prob, costPerShare: entryCost, edge: edgeAtFill, stake, winProfit, timeZone: this.d.timeZone,
+          modelProb: pFill, costPerShare: entryCost, edge: edgeAtFill, stake, winProfit, timeZone: this.d.timeZone,
         }));
         rec = { ...(rec as DecisionRecord), act: 'buy', side: decision.side, stake };
         this.d.onTradeOpened?.({ trade, market, data, ask: fill.avgPrice, tauSec, winProfit, description });

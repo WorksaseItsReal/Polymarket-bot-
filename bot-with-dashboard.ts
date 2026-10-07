@@ -24,7 +24,7 @@ import { startDashboard, dashboardEmitter } from './src/dashboard/index.js';
 import type { BotState, BotConfig, LogLevel, DipArbSignal, SmartMoneySignal } from './src/dashboard/types.js';
 import { addSession, createSessionFromState, type TradeRecord } from './src/dashboard/session-history.js';
 import { isSpotCoin, type SpotCoin } from './src/services/spot-price-service.js';
-import { computeStake } from './src/services/stake-sizing.js';
+import { computeStake, MAX_VARIANCE_PCT } from './src/services/stake-sizing.js';
 import { fairValueConfigFromEnv } from './src/services/fair-value.js';
 import { getRoundMarketData } from './src/services/round-market-data.js';
 import { computeStats, fetchRoundOutcome, readLedgerShared, type LedgerStats } from './src/services/paper-ledger.js';
@@ -904,6 +904,27 @@ let spotStream: SpotStream | null = null;
 /** Coins tradés (FV_COINS=BTC,ETH… ; défaut : les 5). */
 const FV_COINS = coinsFromEnv(process.env.FV_COINS);
 /** Latence d'exécution simulée (ms) : le carnet est relu après ce délai avant de « remplir ». */
+/** Achat au marché minimal accepté par Polymarket (USDC). 0 = ne pas contrôler (non réaliste). */
+const FV_MIN_ORDER_USD = (() => {
+  const raw = (process.env.FV_MIN_ORDER_USD ?? '').trim();
+  const v = Number(raw);
+  return raw !== '' && Number.isFinite(v) && v >= 0 && v <= 100 ? v : 1;
+})();
+/** Au-delà de ce décalage d'horloge (ms), τ est trop faux : nouvelles entrées bloquées. */
+const MAX_CLOCK_SKEW_BLOCK_MS = 5000;
+/** Le plafond de mise (1 % du capital) passe-t-il le minimum d'ordre Polymarket ? */
+function capitalWarning(): string | null {
+  const maxStake = CONFIG.capital.totalUsd * MAX_VARIANCE_PCT;
+  return FV_MIN_ORDER_USD > 0 && maxStake < FV_MIN_ORDER_USD
+    ? `capital papier ${CONFIG.capital.totalUsd} $ : mise max ${maxStake.toFixed(2)} $ (1 %) < minimum Polymarket ${FV_MIN_ORDER_USD} $ — aucun pari ne sera pris. Monter PAPER_CAPITAL (≥ 250 $ recommandé).`
+    : null;
+}
+function clockBlock(): string | null {
+  const skew = spotStream?.clockSkewMs() ?? null;
+  return skew !== null && Math.abs(skew) > MAX_CLOCK_SKEW_BLOCK_MS
+    ? `horloge du serveur décalée de ${(skew / 1000).toFixed(1)} s (synchroniser NTP)`
+    : null;
+}
 const FV_FILL_DELAY_MS = (() => {
   const v = Number(process.env.FV_FILL_DELAY_MS ?? '');
   return (process.env.FV_FILL_DELAY_MS ?? '').trim() !== '' && Number.isFinite(v) && v >= 0 && v <= 10_000 ? v : 1000;
@@ -921,7 +942,11 @@ const FV_EXIT_EDGE = (() => {
  * gain espéré : sinon les 4 couches de risque deviennent inertes (cf. audit dashboard).
  */
 function syncRealizedPnl() {
-  const trades = readLedgerShared(ledgerPath()) ?? [];
+  const shared = readLedgerShared(ledgerPath());
+  // Registre illisible : on garde les derniers chiffres connus (afficher 0 $ et des
+  // compteurs de pertes à zéro serait faux) ; la stratégie, elle, n'ouvre plus rien.
+  if (shared === null) return;
+  const trades = shared;
   const st = computeStats(trades);
   const v = st.pnl;
   state.totalPnL = v;
@@ -1116,7 +1141,7 @@ function activateTelegram(client: TelegramClient, detail: string) {
   log('INFO', `📨 Telegram ${detail}`);
   notify(msgStartup({
     capital: CONFIG.capital.totalUsd, minEdge: FV_CFG.minEdge, minProb: FV_CFG.minProb, feeRate: FV_CFG.takerFeeRate,
-    pollSec: FV_POLL_MS / 1000, coins: [...FV_COINS], stats: ledgerStats(),
+    pollSec: FV_POLL_MS / 1000, coins: [...FV_COINS], stats: ledgerStats(), warning: capitalWarning() ?? undefined,
   }));
 
   // Bilan périodique, seulement s'il s'est passé quelque chose depuis le précédent.
@@ -1176,6 +1201,8 @@ async function setupFairValueStrategy(sdk: PolymarketSDK) {
   if (!CONFIG.dryRun) {
     log('WARN', 'Stratégie juste valeur : exécution LIVE non implémentée — décisions journalisées, AUCUN ordre envoyé.');
   }
+  const capWarn = capitalWarning();
+  if (capWarn) log('WARN', `⚠️ ${capWarn}`);
   await setupTelegram();
 
   const discovery = new RoundDiscovery();
@@ -1222,17 +1249,19 @@ async function setupFairValueStrategy(sdk: PolymarketSDK) {
     marketsRefreshMs: 10_000,
     coins: FV_COINS,
     fillDelayMs: FV_FILL_DELAY_MS,
+    minOrderUsd: FV_MIN_ORDER_USD,
+    onBelowMinOrder: (stake, min) => alertOnce('min-order', `mise calculée ${stake.toFixed(2)} $ < minimum Polymarket ${min} $ : aucun pari possible avec ce capital papier — monter PAPER_CAPITAL (≥ 250 $ recommandé)`),
     // Délai garanti : le client CLOB n'en a aucun, une réponse bloquée figeait la boucle.
     getBook: tokenId => withTimeout(sdk.markets.getTokenOrderbook(tokenId), 8000, 'carnet CLOB'),
     getRoundData: (coin, slot, now) => (isSpotCoin(coin)
-      ? getRoundMarketData(coin as SpotCoin, slot, now, stream?.price(coin) ?? null)
+      ? getRoundMarketData(coin as SpotCoin, slot, now, () => stream?.price(coin) ?? null)
       : Promise.resolve(null)),
     fetchOutcome: slug => fetchRoundOutcome(slug),
     notify,
     log: (level, msg) => log(level, msg),
     timeZone: TG_TZ,
     onEvaluation: r => { journal?.record(r); shadow.observe(r); },
-    entryBlock: () => perfGuard(),
+    entryBlock: () => clockBlock() ?? perfGuard(),
     onRiskStop: reason => {
       const streak = /pertes consécutives/.test(reason);
       alertOnce(streak ? 'risk-streak' : 'risk-drawdown', streak

@@ -160,3 +160,27 @@ test('données de round : le prix temps réel remplace la bougie si même source
     clearRoundDataCache();
   }
 });
+
+test('données de round : le prix temps réel est relu APRÈS le chargement des bougies', async () => {
+  const slot = 1_790_000_100;
+  const now = (slot + 150) * 1000;
+  const lastOpen = Math.floor(now / 60_000) * 60_000;
+  const klines = Array.from({ length: 61 }, (_, i) => {
+    const t = lastOpen - (60 - i) * 60_000;
+    return [t, '100', '101', '99', String(100 * Math.exp(((i % 2) ? 1 : -1) * 0.0005)), '1', t + 59_999];
+  });
+  const original = globalThis.fetch;
+  let live = { price: 100.1, ageMs: 100, source: 'binance-ws' };
+  globalThis.fetch = (async () => {
+    live = { price: 100.3, ageMs: 50, source: 'binance-ws' }; // le spot bouge pendant la requête
+    return new Response(JSON.stringify(klines));
+  }) as typeof fetch;
+  try {
+    clearRoundDataCache();
+    const d = await getRoundMarketData('BTC', slot, now, () => live);
+    assert.equal(d!.spot, 100.3, 'spot lu après la requête, pas avant');
+  } finally {
+    globalThis.fetch = original;
+    clearRoundDataCache();
+  }
+});

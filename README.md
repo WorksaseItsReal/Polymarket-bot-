@@ -153,6 +153,7 @@ Variables (nom → rôle) :
 | `FV_Z_SCALE` | `1` | Calibration à un paramètre de la confiance du modèle (< 1 : moins confiant). **Ne le changer que sur la suggestion du rapport** (`fv-report.ts`, section 2b, avec intervalle de confiance). |
 | `FV_TAILS` | `normal` | Loi des rendements. `t4` est **plus** confiante pour \|z\| < 2 (pas plus prudente). |
 | `FV_POLL_SEC` | `10` | Période de scrutation de fond (bornée à [5 ; 300] s). |
+| `FV_MIN_ORDER_USD` | `1` | Minimum d'un achat au marché sur Polymarket : un pari papier plus petit n'est pas pris (il ne serait pas reproductible en réel). Avec le plafond de 1 %, il faut `PAPER_CAPITAL` ≥ 100 $ (250 $ recommandé). |
 | `FV_FILL_DELAY_MS` | `1000` | Latence d'exécution simulée : le carnet est relu après ce délai et le pari n'est « exécuté » que si l'avantage existe encore (papier plus réaliste). |
 | `FV_COINS` | les 5 | Coins tradés, ex. `BTC,ETH` (à décider avec `fv-report.ts`, section 3b). |
 | `FV_SPOT_STREAM` | `true` | Prix spot temps réel par WebSocket Binance (`false` = REST seul). |
@@ -362,14 +363,16 @@ rapides, donc le paper **surestime** les exécutions sur ces opportunités.
 
 | Garde-fou | Déclencheur | Effet |
 |---|---|---|
-| Mise plafonnée | toujours | ≤ 1 % du capital par trade, ≤ 10 % exposé, Kelly ×0,25 sur une proba modèle shrinkée de moitié |
+| Mise plafonnée | toujours | ≤ 1 % du capital **actuel** (départ + PnL) par trade, ≤ 10 % exposé, Kelly ×0,25 sur une proba modèle shrinkée de moitié |
 | Série de pertes | 4 / 8 pertes d'affilée (sur 6 h) | mise ÷2 / pause de 6 h + alerte |
 | Drawdown | baisse ≥ 10 % / 20 % depuis le plus haut | mise ÷2 / arrêt des entrées + alerte (reprise manuelle) |
 | Perte du jour / du mois | ≥ 5 % / 15 % du capital (UTC, calendaire) | plus d'entrée jusqu'à minuit / au 1er du mois |
 | **Perte significative** | t ≤ −2 sur ≥ 50 trades | arrêt persistant des entrées (`~/.polymarket/fv-guard.json`), observation continue |
 | Modèle sur-confiant | réussite < proba annoncée − 2 σ (n ≥ 30) | alerte |
 | Chien de garde | boucle bloquée 3 min, 10 échecs, aucun marché 5 min | alerte |
-| Données | spot > 3 s (flux) ou bougie > 65 s, strike absent, horloge décalée | pas de mise / alerte |
+| Données | spot > 3 s (flux) ou bougie > 65 s, strike absent | pas de mise |
+| Horloge | décalage > 2 s / > 5 s vs Binance | alerte / plus de nouvelle entrée |
+| Taille d'ordre | mise < 1 $ (minimum Polymarket) | pas de mise + alerte (capital papier trop petit) |
 
 Le cooldown « santé par coin » et la fenêtre apprise de l'ancienne stratégie ont été retirés :
 ils réagissaient à du bruit (`docs/EDGE-VALIDATION.md` §9).
