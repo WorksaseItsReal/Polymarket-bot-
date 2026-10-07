@@ -33,6 +33,8 @@ export interface RealtimeServiceConfig {
   pingInterval?: number;
   /** Enable debug logging (default: false) */
   debug?: boolean;
+  /** Hôte WebSocket (défaut : celui de la librairie, wss://ws-live-data.polymarket.com). Tests. */
+  wsHost?: string;
 
   /**
    * Source de l'orderbook marché.
@@ -294,6 +296,10 @@ export class RealtimeServiceV2 extends EventEmitter {
   private subscriptions: Map<string, Subscription> = new Map();
   private subscriptionIdCounter = 0;
   private connected = false;
+  /** Reconnexion gérée ICI (celle de la librairie est désactivée, voir connect()). */
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private reconnectAttempt = 0;
+  private manualDisconnect = false;
 
   // ==========================================================================
   // REST /book fallback state (canal WS `clob_market` mesuré MORT)
@@ -343,6 +349,7 @@ export class RealtimeServiceV2 extends EventEmitter {
     this.config = {
       autoReconnect: config.autoReconnect ?? true,
       pingInterval: config.pingInterval ?? 5000,
+      wsHost: config.wsHost,
       debug: config.debug ?? false,
       orderbookSource: config.orderbookSource ?? 'auto',
       clobHost: (config.clobHost ?? 'https://clob.polymarket.com').replace(/\/+$/, ''),
@@ -367,22 +374,58 @@ export class RealtimeServiceV2 extends EventEmitter {
       return this;
     }
 
+    this.manualDisconnect = false;
     this.client = new RealTimeDataClient({
       onConnect: this.handleConnect.bind(this),
       onMessage: this.handleMessage.bind(this),
       onStatusChange: this.handleStatusChange.bind(this),
-      autoReconnect: this.config.autoReconnect,
+      autoReconnect: false,
       pingInterval: this.config.pingInterval,
+      ...(this.config.wsHost ? { host: this.config.wsHost } : {}),
     });
-
-    this.client.connect();
+    // ⚠️ FIX 2026-10-07 — tempête de reconnexion. La librairie fait
+    // `autoReconnect = args.autoReconnect || true` (impossible à désactiver par l'option)
+    // et rappelle connect() SANS délai dans onError ET onClose : chaque échec ouvre deux
+    // nouvelles connexions (mesuré : ~16 000 tentatives en 1,5 s sur un port refusé →
+    // mémoire et sockets épuisés). On coupe sa reconnexion et on reconnecte nous-mêmes
+    // avec un délai croissant (handleStatusChange).
+    (this.client as unknown as { autoReconnect: boolean }).autoReconnect = false;
+    this.openSocket();
     return this;
+  }
+
+  /** Ouvre la socket et répare le « pong » que la librairie écrase. */
+  private openSocket(): void {
+    if (!this.client) return;
+    this.client.connect();
+    // La librairie assigne `ws.pong = onPong` : la réponse automatique aux pings du
+    // serveur n'envoie plus de trame pong → le serveur coupe la connexion. On retire
+    // cette propriété pour retrouver la méthode native de `ws`.
+    const ws = (this.client as unknown as { ws?: Record<string, unknown> }).ws;
+    if (ws && Object.prototype.hasOwnProperty.call(ws, 'pong')) delete ws.pong;
+  }
+
+  private scheduleReconnect(): void {
+    if (this.manualDisconnect || !this.config.autoReconnect || !this.client || this.reconnectTimer) return;
+    this.reconnectAttempt++;
+    const delay = Math.min(60_000, 1000 * 2 ** Math.min(this.reconnectAttempt - 1, 6));
+    this.log(`Reconnexion WebSocket dans ${Math.round(delay / 1000)} s (essai ${this.reconnectAttempt})`);
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      if (!this.manualDisconnect) this.openSocket();
+    }, delay);
+    (this.reconnectTimer as { unref?: () => void }).unref?.();
   }
 
   /**
    * Disconnect from WebSocket server
    */
   disconnect(): void {
+    this.manualDisconnect = true;
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
     this.stopRestPoller();
     // La sonde de vivacité WS doit mourir avec la connexion : sinon elle se
     // déclenche après coup et peut rallumer le poller sur un client déconnecté.
@@ -1062,8 +1105,10 @@ export class RealtimeServiceV2 extends EventEmitter {
     if (status === ConnectionStatus.DISCONNECTED) {
       this.connected = false;
       this.emit('disconnected');
+      this.scheduleReconnect();
     } else if (status === ConnectionStatus.CONNECTED) {
       this.connected = true;
+      this.reconnectAttempt = 0;
     }
 
     this.emit('statusChange', status);
