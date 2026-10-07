@@ -20,6 +20,33 @@ Détail complet et sources : [`docs/rebuild/strategy/EDGE.md`](docs/rebuild/stra
 
 **Conséquence pratique :** toute hausse de mise serait un pari **non étayé par les données**.
 
+> Ces chiffres portent sur l'**ancienne** règle « favori dans [0,58 ; 0,65] », retirée parce
+> qu'elle n'a pas d'edge (§5). La stratégie actuelle (juste valeur) n'a **pas encore** de
+> mesure : c'est le rôle du journal des décisions et de `scripts/analysis/fv-report.ts`.
+
+---
+
+## Mise en route (version juste valeur)
+
+Sur le serveur, dans le dossier du bot :
+
+```bash
+git fetch origin && git checkout feat/fair-value-strategy && git pull
+npm install
+# .env : partir de .env.example (FV_*, TELEGRAM_*, DASHBOARD_*), garder DRY_RUN=true
+npx tsx scripts/telegram/check.ts          # doit afficher « ✅ … Message de test envoyé »
+pm2 restart polymarket-paperbot && pm2 logs polymarket-paperbot --lines 50
+```
+
+Puis :
+1. **Désactiver l'ancien recap Hermes** (`paperbot-recap-telegram`) : il décrit l'ancienne règle.
+2. Vérifier dans les logs : `Flux spot temps réel connecté`, `Telegram connecté`, puis des
+   lignes `HOLD : edge … < 4.0pt` (le bot évalue, et s'abstient tant que le carnet est juste).
+3. Après 2–3 jours : `npx tsx scripts/analysis/fv-report.ts --days 3`. Si le modèle ne bat
+   pas le carnet (Brier), la stratégie ne gagnera pas, quel que soit le réglage.
+4. Ne **jamais** passer en LIVE avant : rapport favorable sur les deux moitiés, ≥ 200 trades
+   réglés avec t ≥ 2, et un capital permettant des mises ≥ 5 $ (minimum Polymarket).
+
 ---
 
 ## 1. Ce que fait le bot
@@ -302,14 +329,21 @@ rapides, donc le paper **surestime** les exécutions sur ces opportunités.
 
 ---
 
-## 6. Apprentissage & cooldown (déterministe, sans IA)
+## 6. Garde-fous (risque, performance, fiabilité)
 
-- Le bot suit par coin : win rate récent, taille de fenêtre, et un **cooldown santé** (skip si
-  espérance ≤ 0).
-- **Correctif anti-blocage (2026-09-26)** : un cooldown ne doit **jamais** être éternel. Une
-  ancienne version réappliquait le cooldown sur des résultats vieux de 7 à 25 h → des coins
-  restaient bloqués **pour toujours** (`LEARN_COOLDOWN_AGE_H`, défaut 6 h). Corrigé dans
-  `bot-with-dashboard.ts` (~l.410–424).
+| Garde-fou | Déclencheur | Effet |
+|---|---|---|
+| Mise plafonnée | toujours | ≤ 1 % du capital par trade, ≤ 10 % exposé, Kelly ×0,25 sur une proba modèle shrinkée de moitié |
+| Série de pertes | 4 / 8 pertes d'affilée (sur 6 h) | mise ÷2 / pause de 6 h + alerte |
+| Drawdown | baisse ≥ 10 % / 20 % depuis le plus haut | mise ÷2 / arrêt des entrées + alerte (reprise manuelle) |
+| Perte du jour / du mois | ≥ 5 % / 15 % du capital (UTC, calendaire) | plus d'entrée jusqu'à minuit / au 1er du mois |
+| **Perte significative** | t ≤ −2 sur ≥ 50 trades | arrêt persistant des entrées (`~/.polymarket/fv-guard.json`), observation continue |
+| Modèle sur-confiant | réussite < proba annoncée − 2 σ (n ≥ 30) | alerte |
+| Chien de garde | boucle bloquée 3 min, 10 échecs, aucun marché 5 min | alerte |
+| Données | spot > 3 s (flux) ou bougie > 65 s, strike absent, horloge décalée | pas de mise / alerte |
+
+Le cooldown « santé par coin » et la fenêtre apprise de l'ancienne stratégie ont été retirés :
+ils réagissaient à du bruit (`docs/EDGE-VALIDATION.md` §9).
 
 ---
 
@@ -327,6 +361,11 @@ rapides, donc le paper **surestime** les exécutions sur ces opportunités.
 | 8 | **`history.json` saturé de HOLD** (298/300 → fenêtre de ~4 h). | Les HOLD ne sont plus écrits ; purge → fenêtre couvre plusieurs jours. | `docs/CHANGES-APPLIED.md` §4 |
 | 9 | **Fenêtre apprise écrasait `.env`** : `P_STRONG_MAX` sans effet (log `[0.55 - 0.75]`). | Fenêtre apprise bornée par `[P_STRONG_MIN ; P_STRONG_MAX]`. | `docs/CHANGES-APPLIED.md` §5 |
 | 10 | **Dump d'objet ethers ~7,3 Ko/ligne** dans les logs. | Helper `errStr()` borné à 240 caractères sur 10 sites. | `docs/rebuild/code/REPORT.md` (point 4) |
+| 11 | **Tempête de reconnexion WebSocket** (librairie Polymarket : 4 095 tentatives en 0,5 s sur une coupure). | Reconnexion gérée avec délai 1 s → 60 s ; pong natif restauré. | `tests/realtime-reconnect.test.ts` |
+| 12 | **Dashboard** : une requête malformée faisait planter le bot ; écoute sur toutes les interfaces sans auth ; passage en LIVE en un clic (confirmation inversée). | 127.0.0.1 par défaut, jeton, Origin vérifié, LIVE refusé si démarré en papier. | `tests/dashboard-server.test.ts` |
+| 13 | **`DRY_RUN=0` = papier pour le bot mais écritures on-chain autorisées.** | Règle unique : LIVE seulement si `DRY_RUN=false`. | `src/clients/ctf-client.ts` |
+| 14 | **Limites de perte jour/mois inertes** (compteurs jamais alimentés en papier) ; arrêts de mise définitifs et silencieux. | Calcul depuis le registre ; série de pertes sur 6 h ; alertes. | `tests/fair-value-runner.test.ts` |
+| 15 | **Requêtes CLOB sans délai** (une réponse bloquée figeait la stratégie) ; démarrage impossible sans clé API en papier. | Délais 8–10 s ; démarrage tolérant en papier. | `bot-with-dashboard.ts` |
 
 ---
 
@@ -334,7 +373,7 @@ rapides, donc le paper **surestime** les exécutions sur ces opportunités.
 
 - **L'edge reste non prouvé** : il faut **≈ 427 trades** résolus pour trancher au bruit mesuré
   (`EDGE.md`), la dernière mesure comptait 167 trades.
-- **Non transposable au réel** : la mise paper historique (base 1 € → **0,65–1,30 €**/trade)
+- **Non transposable au réel** (mesuré sur l'ancienne stratégie, reste vrai pour la mise) : la mise paper historique (base 1 € → **0,65–1,30 €**/trade)
   était **4 à 8× sous le minimum live (5 USDC)** ; la profondeur au meilleur prix (~12 $ médiane)
   est insuffisante dans **17,7 %** des cas en zone de mise ; la part du PnL paper qui survivrait
   au réel est **≈ 0 %** (le paper a déjà une EV négative, le réel ≈ double la perte).
