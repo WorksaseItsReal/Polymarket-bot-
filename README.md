@@ -126,7 +126,19 @@ Les anciennes variables `P_STRONG_MIN`, `P_STRONG_MAX`, `P_MIN_PRICE`, `P_TAKE_P
 `P_STOP_LOSS`, `EDGE_FILTER_ENABLED`, `LEARN_COOLDOWN_AGE_H` ne sont **plus lues** par la
 stratégie principale.
 
-**Feature flags** : `DIPARB_ENABLED`, `SMARTMONEY_ENABLED`.
+**Feature flags** : `DIPARB_ENABLED`, `SMARTMONEY_ENABLED` (désactivé par défaut).
+
+**Dashboard (sécurité)**
+
+| Variable | Défaut | Rôle |
+|---|---|---|
+| `DASHBOARD_PORT` | `3001` | Port HTTP/WebSocket. |
+| `DASHBOARD_HOST` | `127.0.0.1` | Interface d'écoute. Local uniquement par défaut ; à distance, préférer un tunnel SSH (`ssh -L 3001:127.0.0.1:3001 serveur`). |
+| `DASHBOARD_TOKEN` | — | Jeton exigé pour l'API et le WebSocket (`http://serveur:3001/?token=…`). **Obligatoire** pour accepter des commandes si `DASHBOARD_HOST` n'est pas local (sinon : lecture seule). |
+
+Le dashboard **ne peut jamais faire passer en LIVE** un bot démarré en papier : il faut le
+redémarrer avec `DRY_RUN=false`. `DRY_RUN` suit une règle unique dans tout le code : LIVE
+**uniquement** si `DRY_RUN=false` (`0`, `no`, `off`… = papier).
 
 ---
 

@@ -18,7 +18,7 @@ import {
   type SmartMoneyTrade,
   OnchainService,
 } from './src/index.js';
-import { CTFClient } from './src/clients/ctf-client.js';
+import { CTFClient, isDryRunMode } from './src/clients/ctf-client.js';
 import { startDashboard, dashboardEmitter } from './src/dashboard/index.js';
 import type { BotState, BotConfig, LogLevel, DipArbSignal, SmartMoneySignal } from './src/dashboard/types.js';
 import { addSession, createSessionFromState, type TradeRecord } from './src/dashboard/session-history.js';
@@ -40,7 +40,10 @@ import { msgAlert, msgStartup, msgSummary } from './src/services/telegram-messag
 // CONFIGURATION (same as bot-config.ts)
 // ============================================================================
 
-const DRY_RUN = process.env.DRY_RUN !== 'false';
+/** Mode papier : règle unique du projet (isDryRunMode, LIVE seulement si DRY_RUN=false). */
+const DRY_RUN = isDryRunMode();
+/** Le process a-t-il été DÉMARRÉ en live ? Le dashboard ne peut jamais passer en LIVE sinon. */
+const STARTED_LIVE = !DRY_RUN;
 /**
  * Capital de référence UNIQUE. En papier : PAPER_CAPITAL (sinon CAPITAL_USD, sinon 50).
  * Avant : les limites de risque utilisaient CAPITAL_USD (250) et la mise PAPER_CAPITAL
@@ -450,6 +453,24 @@ function ledgerPath(): string {
 
 function ledgerStats(): LedgerStats {
   return computeStats(loadLedger(ledgerPath()) ?? []);
+}
+
+// === COMMANDES DU DASHBOARD ===
+/**
+ * Enregistre un gestionnaire de commande dashboard SANS risque pour le process : une
+ * charge utile absente/malformée ou une exception (y compris dans un `async`) est
+ * journalisée, jamais remontée. Avant : `cmd.payload.enabled` sur un payload absent
+ * → rejet de promesse non géré → arrêt de Node 22.
+ */
+function onDashboardCommand(handler: (cmd: { command: string; payload: any }) => unknown | Promise<unknown>): void {
+  dashboardEmitter.on('command', (raw: unknown) => {
+    const cmd = (raw && typeof raw === 'object' ? raw : {}) as { command?: unknown; payload?: unknown };
+    if (typeof cmd.command !== 'string') return;
+    const payload = cmd.payload && typeof cmd.payload === 'object' ? cmd.payload : {};
+    Promise.resolve()
+      .then(() => handler({ command: cmd.command as string, payload }))
+      .catch(err => log('WARN', `Commande dashboard « ${String(cmd.command).slice(0, 40)} » en échec : ${String((err as Error)?.message ?? err).slice(0, 200)}`));
+  });
 }
 
 // === NOTIFICATIONS TELEGRAM (src/services/telegram.ts) ===
@@ -1411,9 +1432,13 @@ async function main() {
   console.log('║          POLYMARKET BOT v3.0 + DASHBOARD                           ║');
   console.log('╚════════════════════════════════════════════════════════════════════╝\n');
 
-  // Start Dashboard Server
-  startDashboard(3001);
-  console.log('\n🌐 Dashboard: http://localhost:3001\n');
+  // Start Dashboard Server — local par défaut (127.0.0.1). Pour y accéder à distance :
+  // tunnel SSH (ssh -L 3001:127.0.0.1:3001 serveur), ou DASHBOARD_HOST=0.0.0.0 +
+  // DASHBOARD_TOKEN=<secret> puis http://serveur:3001/?token=<secret>.
+  const dashPort = Number(process.env.DASHBOARD_PORT ?? '') || 3001;
+  const dashHost = process.env.DASHBOARD_HOST || '127.0.0.1';
+  startDashboard(dashPort, { host: dashHost, token: process.env.DASHBOARD_TOKEN || undefined });
+  console.log(`\n🌐 Dashboard: http://${dashHost === '0.0.0.0' ? '<ip-du-serveur>' : dashHost}:${dashPort}\n`);
 
   if (!process.env.POLYMARKET_PRIVATE_KEY) {
     log('ERROR', 'POLYMARKET_PRIVATE_KEY not found');
@@ -1456,10 +1481,40 @@ async function main() {
     binance: CONFIG.binance.enabled,
   });
 
-  // Handle Dashboard Commands
-  dashboardEmitter.on('command', async (cmd: { command: string; payload: any }) => {
+  // Initialize Paper Wallet if Dry Run
+  if (CONFIG.dryRun) {
+    state.paper = {
+      balance: CONFIG.capital.totalUsd,
+      initialBalance: CONFIG.capital.totalUsd,
+      pnl: 0,
+      trades: 0,
+      totalVolume: 0,
+    };
+    log('INFO', `📝 Paper Trading Activated: capital papier $${CONFIG.capital.totalUsd.toFixed(2)}`);
+    updateDashboard();
+  }
+
+  const sdk = await PolymarketSDK.create({
+    privateKey: process.env.POLYMARKET_PRIVATE_KEY,
+  });
+
+  log('INFO', `Wallet: ${sdk.tradingService.getAddress()}`);
+
+  // Handle Dashboard Commands (enregistré APRÈS la création du SDK : avant, une bascule
+  // reçue pendant le démarrage touchait `sdk` encore non initialisé → ReferenceError).
+  onDashboardCommand(async (cmd) => {
     if (cmd.command === 'toggleDryRun') {
-      const enable = cmd.payload.enabled;
+      const enable = cmd.payload.enabled; // nouvel état du mode papier (true = papier)
+      if (typeof enable !== 'boolean') {
+        log('WARN', 'Commande toggleDryRun ignorée : payload.enabled doit être un booléen');
+        return;
+      }
+      if (!enable && !STARTED_LIVE) {
+        log('WARN', '🔒 Passage en LIVE refusé : le bot a été démarré en papier (DRY_RUN≠false). '
+          + 'Pour trader réellement, redémarre-le explicitement avec DRY_RUN=false.');
+        alertOnce('live-refused', 'tentative de passage en LIVE depuis le dashboard refusée (bot démarré en papier)');
+        return;
+      }
       if (CONFIG.dryRun === !enable) {
         log('INFO', `Switching to ${!enable ? 'LIVE' : 'DRY RUN'} mode... (Requested by user)`);
 
@@ -1514,25 +1569,6 @@ async function main() {
     }
   });
 
-  // Initialize Paper Wallet if Dry Run
-  if (CONFIG.dryRun) {
-    state.paper = {
-      balance: CONFIG.capital.totalUsd,
-      initialBalance: CONFIG.capital.totalUsd,
-      pnl: 0,
-      trades: 0,
-      totalVolume: 0,
-    };
-    log('INFO', `📝 Paper Trading Activated: capital papier $${CONFIG.capital.totalUsd.toFixed(2)}`);
-    updateDashboard();
-  }
-
-  const sdk = await PolymarketSDK.create({
-    privateKey: process.env.POLYMARKET_PRIVATE_KEY,
-  });
-
-  log('INFO', `Wallet: ${sdk.tradingService.getAddress()}`);
-
   // Setup all services
   await setupOnchain(); // MUST BE FIRST (Approvals)
   await setupSwap();
@@ -1554,7 +1590,7 @@ async function main() {
   await setupPortfolioManager(sdk);
 
   // Listen for commands from dashboard
-  dashboardEmitter.on('command', async ({ command, payload }: { command: string; payload: any }) => {
+  onDashboardCommand(async ({ command, payload }) => {
     if (command === 'closePosition') {
       const { tokenId, size } = payload;
       log('TRADE', `Closing position: ${tokenId} (${size} shares)`);

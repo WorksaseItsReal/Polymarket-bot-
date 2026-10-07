@@ -6,10 +6,18 @@ interface WebSocketMessage {
   payload: unknown;
 }
 
-// Connect to same host:port when served by bot, or port 3001 for dev
-const WS_URL = window.location.port === '5173'
+// Connect to same host:port when served by bot, or port 3001 for dev.
+// Jeton éventuel (DASHBOARD_TOKEN côté bot) : repris de l'URL de la page (?token=…).
+export const DASHBOARD_TOKEN = new URLSearchParams(window.location.search).get('token') ?? '';
+const TOKEN_QS = DASHBOARD_TOKEN ? `?token=${encodeURIComponent(DASHBOARD_TOKEN)}` : '';
+const WS_URL = (window.location.port === '5173'
   ? `ws://${window.location.hostname}:3001`
-  : `ws://${window.location.host}`;
+  : `ws://${window.location.host}`) + TOKEN_QS;
+/** Base de l'API du bot (même hôte que la page, ou :3001 en dev). */
+export const API_BASE = window.location.port === '5173'
+  ? `http://${window.location.hostname}:3001`
+  : `${window.location.protocol}//${window.location.host}`;
+export const apiUrl = (path: string) => `${API_BASE}${path}${TOKEN_QS}`;
 const MAX_LOGS = 200;
 
 export function useWebSocket() {

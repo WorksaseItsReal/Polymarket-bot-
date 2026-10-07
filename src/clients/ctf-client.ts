@@ -75,16 +75,16 @@ export class DryRunWriteBlockedError extends Error {
 }
 
 /**
- * Indique si le mode paper/DRY_RUN est actif.
+ * Indique si le mode paper/DRY_RUN est actif. RÈGLE UNIQUE pour tout le projet.
  *
- * Sémantique alignée sur `bot-config.ts` (`dryRun: process.env.DRY_RUN !== 'false'`) :
- * seul un `DRY_RUN` EXPLICITEMENT falsy autorise les écritures réelles.
- * => fail-closed : variable absente, vide ou illisible => mode paper.
+ * LIVE uniquement si `DRY_RUN=false` (casse et espaces ignorés) ; toute autre valeur,
+ * absente ou illisible => paper (fail-closed).
+ * ⚠️ FIX 2026-10-07 : cette fonction acceptait aussi `0`/`no`/`off` comme LIVE alors
+ * que le bot et le TradingService ne reconnaissent que `false` : avec `DRY_RUN=0`, le
+ * bot se croyait en papier mais les écritures on-chain étaient autorisées.
  */
 export function isDryRunMode(): boolean {
-  const raw = (process.env.DRY_RUN ?? '').trim().toLowerCase();
-  if (raw === 'false' || raw === '0' || raw === 'no' || raw === 'off') return false;
-  return true;
+  return (process.env.DRY_RUN ?? '').trim().toLowerCase() !== 'false';
 }
 
 /**

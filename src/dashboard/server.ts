@@ -40,20 +40,82 @@ function broadcast(message: WebSocketMessage): void {
   });
 }
 
-export function startDashboard(port = 3001): http.Server {
-  server = http.createServer((req, res) => {
-    // CORS headers
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+export interface DashboardOptions {
+  /** Interface d'écoute. Défaut 127.0.0.1 : le dashboard n'est PAS exposé au réseau. */
+  host?: string;
+  /** Jeton exigé (?token=…) pour l'API et le WebSocket. Obligatoire pour accepter des
+   *  commandes quand le dashboard écoute ailleurs qu'en local. */
+  token?: string;
+}
 
-    if (req.method === 'OPTIONS') {
-      res.writeHead(204);
+/** Hôte local (boucle) ? */
+function isLoopback(host: string): boolean {
+  return host === '127.0.0.1' || host === '::1' || host === 'localhost';
+}
+
+/** Comparaison en temps constant (le jeton ne doit pas fuiter par la durée). */
+function sameToken(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
+}
+
+/**
+ * Une page web d'un AUTRE site ne doit pas pouvoir piloter le bot depuis le navigateur
+ * de l'opérateur (WebSocket non soumis au CORS). On accepte : pas d'Origin (client non
+ * navigateur) ou un Origin du même nom d'hôte que la requête (ports libres : mode dev).
+ */
+export function originAllowed(origin: string | undefined, hostHeader: string | undefined): boolean {
+  if (!origin) return true;
+  try {
+    const o = new URL(origin).hostname;
+    const h = new URL(`http://${hostHeader ?? ''}`).hostname;
+    return !!h && o === h;
+  } catch {
+    return false;
+  }
+}
+
+export function startDashboard(port = 3001, opts: DashboardOptions = {}): http.Server {
+  const host = opts.host || '127.0.0.1';
+  const token = opts.token || '';
+  // Commandes (bascule de mode, fermeture de position…) : autorisées en local, ou avec jeton.
+  const commandsAllowed = isLoopback(host) || !!token;
+  if (!commandsAllowed) {
+    console.warn(`[Dashboard] Écoute sur ${host} SANS DASHBOARD_TOKEN : lecture seule, commandes refusées.`);
+  }
+  const tokenOk = (url: URL) => !token || sameToken(url.searchParams.get('token') ?? '', token);
+
+  server = http.createServer((req, res) => {
+    // Une requête malformée ne doit JAMAIS faire tomber le bot (avant : `new URL` levait
+    // dans le handler → exception non rattrapée → arrêt du process).
+    try {
+      handleHttp(req, res);
+    } catch (err) {
+      try {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'bad request' }));
+      } catch { /* socket déjà fermée */ }
+      console.error('[Dashboard] requête rejetée :', (err as Error).message);
+    }
+  });
+
+  const handleHttp = (req: http.IncomingMessage, res: http.ServerResponse): void => {
+    // Pas d'en-tête CORS : le dashboard est servi par ce même serveur (même origine).
+    // Avant : `Access-Control-Allow-Origin: *` laissait n'importe quel site lire l'état.
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+      res.writeHead(405);
       res.end();
       return;
     }
 
     const url = new URL(req.url || '/', `http://localhost:${port}`);
+    if (url.pathname.startsWith('/api/') && !tokenOk(url)) {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'token requis' }));
+      return;
+    }
 
     if (url.pathname === '/api/status') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -107,10 +169,11 @@ export function startDashboard(port = 3001): http.Server {
 
     // Serve static files from dashboard/dist
     const distPath = path.resolve(__dirname, '../../dashboard/dist');
-    let filePath = path.join(distPath, url.pathname === '/' ? 'index.html' : url.pathname);
+    const filePath = path.resolve(distPath, '.' + (url.pathname === '/' ? '/index.html' : decodeURIComponent(url.pathname)));
+    const insideDist = filePath === distPath || filePath.startsWith(distPath + path.sep);
 
-    // Check if file exists
-    if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
+    // Check if file exists (jamais en dehors de dashboard/dist)
+    if (insideDist && fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
       const ext = path.extname(filePath);
       const mimeTypes: Record<string, string> = {
         '.html': 'text/html',
@@ -138,9 +201,26 @@ export function startDashboard(port = 3001): http.Server {
 
     res.writeHead(404, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: 'Not found' }));
-  });
+  };
 
-  wss = new WebSocketServer({ server });
+  wss = new WebSocketServer({
+    server,
+    verifyClient: (info: { origin?: string; req: http.IncomingMessage }) => {
+      try {
+        const url = new URL(info.req.url || '/', 'http://localhost');
+        return originAllowed(info.origin, info.req.headers.host) && tokenOk(url);
+      } catch {
+        return false;
+      }
+    },
+  });
+  // Erreur du serveur WS (ex. port déjà pris) : journalisée, jamais fatale.
+  wss.on('error', (err) => {
+    console.error('[Dashboard] WebSocket server error:', err.message);
+  });
+  server.on('error', (err) => {
+    console.error(`[Dashboard] Impossible d'écouter sur ${host}:${port} (${err.message}) — le bot continue SANS dashboard.`);
+  });
 
   wss.on('connection', (ws) => {
     console.log('[Dashboard] Client connected');
@@ -155,7 +235,11 @@ export function startDashboard(port = 3001): http.Server {
     ws.on('message', (data) => {
       try {
         const message = JSON.parse(data.toString());
-        if (message.type === 'command') {
+        if (message?.type === 'command' && !commandsAllowed) {
+          console.warn('[Dashboard] Commande refusée : dashboard exposé sans DASHBOARD_TOKEN (lecture seule).');
+          return;
+        }
+        if (message?.type === 'command' && typeof message.command === 'string') {
           console.log(`[Dashboard] Command received: ${message.command}`, message.payload);
           dashboardEmitter.emit('command', { command: message.command, payload: message.payload });
         }
@@ -186,9 +270,8 @@ export function startDashboard(port = 3001): http.Server {
     broadcast({ type: 'config', payload: config });
   });
 
-  server.listen(port, () => {
-    console.log(`[Dashboard] Server running at http://localhost:${port}`);
-    console.log(`[Dashboard] WebSocket at ws://localhost:${port}`);
+  server.listen(port, host, () => {
+    console.log(`[Dashboard] Server running at http://${host}:${port}${token ? ' (jeton requis : ?token=…)' : ''}`);
   });
 
   return server;

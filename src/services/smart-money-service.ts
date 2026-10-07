@@ -30,6 +30,7 @@ import type { WalletService, TimePeriod, PeriodLeaderboardEntry } from './wallet
 import type { RealtimeServiceV2, ActivityTrade } from './realtime-service-v2.js';
 import type { TradingService, OrderResult } from './trading-service.js';
 import type { Position, ClosedPosition, ClosedPositionsParams, DataApiClient } from '../clients/data-api.js';
+import { isDryRunMode } from '../clients/ctf-client.js';
 
 // ============================================================================
 // Market Categorization (exported utilities)
@@ -954,7 +955,7 @@ export class SmartMoneyService {
     // - options.dryRun fourni  -> respecté tel quel
     // - sinon DRY_RUN présent  -> lu depuis l'environnement (défaut: paper)
     // - sinon                  -> paper (défaut sûr)
-    const dryRun = options.dryRun ?? (process.env.DRY_RUN !== 'false');
+    const dryRun = options.dryRun ?? isDryRunMode();
 
     if (!dryRun) {
       console.warn('[SmartMoneyService] ⚠️ LIVE COPY TRADING: dryRun=false, des ordres RÉELS seront envoyés.');

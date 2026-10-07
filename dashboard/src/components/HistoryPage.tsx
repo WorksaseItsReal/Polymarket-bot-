@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import type { SessionSummary, HistoryData } from '../types';
+import { apiUrl } from '../hooks/useWebSocket';
 
 interface HistoryPageProps {
   onBack: () => void;
@@ -18,7 +19,7 @@ export function HistoryPage({ onBack }: HistoryPageProps) {
   const fetchHistory = async () => {
     try {
       setLoading(true);
-      const response = await fetch('http://localhost:3001/api/history');
+      const response = await fetch(apiUrl('/api/history'));
       if (!response.ok) throw new Error('Failed to fetch history');
       const data = await response.json();
       setHistory(data);
@@ -33,7 +34,7 @@ export function HistoryPage({ onBack }: HistoryPageProps) {
 
   const fetchSession = async (sessionId: string) => {
     try {
-      const response = await fetch(`http://localhost:3001/api/history/${sessionId}`);
+      const response = await fetch(apiUrl(`/api/history/${encodeURIComponent(sessionId)}`));
       if (!response.ok) throw new Error('Failed to fetch session');
       const data = await response.json();
       setSelectedSession(data);

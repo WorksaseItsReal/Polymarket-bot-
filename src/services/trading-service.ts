@@ -28,6 +28,7 @@ import type { UnifiedCache } from '../core/unified-cache.js';
 import { CACHE_TTL } from '../core/unified-cache.js';
 import { PolymarketError, ErrorCode } from '../core/errors.js';
 import type { Side, OrderType } from '../core/types.js';
+import { isDryRunMode } from '../clients/ctf-client.js';
 
 // Chain IDs
 export const POLYGON_MAINNET = 137;
@@ -187,7 +188,7 @@ export class TradingService {
     this.wallet = new Wallet(config.privateKey);
     this.chainId = (config.chainId || POLYGON_MAINNET) as Chain;
     this.credentials = config.credentials || null;
-    this.paperMode = config.paperMode ?? (process.env.DRY_RUN !== 'false');
+    this.paperMode = config.paperMode ?? isDryRunMode();
   }
 
   // ============================================================================
