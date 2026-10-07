@@ -492,5 +492,5 @@ test('minimum d\'ordre : alerte seulement si la cause est le capital, pas un pla
   await env.runner().tick();
   assert.equal(loadLedger(env.ledgerPath)!.length, 1, 'pas de nouveau pari');
   assert.equal(below.length, 0, 'cause temporaire (exposition) : pas d\'alerte « monter le capital »');
-  assert.ok(env.logs.some(l => /plafond temporaire/.test(l)));
+  assert.ok(env.logs.some(l => /mise réduite/.test(l)));
 });
