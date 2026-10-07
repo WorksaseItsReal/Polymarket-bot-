@@ -250,3 +250,12 @@ test('fuseau invalide : jamais d\'exception, repli UTC signalé', () => {
   assert.equal(roundWindow(1_790_000_100, 'Mars/Olympus'), '14:15 → 14:20 UTC');
   noJunk(msgTradeClosed({ coin: 'BTC', side: 'UP', slotSec: 1_790_000_100, outcome: 'won', pnl: 1, stats: stats([1]), timeZone: 'pas/un/fuseau' }));
 });
+
+test('check : seules les pannes passagères sont marquées « à réessayer »', async () => {
+  const blocked = (async () => new Response('Forbidden by proxy', { status: 403 })) as typeof fetch;
+  assert.equal((await client(blocked).check()).retryable, true, 'proxy/pare-feu');
+  assert.equal((await client(fakeTelegram(() => new Error('ECONNRESET')).fetchImpl).check()).retryable, true, 'réseau');
+  assert.equal((await client(fakeTelegram(() => fail(502, 'Bad Gateway')).fetchImpl).check()).retryable, true, '5xx');
+  assert.ok(!(await client(fakeTelegram(() => fail(401, 'Unauthorized')).fetchImpl).check()).retryable, 'token refusé : définitif');
+  assert.ok(!(await client(fakeTelegram(m => (m === 'getMe' ? ok({ username: 'b' }) : fail(400, 'Bad Request: chat not found'))).fetchImpl).check()).retryable, 'chat introuvable : définitif');
+});

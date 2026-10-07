@@ -28,6 +28,9 @@ export interface TelegramCheck {
   ok: boolean;
   detail: string;
   botUsername?: string;
+  /** Échec passager (réseau, panne serveur) : réessayer plus tard a un sens. Un token
+   *  refusé ou un chat introuvable ne se corrige pas tout seul. */
+  retryable?: boolean;
 }
 
 const MAX_LEN = 4096;
@@ -141,11 +144,12 @@ export class TelegramClient {
     try {
       const me = await this.call('getMe', {});
       if (!me.ok && me.foreign) {
-        return { ok: false, detail: `api.telegram.org bloqué sur ce serveur (HTTP ${me.error_code} hors Telegram) : pare-feu ou proxy à ouvrir` };
+        return { ok: false, retryable: true, detail: `api.telegram.org bloqué sur ce serveur (HTTP ${me.error_code} hors Telegram) : pare-feu ou proxy à ouvrir` };
       }
       if (!me.ok) {
         return {
           ok: false,
+          retryable: (me.error_code ?? 0) >= 500 || me.error_code === 429,
           detail: me.error_code === 401 || me.error_code === 404
             ? 'token refusé par Telegram (401) : régénère-le avec @BotFather et mets à jour TELEGRAM_BOT_TOKEN'
             : `getMe en échec (${me.error_code ?? '?'}) : ${this.redact(me.description ?? 'erreur inconnue')}`,
@@ -162,12 +166,12 @@ export class TelegramClient {
         } else if (chat.error_code === 403) {
           detail = `le bot @${username ?? '?'} est bloqué ou n'est plus membre du chat ${this.chatId} : débloque-le / ré-ajoute-le`;
         }
-        return { ok: false, detail, botUsername: username };
+        return { ok: false, detail, botUsername: username, retryable: (chat.error_code ?? 0) >= 500 || chat.error_code === 429 };
       }
       const name = chat.result?.title ?? chat.result?.first_name ?? this.chatId;
       return { ok: true, detail: `connecté : @${username} → « ${name} » (${chat.result?.type ?? 'chat'})`, botUsername: username };
     } catch (err) {
-      return { ok: false, detail: `api.telegram.org injoignable : ${this.redact(String((err as Error)?.message ?? err)).slice(0, 160)}` };
+      return { ok: false, retryable: true, detail: `api.telegram.org injoignable : ${this.redact(String((err as Error)?.message ?? err)).slice(0, 160)}` };
     }
   }
 

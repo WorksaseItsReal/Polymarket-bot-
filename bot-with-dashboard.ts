@@ -1091,10 +1091,29 @@ async function setupTelegram() {
   const check = await client.check();
   if (!check.ok) {
     log('ERROR', `📵 Telegram NON connecté : ${check.detail}. Le bot continue sans notifications.`);
+    if (check.retryable) {
+      // Panne passagère au démarrage : on réessaie toutes les 5 min au lieu de rester
+      // muet toute la session.
+      const retry = setInterval(async () => {
+        const again = await client.check();
+        if (again.ok) {
+          clearInterval(retry);
+          activateTelegram(client, again.detail);
+        } else if (!again.retryable) {
+          clearInterval(retry);
+          log('ERROR', `📵 Telegram : ${again.detail}`);
+        }
+      }, 5 * 60_000);
+      retry.unref?.();
+    }
     return;
   }
+  activateTelegram(client, check.detail);
+}
+
+function activateTelegram(client: TelegramClient, detail: string) {
   telegram = client;
-  log('INFO', `📨 Telegram ${check.detail}`);
+  log('INFO', `📨 Telegram ${detail}`);
   notify(msgStartup({
     capital: CONFIG.capital.totalUsd, minEdge: FV_CFG.minEdge, minProb: FV_CFG.minProb, feeRate: FV_CFG.takerFeeRate,
     pollSec: FV_POLL_MS / 1000, coins: [...FV_COINS], stats: ledgerStats(),
