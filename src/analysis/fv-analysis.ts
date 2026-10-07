@@ -16,7 +16,7 @@
  * Fonctions PURES.
  */
 
-import { effectiveCostPerShare } from '../services/fair-value.js';
+import { effectiveCostPerShare, normCdf, normInv } from '../services/fair-value.js';
 import type { DecisionRecord } from '../services/decision-journal.js';
 
 export interface ResolvedRecord extends DecisionRecord {
@@ -143,4 +143,56 @@ export function halves(rounds: ResolvedRecord[][]): [ResolvedRecord[][], Resolve
   const sorted = [...rounds].sort((a, b) => a[0].t - b[0].t);
   const mid = Math.floor(sorted.length / 2);
   return [sorted.slice(0, mid), sorted.slice(mid)];
+}
+
+export interface ZScaleFit {
+  /** Nombre de rounds utilisés (une évaluation par round). */
+  n: number;
+  /** Multiplicateur optimal à appliquer au z ENREGISTRÉ. */
+  m: number;
+  /** Intervalle de confiance 95 % (rapport de vraisemblance). */
+  lo: number;
+  hi: number;
+}
+
+/**
+ * Calibration à un paramètre : trouve m maximisant la vraisemblance de P(Up) = Φ(m·z),
+ * où z = Φ⁻¹(pUp enregistré). Une évaluation par round (la plus proche de τ = 150 s)
+ * pour ne pas compter plusieurs fois le même résultat. m < 1 : modèle sur-confiant.
+ * Le réglage suggéré est FV_Z_SCALE(actuel) × m.
+ */
+export function fitZScale(rounds: ResolvedRecord[][], tauRef = 150): ZScaleFit | null {
+  const pts: Array<{ z: number; y: number }> = [];
+  for (const list of rounds) {
+    let best: ResolvedRecord | null = null;
+    for (const r of list) {
+      if (r.pUp === null) continue;
+      if (!best || Math.abs(r.tau - tauRef) < Math.abs(best.tau - tauRef)) best = r;
+    }
+    const z = best ? normInv(Math.min(0.999, Math.max(0.001, best.pUp as number))) : null;
+    if (best && z !== null) pts.push({ z, y: best.upWon ? 1 : 0 });
+  }
+  if (pts.length < 30) return null;
+  const ll = (m: number) => {
+    let s = 0;
+    for (const { z, y } of pts) {
+      const p = Math.min(1 - 1e-9, Math.max(1e-9, normCdf(m * z)));
+      s += y ? Math.log(p) : Math.log(1 - p);
+    }
+    return s;
+  };
+  // Recherche par grille fine sur [0,2 ; 3] (fonction concave en m : un seul maximum).
+  let m = 1;
+  let best = -Infinity;
+  for (let k = 0.2; k <= 3.0001; k += 0.005) {
+    const v = ll(k);
+    if (v > best) { best = v; m = k; }
+  }
+  const inside = (k: number) => 2 * (best - ll(k)) <= 3.84;
+  let lo = m;
+  while (lo > 0.2 && inside(lo - 0.005)) lo -= 0.005;
+  let hi = m;
+  while (hi < 3 && inside(hi + 0.005)) hi += 0.005;
+  const r3 = (x: number) => Math.round(x * 1000) / 1000;
+  return { n: pts.length, m: r3(m), lo: r3(lo), hi: r3(hi) };
 }

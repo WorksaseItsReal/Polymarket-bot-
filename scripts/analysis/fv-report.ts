@@ -18,7 +18,7 @@ import type { DecisionRecord } from '../../src/services/decision-journal.js';
 import { fetchRoundOutcome } from '../../src/services/paper-ledger.js';
 import { fairValueConfigFromEnv } from '../../src/services/fair-value.js';
 import {
-  brier, byRound, calibration, halves, marketProbUp, replay, thresholdGrid, type ResolvedRecord,
+  brier, byRound, calibration, fitZScale, halves, marketProbUp, replay, thresholdGrid, type ResolvedRecord,
 } from '../../src/analysis/fv-analysis.js';
 
 function arg(name: string): string | undefined {
@@ -104,6 +104,17 @@ async function main() {
   console.log('   tranche     n      p moyen   Up réel');
   for (const b of calibration(resolved, r => r.pUp)) {
     console.log(`   ${b.lo.toFixed(1)}-${b.hi.toFixed(1)}  ${String(b.n).padStart(6)}   ${pct(b.meanP)}   ${pct(b.freqUp)}`);
+  }
+
+  // 2b. Réglage de calibration suggéré
+  const fit = fitZScale(rounds);
+  if (fit) {
+    const suggested = Math.round(cfg.zScale * fit.m * 100) / 100;
+    const ok = fit.lo <= 1 && fit.hi >= 1;
+    console.log(`\n2b) Calibration (un paramètre, ${fit.n} rounds) : multiplicateur optimal ${fit.m} (IC95 ${fit.lo}–${fit.hi})`);
+    console.log(ok
+      ? `   → compatible avec le réglage actuel (FV_Z_SCALE=${cfg.zScale}) : rien à changer.`
+      : `   → le modèle est ${fit.m < 1 ? 'SUR-confiant' : 'SOUS-confiant'} : essayer FV_Z_SCALE=${suggested} (actuel ${cfg.zScale}), puis re-mesurer.`);
   }
 
   // 3. Seuils

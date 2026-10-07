@@ -144,6 +144,7 @@ Variables (nom → rôle) :
 | `FV_BASIS_BPS` | `2` | Écart de flux Binance/Coinbase vs Chainlink (bps), ajouté à l'incertitude. |
 | `FV_STRIKE_NOISE_SEC` | `10` | Incertitude du strike (open de bougie 1 min ≠ point Chainlink), en secondes de variance. |
 | `FV_TWAP_WINDOW_SEC` | `0` | Résolution ponctuelle (règle officielle : prix Chainlink à la fin vs au début). |
+| `FV_Z_SCALE` | `1` | Calibration à un paramètre de la confiance du modèle (< 1 : moins confiant). **Ne le changer que sur la suggestion du rapport** (`fv-report.ts`, section 2b, avec intervalle de confiance). |
 | `FV_TAILS` | `normal` | Loi des rendements. `t4` est **plus** confiante pour \|z\| < 2 (pas plus prudente). |
 | `FV_POLL_SEC` | `10` | Période de scrutation de fond (bornée à [5 ; 300] s). |
 | `FV_FILL_DELAY_MS` | `1000` | Latence d'exécution simulée : le carnet est relu après ce délai et le pari n'est « exécuté » que si l'avantage existe encore (papier plus réaliste). |

@@ -175,3 +175,35 @@ test('deriveRoundData : sans flux temps réel, une bougie de plus de 65 s n\'est
   assert.equal(deriveRoundData(candles, slot, lastOpen + 90_000, 't'), null, 'bougie précédente : spot périmé');
   assert.ok(deriveRoundData(candles, slot, lastOpen + 90_000, 't', 120_000), 'avec flux temps réel : bougie = strike/vol seulement');
 });
+
+test('normInv : inverse de normCdf ; FV_Z_SCALE agit sur la confiance du modèle', async () => {
+  const { normInv } = await import('../src/services/fair-value.ts');
+  for (const p of [0.001, 0.02, 0.3, 0.5, 0.77, 0.99]) close(normCdf(normInv(p)!), p, 1e-6);
+  assert.equal(normInv(0), null);
+  assert.equal(normInv(1), null);
+  const base = { spot: 100.05, strike: 100, sigmaPerSqrtSec: SIGMA, tauSec: 120 };
+  const p1 = probUp(base)!;
+  const pLess = probUp(base, { ...CFG, zScale: 0.5 })!;
+  const pMore = probUp(base, { ...CFG, zScale: 1.5 })!;
+  assert.ok(pLess < p1 && p1 < pMore && pLess > 0.5);
+  assert.equal(fairValueConfigFromEnv({ FV_Z_SCALE: '0.8' }).zScale, 0.8);
+  assert.equal(fairValueConfigFromEnv({ FV_Z_SCALE: '9' }).zScale, 1, 'hors bornes → défaut');
+});
+
+test('fitZScale : retrouve la sur-confiance d\'un modèle simulé', async () => {
+  const { fitZScale, byRound } = await import('../src/analysis/fv-analysis.ts');
+  let seed = 7;
+  const rnd = () => ((seed = (seed * 1103515245 + 12345) % 2 ** 31) / 2 ** 31);
+  const gauss = () => Math.sqrt(-2 * Math.log(rnd() + 1e-12)) * Math.cos(2 * Math.PI * rnd());
+  const recs = [];
+  for (let i = 0; i < 3000; i++) {
+    const z = 1.2 * gauss();
+    const upWon = rnd() < normCdf(0.7 * z); // la vérité est moins tranchée que le modèle
+    recs.push({ t: i, slug: `s${i}`, coin: 'BTC', tau: 150, spot: 1, strike: 1, sig: 1, pUp: normCdf(z), upAsk: null, downAsk: null, upAskSz: null, downAskSz: null, src: 't', act: 'hold' as const, upWon });
+  }
+  const fit = fitZScale(byRound(recs))!;
+  assert.equal(fit.n, 3000);
+  assert.ok(fit.lo <= 0.7 && fit.hi >= 0.7, `IC ${fit.lo}–${fit.hi} contient 0,7`);
+  assert.ok(fit.hi < 1, 'sur-confiance détectée');
+  assert.equal(fitZScale(byRound(recs.slice(0, 10))), null, 'trop peu de rounds');
+});
