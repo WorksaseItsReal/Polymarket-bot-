@@ -18,7 +18,7 @@
  * Écriture atomique (fichier temporaire + rename) ; fichier illisible → jamais écrasé.
  */
 
-import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, statSync, writeSync } from 'node:fs';
+import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 
 export type LedgerSide = 'UP' | 'DOWN';
@@ -50,6 +50,9 @@ export interface LedgerTrade {
   /** Token acheté (sortie anticipée) et début du round (s epoch). */
   tokenId?: string;
   slotSec?: number;
+  /** Issue réelle du round (« Up » a gagné ?), connue même pour une position revendue :
+   *  sert à la calibration, qui ne doit pas dépendre de la règle de vente. */
+  outcomeUpWon?: boolean;
 }
 
 export interface LedgerFile {
@@ -110,7 +113,9 @@ export function saveLedger(path: string, trades: LedgerTrade[]): void {
   // vide ou tronqué (le renommage est atomique, le contenu est déjà sur disque).
   const fd = openSync(tmp, 'w');
   try {
-    writeSync(fd, JSON.stringify(body, null, 2));
+    // writeFileSync sur un descripteur boucle jusqu'à tout écrire (writeSync seul peut
+    // écrire partiellement, ex. disque plein → JSON tronqué renommé sur le bon registre).
+    writeFileSync(fd, JSON.stringify(body, null, 2));
     fsyncSync(fd);
   } finally {
     closeSync(fd);
@@ -141,11 +146,12 @@ export interface LedgerStats {
   open: number;
   winRate: number | null;
   pnl: number;
-  /** Rounds TENUS jusqu'au bout (gagnés/perdus, hors reventes) : seuls comparables à la
-   *  probabilité annoncée par le modèle (une revente n'est ni un succès ni un échec du modèle). */
-  heldN: number;
-  heldWinRate: number | null;
-  /** Probabilité modèle moyenne des rounds tenus = win rate attendu si le modèle est calibré. */
+  /** Calibration : trades dont l'issue du ROUND est connue (gagnés, perdus, et reventes
+   *  dont le round a été réglé ensuite). « Réussite » = le côté choisi a gagné le round,
+   *  indépendamment d'une éventuelle revente (sinon la règle de vente biaise la mesure). */
+  calibN: number;
+  calibWinRate: number | null;
+  /** Probabilité modèle moyenne de ces trades = réussite attendue si le modèle est calibré. */
   avgModelProb: number | null;
   /** t-statistique du PnL par trade (null si n < 2 ou variance nulle). */
   tStat: number | null;
@@ -181,7 +187,14 @@ export function computeStats(trades: readonly LedgerTrade[]): LedgerStats {
 
   let lossStreak = 0;
   for (let i = pnls.length - 1; i >= 0 && pnls[i] < 0; i--) lossStreak++;
-  const held = resolved.filter(t => t.status === 'won' || t.status === 'lost');
+  // Côté gagnant connu ? (won/lost : par définition ; reventes : si l'issue a été relevée)
+  const sideWon = (t: LedgerTrade): boolean | null => {
+    if (t.status === 'won') return true;
+    if (t.status === 'lost') return false;
+    if (typeof t.outcomeUpWon === 'boolean') return t.outcomeUpWon === (t.side === 'UP');
+    return null;
+  };
+  const calib = resolved.filter(t => sideWon(t) !== null);
 
   let cum = 0;
   let peak = 0;
@@ -199,9 +212,9 @@ export function computeStats(trades: readonly LedgerTrade[]): LedgerStats {
     open: open.length,
     winRate: n ? wins / n : null,
     pnl,
-    heldN: held.length,
-    heldWinRate: held.length ? held.filter(t => t.status === 'won').length / held.length : null,
-    avgModelProb: held.length ? held.reduce((s, t) => s + t.modelProb, 0) / held.length : null,
+    calibN: calib.length,
+    calibWinRate: calib.length ? calib.filter(t => sideWon(t) === true).length / calib.length : null,
+    avgModelProb: calib.length ? calib.reduce((s, t) => s + t.modelProb, 0) / calib.length : null,
     tStat,
     lossStreak,
     openExposure: open.reduce((s, t) => s + t.stake, 0),

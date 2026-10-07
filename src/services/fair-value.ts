@@ -247,8 +247,27 @@ export interface FillEstimate {
   spent: number;
   /** Prix moyen pondéré (VWAP) ; null si rien d'exécutable. */
   avgPrice: number | null;
+  /** Coût moyen EXACT par part, frais taker inclus niveau par niveau (si feeRate fourni). */
+  avgCost: number | null;
   /** true si le carnet couvre entièrement le budget. */
   complete: boolean;
+}
+
+/**
+ * Prix d'achat maximal tel que `prob − (p + frais(p)) ≥ minEdge`. C'est la LIMITE d'un
+ * ordre envoyé au moment de la décision : en réel, l'ordre ne peut pas tenir compte d'un
+ * mouvement du spot survenu pendant son trajet. f(p) = p + r·p(1−p) est croissante sur
+ * [0,1] (r < 1) ; on résout r·p² − (1+r)·p + c = 0 (petite racine), c = prob − minEdge.
+ * null si aucun prix ne convient.
+ */
+export function maxBuyPriceForEdge(prob: number, minEdge: number, rate: number): number | null {
+  const c = prob - minEdge;
+  if (!(c > 0)) return null;
+  if (!(rate > 0)) return Math.min(c, 1);
+  const disc = (1 + rate) ** 2 - 4 * rate * c;
+  if (disc < 0) return null;
+  const p = ((1 + rate) - Math.sqrt(disc)) / (2 * rate);
+  return p > 0 ? Math.min(p, 1) : null;
 }
 
 /**
@@ -257,7 +276,7 @@ export interface FillEstimate {
  * ignorés. Le carnet est trié localement : l'API renvoie les asks du plus cher au
  * moins cher (COSTS.md §1.2).
  */
-export function estimateFill(asks: BookLevel[], budget: number, limitPrice = 1): FillEstimate {
+export function estimateFill(asks: BookLevel[], budget: number, limitPrice = 1, feeRate?: number): FillEstimate {
   const levels = (Array.isArray(asks) ? asks : [])
     .filter(l => isPos(l?.price) && isPos(l?.size) && l.price < 1 && l.price <= limitPrice)
     .slice()
@@ -265,24 +284,21 @@ export function estimateFill(asks: BookLevel[], budget: number, limitPrice = 1):
   let remaining = isPos(budget) ? budget : 0;
   let shares = 0;
   let spent = 0;
+  let fees = 0;
   for (const l of levels) {
     if (remaining <= 1e-12) break;
     const cost = l.price * l.size;
-    if (cost <= remaining) {
-      shares += l.size;
-      spent += cost;
-      remaining -= cost;
-    } else {
-      const s = remaining / l.price;
-      shares += s;
-      spent += remaining;
-      remaining = 0;
-    }
+    const q = cost <= remaining ? l.size : remaining / l.price;
+    shares += q;
+    spent += q * l.price;
+    if (feeRate !== undefined) fees += q * takerFeePerShare(l.price, feeRate);
+    remaining = cost <= remaining ? remaining - cost : 0;
   }
   return {
     shares,
     spent,
     avgPrice: shares > 0 ? spent / shares : null,
+    avgCost: shares > 0 && feeRate !== undefined ? (spent + fees) / shares : null,
     complete: isPos(budget) && remaining <= 1e-9,
   };
 }
@@ -303,9 +319,12 @@ export interface SellEstimate {
  * plus bas. Les frais sont calculés niveau par niveau (exact, pas d'approximation au prix
  * moyen). Les niveaux invalides sont ignorés.
  */
-export function estimateSell(bids: BookLevel[], shares: number, feeRate: number): SellEstimate {
+export function estimateSell(bids: BookLevel[], shares: number, feeRate: number, minNetPerShare = 0): SellEstimate {
+  // `minNetPerShare` = prix plancher NET de frais d'un ordre de vente limité, fixé à la
+  // décision : les bids en dessous ne sont pas touchés.
   const levels = (Array.isArray(bids) ? bids : [])
-    .filter(l => isPos(l?.price) && isPos(l?.size) && l.price < 1)
+    .filter(l => isPos(l?.price) && isPos(l?.size) && l.price < 1
+      && l.price - takerFeePerShare(l.price, feeRate) >= minNetPerShare - 1e-12)
     .slice()
     .sort((a, b) => b.price - a.price);
   let remaining = isPos(shares) ? shares : 0;

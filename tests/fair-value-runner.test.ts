@@ -407,3 +407,90 @@ test('registre réparé en cours de route : un round déjà présent n\'est jama
   assert.equal(env.messages.filter(m => /NOUVEAU PARI/.test(m)).length, 0);
   assert.ok(env.messages.length - before <= 1, 'au plus l\'alerte registre illisible');
 });
+
+test('pas de biais d\'anticipation : le spot qui bouge pendant la latence ne change pas la décision', async () => {
+  let call = 0;
+  // Après la décision, le spot repasse SOUS le strike (le pari devient mauvais) : un vrai
+  // ordre, déjà parti, est quand même exécuté si le carnet est toujours sous la limite.
+  const env = setup({
+    fillDelayMs: 1000,
+    sleep: async () => undefined,
+    getRoundData: async () => ({ spot: call++ === 0 ? 100.12 : 99.9, strike: 100, sigmaPerSqrtSec: SIGMA, source: 'test', candleAgeMs: 0 }),
+  });
+  await env.runner().tick();
+  const t = loadLedger(env.ledgerPath)!;
+  assert.equal(t.length, 1, 'exécuté malgré le mouvement défavorable (pas de tri a posteriori)');
+  assert.ok(Math.abs(t[0].modelProb - probUp({ spot: 100.12, strike: 100, sigmaPerSqrtSec: SIGMA, tauSec: 120 })!) < 1e-12, 'probabilité de la décision');
+  assert.equal(call, 1, 'le modèle n\'est pas réévalué après la latence');
+});
+
+test('ordre limite : si le carnet remonte au-dessus de la limite pendant la latence, pas d\'exécution', async () => {
+  const p = probUp({ spot: 100.12, strike: 100, sigmaPerSqrtSec: SIGMA, tauSec: 120 })!;
+  const { maxBuyPriceForEdge } = await import('../src/services/fair-value.ts');
+  const lim = maxBuyPriceForEdge(p, 0.04, 0.07)!;
+  let reads = 0;
+  const env = setup({
+    fillDelayMs: 1000, sleep: async () => undefined,
+    getBook: async id => (id === 'UP'
+      ? { asks: [{ price: reads++ === 0 ? 0.6 : Math.ceil((lim + 0.01) * 100) / 100, size: 100 }], bids: [] }
+      : { asks: [{ price: 0.41, size: 100 }], bids: [] }),
+  });
+  await env.runner().tick();
+  assert.equal(loadLedger(env.ledgerPath)!.length, 0);
+});
+
+test('tick sur mouvement : passage complet forcé si le tick de fond est affamé', async () => {
+  let fetches = 0;
+  const env = setup({ fullPassEveryMs: 15_000, fetchOutcome: async () => { fetches++; return { resolved: true, upWon: true }; } });
+  const r = env.runner();
+  await r.tick(); // passage complet à SLOT+180
+  env.setNow((SLOT + 190) * 1000);
+  await r.tick(['BTC']);
+  assert.equal(fetches, 0, 'passage complet récent : tick sur mouvement léger');
+  env.setNow((SLOT + 330) * 1000);
+  await r.tick(['BTC']);
+  assert.equal(fetches, 1, 'dernier passage complet trop ancien : règlement fait');
+  assert.equal(loadLedger(env.ledgerPath)![0].status, 'won');
+  assert.equal(r.lastFullPassAt, (SLOT + 330) * 1000);
+});
+
+test('revente : issue du round relevée ensuite (calibration) ; petite position jamais revendue', async () => {
+  const env = setup({ minSellShares: 0 });
+  const r = env.runner();
+  await r.tick();
+  env.deps.getRoundData = async () => ({ spot: 100, strike: 100, sigmaPerSqrtSec: SIGMA, source: 'test', candleAgeMs: 0 });
+  env.deps.getBook = async () => ({ asks: [], bids: [{ price: 0.8, size: 1000 }] });
+  env.setNow((SLOT + 200) * 1000);
+  await r.tick();
+  assert.equal(loadLedger(env.ledgerPath)![0].status, 'sold');
+  env.setOutcome({ resolved: true, upWon: false });
+  env.setNow((SLOT + 330) * 1000);
+  await r.tick();
+  const t = loadLedger(env.ledgerPath)![0];
+  assert.equal(t.outcomeUpWon, false, 'issue relevée');
+  assert.equal(t.status, 'sold', 'le PnL de la revente ne change pas');
+
+  const small = setup({ minSellShares: 5 });
+  const r2 = small.runner();
+  await r2.tick();
+  small.deps.getRoundData = async () => ({ spot: 100, strike: 100, sigmaPerSqrtSec: SIGMA, source: 'test', candleAgeMs: 0 });
+  small.deps.getBook = async () => ({ asks: [], bids: [{ price: 0.8, size: 1000 }] });
+  small.setNow((SLOT + 200) * 1000);
+  await r2.tick();
+  assert.equal(loadLedger(small.ledgerPath)![0].status, 'open', '< 5 parts : gardé jusqu\'au règlement');
+});
+
+test('minimum d\'ordre : alerte seulement si la cause est le capital, pas un plafond temporaire', async () => {
+  const { saveLedger } = await import('../src/services/paper-ledger.ts');
+  const below: number[] = [];
+  // Capital 200 $ (1 % = 2 $) mais exposition presque pleine (19 $ ouverts sur 20 $) → mise 1 $ max... sous 1,5 $
+  const env = setup({ capital: () => 200, minOrderUsd: 1.5, onBelowMinOrder: s => below.push(s) });
+  saveLedger(env.ledgerPath, [{
+    id: 'busy', slug: `eth-updown-5m-${SLOT}`, coin: 'ETH', side: 'UP', stake: 19, costPerShare: 0.6, shares: 31, modelProb: 0.7, edge: 0.1,
+    openedAt: new Date((SLOT + 100) * 1000).toISOString(), endMs: (SLOT + 300) * 1000, status: 'open', pnl: null,
+  }]);
+  await env.runner().tick();
+  assert.equal(loadLedger(env.ledgerPath)!.length, 1, 'pas de nouveau pari');
+  assert.equal(below.length, 0, 'cause temporaire (exposition) : pas d\'alerte « monter le capital »');
+  assert.ok(env.logs.some(l => /plafond temporaire/.test(l)));
+});

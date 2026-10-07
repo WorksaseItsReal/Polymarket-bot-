@@ -20,6 +20,7 @@ import {
   OnchainService,
 } from './src/index.js';
 import { CTFClient, isDryRunMode } from './src/clients/ctf-client.js';
+import { MIN_ORDER_SIZE_SHARES } from './src/services/trading-service.js';
 import { startDashboard, dashboardEmitter } from './src/dashboard/index.js';
 import type { BotState, BotConfig, LogLevel, DipArbSignal, SmartMoneySignal } from './src/dashboard/types.js';
 import { addSession, createSessionFromState, type TradeRecord } from './src/dashboard/session-history.js';
@@ -903,7 +904,6 @@ const FV_MOVE_BPS = Math.min(50, Math.max(1, Number(process.env.FV_MOVE_BPS ?? '
 let spotStream: SpotStream | null = null;
 /** Coins tradés (FV_COINS=BTC,ETH… ; défaut : les 5). */
 const FV_COINS = coinsFromEnv(process.env.FV_COINS);
-/** Latence d'exécution simulée (ms) : le carnet est relu après ce délai avant de « remplir ». */
 /** Achat au marché minimal accepté par Polymarket (USDC). 0 = ne pas contrôler (non réaliste). */
 const FV_MIN_ORDER_USD = (() => {
   const raw = (process.env.FV_MIN_ORDER_USD ?? '').trim();
@@ -912,12 +912,17 @@ const FV_MIN_ORDER_USD = (() => {
 })();
 /** Au-delà de ce décalage d'horloge (ms), τ est trop faux : nouvelles entrées bloquées. */
 const MAX_CLOCK_SKEW_BLOCK_MS = 5000;
-/** Le plafond de mise (1 % du capital) passe-t-il le minimum d'ordre Polymarket ? */
+/** Le plafond de mise (1 % du capital) passe-t-il le minimum d'ordre Polymarket, avec marge ? */
 function capitalWarning(): string | null {
   const maxStake = CONFIG.capital.totalUsd * MAX_VARIANCE_PCT;
-  return FV_MIN_ORDER_USD > 0 && maxStake < FV_MIN_ORDER_USD
-    ? `capital papier ${CONFIG.capital.totalUsd} $ : mise max ${maxStake.toFixed(2)} $ (1 %) < minimum Polymarket ${FV_MIN_ORDER_USD} $ — aucun pari ne sera pris. Monter PAPER_CAPITAL (≥ 250 $ recommandé).`
-    : null;
+  if (!(FV_MIN_ORDER_USD > 0)) return null;
+  if (maxStake < FV_MIN_ORDER_USD) {
+    return `capital papier ${CONFIG.capital.totalUsd} $ : mise max ${maxStake.toFixed(2)} $ (1 %) < minimum Polymarket ${FV_MIN_ORDER_USD} $ — aucun pari ne sera pris. Monter PAPER_CAPITAL (≥ 250 $ recommandé).`;
+  }
+  if (maxStake < 2 * FV_MIN_ORDER_USD) {
+    return `capital papier ${CONFIG.capital.totalUsd} $ : mise max ${maxStake.toFixed(2)} $, à peine au-dessus du minimum Polymarket ${FV_MIN_ORDER_USD} $ — la moindre perte (ou réduction après drawdown) bloquera les paris. 250 $ recommandé.`;
+  }
+  return null;
 }
 function clockBlock(): string | null {
   const skew = spotStream?.clockSkewMs() ?? null;
@@ -925,6 +930,7 @@ function clockBlock(): string | null {
     ? `horloge du serveur décalée de ${(skew / 1000).toFixed(1)} s (synchroniser NTP)`
     : null;
 }
+/** Latence d'exécution simulée (ms) : le carnet est relu après ce délai avant de « remplir ». */
 const FV_FILL_DELAY_MS = (() => {
   const v = Number(process.env.FV_FILL_DELAY_MS ?? '');
   return (process.env.FV_FILL_DELAY_MS ?? '').trim() !== '' && Number.isFinite(v) && v >= 0 && v <= 10_000 ? v : 1000;
@@ -1250,6 +1256,8 @@ async function setupFairValueStrategy(sdk: PolymarketSDK) {
     coins: FV_COINS,
     fillDelayMs: FV_FILL_DELAY_MS,
     minOrderUsd: FV_MIN_ORDER_USD,
+    minSellShares: MIN_ORDER_SIZE_SHARES,
+    fullPassEveryMs: Math.round(FV_POLL_MS * 1.5),
     onBelowMinOrder: (stake, min) => alertOnce('min-order', `mise calculée ${stake.toFixed(2)} $ < minimum Polymarket ${min} $ : aucun pari possible avec ce capital papier — monter PAPER_CAPITAL (≥ 250 $ recommandé)`),
     // Délai garanti : le client CLOB n'en a aucun, une réponse bloquée figeait la boucle.
     getBook: tokenId => withTimeout(sdk.markets.getTokenOrderbook(tokenId), 8000, 'carnet CLOB'),
@@ -1306,9 +1314,10 @@ async function setupFairValueStrategy(sdk: PolymarketSDK) {
   // voir, pas se découvrir des heures plus tard.
   setInterval(() => {
     if (!(CONFIG.dryRun && state.paper)) return;
-    const idleMin = (Date.now() - runner.lastTickEndedAt) / 60_000;
-    if (runner.lastTickEndedAt && idleMin > 3) {
-      log('ERROR', `🐕 Chien de garde : aucun passage de la stratégie terminé depuis ${idleMin.toFixed(1)} min`);
+    // Passage COMPLET (règlements + sorties) : les ticks sur mouvement ne le remplacent pas.
+    const idleMin = (Date.now() - runner.lastFullPassAt) / 60_000;
+    if (runner.lastFullPassAt && idleMin > 3) {
+      log('ERROR', `🐕 Chien de garde : aucun passage complet de la stratégie depuis ${idleMin.toFixed(1)} min`);
       alertOnce('watchdog-stuck', `la stratégie semble bloquée (aucun passage terminé depuis ${idleMin.toFixed(0)} min) — redémarrer le bot (pm2 restart)`);
     }
     const noMarketsMin = (Date.now() - (runner.lastMarketsFoundAt || startedAt)) / 60_000;

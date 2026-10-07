@@ -133,15 +133,16 @@ test('lecture en cache : relue seulement si le fichier change ; la copie modifia
   assert.equal(readLedgerShared(path)!.length, 0, 'modification externe détectée');
 });
 
-test('calibration : seuls les rounds tenus comptent ; outcomes illisibles → non réglé (jamais par position)', () => {
+test('calibration : issue du round (revente comprise si connue) ; outcomes illisibles → non réglé', () => {
   const st = computeStats([
     trade({ status: 'won', pnl: 0.6, resolvedAt: '2026-10-07T10:01:00Z', modelProb: 0.8 }),
-    trade({ status: 'sold', pnl: -0.2, resolvedAt: '2026-10-07T10:02:00Z', modelProb: 0.6 }),
+    trade({ status: 'sold', pnl: -0.2, resolvedAt: '2026-10-07T10:02:00Z', modelProb: 0.6 }), // issue inconnue
+    trade({ status: 'sold', pnl: -0.1, resolvedAt: '2026-10-07T10:03:00Z', modelProb: 0.7, side: 'UP', outcomeUpWon: true }),
   ]);
-  assert.equal(st.heldN, 1);
-  assert.equal(st.heldWinRate, 1);
-  assert.equal(st.avgModelProb, 0.8, 'la revente n\'entre pas dans la probabilité attendue');
-  assert.equal(st.winRate, 0.5, 'le taux de réussite global inclut la revente');
+  assert.equal(st.calibN, 2, 'revente sans issue connue exclue');
+  assert.equal(st.calibWinRate, 1, 'revente à perte mais côté gagnant au round : succès du modèle');
+  assert.equal(st.avgModelProb, 0.75);
+  assert.ok(Math.abs(st.winRate! - 1 / 3) < 1e-12, 'le taux de réussite PnL compte la revente à perte');
   const ev = [{ slug: SLUG, markets: [{ closed: true, outcomes: 'pas du json', outcomePrices: '["1","0"]' }] }];
   assert.equal(parseGammaEvent(ev, SLUG).resolved, false);
 });

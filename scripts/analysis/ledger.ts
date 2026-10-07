@@ -26,7 +26,7 @@ if (trades === null) {
 const st = computeStats(trades);
 const pct = (x: number | null) => (x === null ? '—' : `${(x * 100).toFixed(1)} %`);
 console.log(`Trades réglés : ${st.n} (${st.wins} gagnés / ${st.losses} perdus) · en cours : ${st.open}`);
-console.log(`Taux de réussite : ${pct(st.winRate)} · rounds tenus jusqu'au bout : ${pct(st.heldWinRate)} pour ${pct(st.avgModelProb)} annoncés par le modèle (n=${st.heldN})`);
+console.log(`Taux de réussite : ${pct(st.winRate)} · côté choisi gagnant à l'issue du round : ${pct(st.calibWinRate)} pour ${pct(st.avgModelProb)} annoncés par le modèle (n=${st.calibN})`);
 console.log(`PnL : ${st.pnl >= 0 ? '+' : ''}${st.pnl.toFixed(2)} $ · pire baisse : ${st.maxDrawdown.toFixed(2)} $ · série de pertes : ${st.lossStreak}`);
 console.log(`Fiabilité : ${reliability(st)}`);
 const shPath = join(POLY, 'fv-shadow.json');

@@ -184,3 +184,25 @@ test('données de round : le prix temps réel est relu APRÈS le chargement des 
     clearRoundDataCache();
   }
 });
+
+test('données de round : flux décroché pendant le chargement → exigences du mode REST', async () => {
+  const slot = 1_790_000_100;
+  const now = (slot + 150) * 1000;
+  const lastOpen = Math.floor(now / 60_000) * 60_000;
+  // Dernière bougie = minute PRÉCÉDENTE (90 s) : acceptable pour strike/vol, pas comme spot.
+  const klines = Array.from({ length: 61 }, (_, i) => {
+    const t = lastOpen - 60_000 - (60 - i) * 60_000;
+    return [t, '100', '101', '99', String(100 * Math.exp(((i % 2) ? 1 : -1) * 0.0005)), '1', t + 59_999];
+  });
+  const original = globalThis.fetch;
+  let live: { price: number; ageMs: number; source: string } | null = { price: 100.1, ageMs: 100, source: 'binance-ws' };
+  globalThis.fetch = (async () => { live = null; return new Response(JSON.stringify(klines)); }) as typeof fetch;
+  try {
+    clearRoundDataCache();
+    const d = await getRoundMarketData('BTC', slot, now + 30_000, () => live);
+    assert.equal(d, null, 'sans flux, une bougie de > 65 s n\'est pas un spot');
+  } finally {
+    globalThis.fetch = original;
+    clearRoundDataCache();
+  }
+});

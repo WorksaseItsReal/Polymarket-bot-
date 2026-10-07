@@ -228,7 +228,7 @@ test('messages de résultat, bilan, démarrage et alerte', () => {
   const sum = msgSummary(st, 50);
   noJunk(sum);
   assert.match(sum, /Trades terminés : 4 \(3 ✅ \/ 1 ❌\) · en cours : 1/);
-  assert.match(sum, /Taux de réussite : 75 % · rounds tenus jusqu'au bout : 75 % pour 68 % annoncés par le modèle/);
+  assert.match(sum, /Taux de réussite : 75 % · côté choisi gagnant à l'issue du round : 75 % pour 68 % annoncés par le modèle/);
   assert.match(sum, /capital : 50,80 \$/);
   assert.match(sum, /trop tôt pour conclure/);
 

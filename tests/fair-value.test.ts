@@ -221,3 +221,19 @@ test('estimateSell : bids du plus haut au plus bas, frais exacts par niveau, ven
   assert.equal(partial.complete, false);
   assert.equal(estimateSell([], 1, 0.07).avgPrice, null);
 });
+
+test('prix limite d\'achat : l\'edge minimal est exactement garanti, frais inclus', async () => {
+  const { maxBuyPriceForEdge, estimateFill, estimateSell, takerFeePerShare } = await import('../src/services/fair-value.ts');
+  const lim = maxBuyPriceForEdge(0.8, 0.04, 0.07)!;
+  close(0.8 - effectiveCostPerShare(lim, 0.07), 0.04, 1e-12);
+  assert.equal(maxBuyPriceForEdge(0.03, 0.04, 0.07), null, 'aucun prix possible');
+  close(maxBuyPriceForEdge(0.8, 0.04, 0)!, 0.76, 1e-12);
+  // coût exact niveau par niveau
+  const f = estimateFill([{ price: 0.6, size: 1 }, { price: 0.7, size: 10 }], 1.3, 1, 0.07);
+  const exact = (0.6 + takerFeePerShare(0.6, 0.07) + 1 * (0.7 + takerFeePerShare(0.7, 0.07))) / 2;
+  close(f.avgCost!, exact, 1e-12);
+  assert.equal(estimateFill([{ price: 0.6, size: 1 }], 0.6).avgCost, null, 'sans taux : pas de coût frais inclus');
+  // vente : plancher net
+  const s = estimateSell([{ price: 0.8, size: 1 }, { price: 0.5, size: 10 }], 2, 0.07, 0.7);
+  assert.equal(s.complete, false, 'le bid à 0,50 est sous le plancher');
+});

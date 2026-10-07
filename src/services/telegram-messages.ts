@@ -163,9 +163,9 @@ export function shadowLine(sh: ShadowStats): string {
 }
 
 export function msgSummary(stats: LedgerStats, capital: number, shadow?: ShadowStats): string {
-  const expected = stats.avgModelProb === null || stats.heldWinRate === null
+  const expected = stats.avgModelProb === null || stats.calibWinRate === null
     ? ''
-    : ` · rounds tenus jusqu'au bout : ${pct(stats.heldWinRate)} pour ${pct(stats.avgModelProb)} annoncés par le modèle`;
+    : ` · côté choisi gagnant à l'issue du round : ${pct(stats.calibWinRate)} pour ${pct(stats.avgModelProb)} annoncés par le modèle`;
   return [
     '📊 <b>BILAN</b> — stratégie juste valeur (papier)',
     `Trades terminés : ${stats.n} (${stats.wins} ✅ / ${stats.losses} ❌) · en cours : ${stats.open}`,

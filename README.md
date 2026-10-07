@@ -348,9 +348,13 @@ C'est des milliers de rounds par jour, au lieu de ~1 trade par heure.
 le PnL résolu inclut les frais. C'est ce qui permet de **mesurer la calibration** du modèle
 (`modelProb` moyen vs taux de réussite réel par tranche).
 
-**Latence simulée** : entre la décision et l'exécution, le bot attend `FV_FILL_DELAY_MS`
-(1 s) et relit le carnet ; il ne « remplit » que si l'avantage y est encore. Sans cela, le
-papier encaisserait des prix en retard qu'un bot plus rapide aurait déjà pris en réel.
+**Exécution simulée = ordre à prix limite** : à la décision, le bot fixe un prix limite qui
+garantit l'edge minimal **avec l'information de cet instant** ; l'ordre « arrive » après
+`FV_FILL_DELAY_MS` (1 s) et ne prend que les asks encore sous la limite (coût exact, frais
+niveau par niveau). Le modèle n'est **pas** réévalué après le délai : un vrai ordre ne voit pas
+le mouvement du spot pendant son trajet (le réévaluer trierait les trades a posteriori et
+flatterait le papier). Même logique pour les reventes (prix plancher net fixé à la décision ;
+reventes seulement à partir de 5 parts, minimum Polymarket).
 
 **Limites honnêtes** : le modèle n'a **pas** été validé sur historique (aucune donnée
 spot+carnet horodatée n'existe) ; le strike est approché (ouverture de la bougie 1 min

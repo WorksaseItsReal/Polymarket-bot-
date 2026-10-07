@@ -181,7 +181,18 @@ export async function getRoundMarketData(
   }
   if (!base) return null;
   live = readLive();
+  const assumedLive = useLive();
   liveOk = liveOk0(live);
+  if (assumedLive && !useLive()) {
+    // Le flux temps réel a décroché pendant le chargement : le spot sera la clôture de
+    // bougie → mêmes exigences qu'en mode REST (bougie de la minute en cours, cache court).
+    if (nowMs - (cache.get(coin)?.ts ?? 0) >= CACHE_MS) {
+      loaded = await fetchCandles(coin);
+      cache.set(coin, { ts: nowMs, value: loaded });
+      if (!loaded) return null;
+    }
+    return deriveRoundData(loaded.candles, slotSec, nowMs, loaded.source, MAX_CANDLE_AGE_SPOT_MS);
+  }
   if (liveOk && loaded.source.startsWith('binance')) {
     return { ...base, spot: (live as LivePrice).price, source: `${loaded.source}+ws` };
   }

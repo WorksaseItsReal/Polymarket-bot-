@@ -37,12 +37,13 @@ export function evaluateGuard(stats: LedgerStats, o: GuardOptions = {}): GuardVe
   if (stats.n >= minStop && stats.tStat !== null && stats.tStat <= tStop) {
     stop = `perte statistiquement significative : t = ${stats.tStat.toFixed(2)} sur ${stats.n} trades (PnL ${stats.pnl.toFixed(2)} $)`;
   }
-  // Calibration : rounds tenus jusqu'au bout uniquement (une revente ne dit rien du modèle).
-  if (stats.heldN >= minCal && stats.heldWinRate !== null && stats.avgModelProb !== null) {
+  // Calibration : le côté choisi a-t-il gagné le ROUND (revente ou non) aussi souvent
+  // que le modèle l'annonçait ?
+  if (stats.calibN >= minCal && stats.calibWinRate !== null && stats.avgModelProb !== null) {
     const p = stats.avgModelProb;
-    const se = Math.sqrt((p * (1 - p)) / stats.heldN);
-    if (stats.heldWinRate < p - 2 * se) {
-      warn = `modèle sur-confiant : ${(stats.heldWinRate * 100).toFixed(1)} % de réussite réelle pour ${(p * 100).toFixed(1)} % annoncés (${stats.heldN} rounds tenus)`;
+    const se = Math.sqrt((p * (1 - p)) / stats.calibN);
+    if (stats.calibWinRate < p - 2 * se) {
+      warn = `modèle sur-confiant : le côté choisi gagne ${(stats.calibWinRate * 100).toFixed(1)} % des rounds pour ${(p * 100).toFixed(1)} % annoncés (${stats.calibN} rounds)`;
     }
   }
   return { stop, warn };
