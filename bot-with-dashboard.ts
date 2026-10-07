@@ -1202,7 +1202,7 @@ async function setupFairValueStrategy(sdk: PolymarketSDK) {
     log('WARN', 'Stratégie juste valeur : exécution LIVE non implémentée — décisions journalisées, AUCUN ordre envoyé.');
   }
   const capWarn = capitalWarning();
-  if (capWarn) log('WARN', `⚠️ ${capWarn}`);
+  if (capWarn) log('WARN', capWarn);
   await setupTelegram();
 
   const discovery = new RoundDiscovery();
