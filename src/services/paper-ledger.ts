@@ -18,7 +18,7 @@
  * Écriture atomique (fichier temporaire + rename) ; fichier illisible → jamais écrasé.
  */
 
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 
 export type LedgerSide = 'UP' | 'DOWN';
@@ -61,15 +61,45 @@ export interface LedgerFile {
 // Fichier
 // ---------------------------------------------------------------------------
 
-/** [] si absent ; null si présent mais illisible (l'appelant ne doit alors rien écrire). */
-export function loadLedger(path: string): LedgerTrade[] | null {
-  if (!existsSync(path)) return [];
+// Le registre est lu plusieurs fois par évaluation (stats, risque, garde-fous) : on ne le
+// relit et ne le re-parse que s'il a changé (date de modification + taille).
+const memo = new Map<string, { mtimeMs: number; size: number; trades: LedgerTrade[] }>();
+
+/**
+ * Version PARTAGÉE (en cache) du registre : à ne JAMAIS modifier. [] si absent ; null si
+ * présent mais illisible.
+ */
+export function readLedgerShared(path: string): readonly LedgerTrade[] | null {
+  if (!existsSync(path)) {
+    memo.delete(path);
+    return [];
+  }
+  let st: { mtimeMs: number; size: number };
   try {
-    const data = JSON.parse(readFileSync(path, 'utf-8')) as Partial<LedgerFile>;
-    return Array.isArray(data?.trades) ? data.trades : null;
+    st = statSync(path);
   } catch {
     return null;
   }
+  const hit = memo.get(path);
+  if (hit && hit.mtimeMs === st.mtimeMs && hit.size === st.size) return hit.trades;
+  try {
+    const data = JSON.parse(readFileSync(path, 'utf-8')) as Partial<LedgerFile>;
+    if (!Array.isArray(data?.trades)) {
+      memo.delete(path);
+      return null;
+    }
+    memo.set(path, { mtimeMs: st.mtimeMs, size: st.size, trades: data.trades });
+    return data.trades;
+  } catch {
+    memo.delete(path);
+    return null;
+  }
+}
+
+/** Copie modifiable du registre. [] si absent ; null si illisible (ne rien écrire alors). */
+export function loadLedger(path: string): LedgerTrade[] | null {
+  const shared = readLedgerShared(path);
+  return shared === null ? null : structuredClone(shared as LedgerTrade[]);
 }
 
 export function saveLedger(path: string, trades: LedgerTrade[]): void {
@@ -78,6 +108,12 @@ export function saveLedger(path: string, trades: LedgerTrade[]): void {
   const body: LedgerFile = { version: 1, trades };
   writeFileSync(tmp, JSON.stringify(body, null, 2));
   renameSync(tmp, path);
+  try {
+    const st = statSync(path);
+    memo.set(path, { mtimeMs: st.mtimeMs, size: st.size, trades: structuredClone(trades) });
+  } catch {
+    memo.delete(path);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -113,7 +149,7 @@ export interface LedgerStats {
   peakPnl: number;
 }
 
-export function computeStats(trades: LedgerTrade[]): LedgerStats {
+export function computeStats(trades: readonly LedgerTrade[]): LedgerStats {
   const resolved = trades
     .filter(t => t.status !== 'open' && typeof t.pnl === 'number' && Number.isFinite(t.pnl))
     .sort((a, b) => (a.resolvedAt ?? a.openedAt).localeCompare(b.resolvedAt ?? b.openedAt));
@@ -166,7 +202,7 @@ export function computeStats(trades: LedgerTrade[]): LedgerStats {
  * résorber (il faut trader pour la casser) → arrêt définitif silencieux. Avec une
  * fenêtre de 6 h, 8 pertes d'affilée valent une PAUSE de 6 h, puis reprise.
  */
-export function recentLossStreak(trades: LedgerTrade[], nowMs: number, windowMs: number): number {
+export function recentLossStreak(trades: readonly LedgerTrade[], nowMs: number, windowMs: number): number {
   const recent = trades
     .filter(t => t.status !== 'open' && typeof t.pnl === 'number' && Number.isFinite(t.pnl)
       && nowMs - Date.parse(t.resolvedAt ?? t.openedAt) <= windowMs)

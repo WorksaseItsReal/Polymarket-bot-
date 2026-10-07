@@ -116,3 +116,19 @@ test('série de pertes récente : les pertes de plus de 6 h ne comptent plus (pa
   assert.equal(recentLossStreak([...eight, at(0.5, 0.6)], now, 6 * 3_600_000), 0, 'un gain casse la série');
   assert.equal(recentLossStreak([...eight, trade({})], now, 6 * 3_600_000), 8, 'un trade ouvert ne compte pas');
 });
+
+test('lecture en cache : relue seulement si le fichier change ; la copie modifiable n\'altère pas le cache', async () => {
+  const { readLedgerShared } = await import('../src/services/paper-ledger.ts');
+  const dir = mkdtempSync(join(tmpdir(), 'ledger-memo-'));
+  const path = join(dir, 'fv-ledger.json');
+  saveLedger(path, [trade({ id: 'a' })]);
+  const s1 = readLedgerShared(path);
+  assert.equal(readLedgerShared(path), s1, 'même objet tant que le fichier ne change pas');
+  const copy = loadLedger(path)!;
+  copy[0].stake = 999;
+  assert.notEqual(readLedgerShared(path)![0].stake, 999, 'une copie modifiée ne pollue pas le cache');
+  saveLedger(path, [trade({ id: 'a' }), trade({ id: 'b' })]);
+  assert.equal(readLedgerShared(path)!.length, 2, 'écriture propre → cache à jour');
+  writeFileSync(path, JSON.stringify({ version: 1, trades: [] }));
+  assert.equal(readLedgerShared(path)!.length, 0, 'modification externe détectée');
+});

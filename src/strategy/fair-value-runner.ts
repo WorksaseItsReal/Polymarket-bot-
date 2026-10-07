@@ -29,6 +29,7 @@ import {
 import {
   computeStats,
   loadLedger,
+  readLedgerShared,
   recentLossStreak,
   saveLedger,
   settlePnl,
@@ -167,7 +168,7 @@ export class FairValueRunner {
   }
 
   stats(): LedgerStats {
-    return computeStats(this.trades() ?? []);
+    return computeStats(readLedgerShared(this.d.ledgerPath) ?? []);
   }
 
   private holdLog(id: string, msg: string): void {
@@ -353,7 +354,7 @@ export class FairValueRunner {
           entryPrice: q.cost,
           // Probabilité du MODÈLE, shrinkée de moitié vers le prix par computeStake (λ = 0,5).
           bookProb: q.prob,
-          consecutiveLosses: recentLossStreak(this.trades() ?? [], now, LOSS_STREAK_WINDOW_MS),
+          consecutiveLosses: recentLossStreak(readLedgerShared(this.d.ledgerPath) ?? [], now, LOSS_STREAK_WINDOW_MS),
           drawdownCurrent: peakCapital > 0 ? stats.drawdownNow / peakCapital : 0,
           openExposureEur: stats.openExposure,
           openPositions: stats.open,

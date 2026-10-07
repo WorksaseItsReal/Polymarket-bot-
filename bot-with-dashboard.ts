@@ -27,7 +27,7 @@ import { isSpotCoin, type SpotCoin } from './src/services/spot-price-service.js'
 import { computeStake } from './src/services/stake-sizing.js';
 import { fairValueConfigFromEnv } from './src/services/fair-value.js';
 import { getRoundMarketData } from './src/services/round-market-data.js';
-import { computeStats, fetchRoundOutcome, loadLedger, type LedgerStats } from './src/services/paper-ledger.js';
+import { computeStats, fetchRoundOutcome, readLedgerShared, type LedgerStats } from './src/services/paper-ledger.js';
 import { FairValueRunner, STRATEGY_COINS, type ScannedMarket } from './src/strategy/fair-value-runner.js';
 import { RoundDiscovery } from './src/services/round-discovery.js';
 import { SpotStream } from './src/services/spot-stream.js';
@@ -446,7 +446,7 @@ function ledgerPath(): string {
 }
 
 function ledgerStats(): LedgerStats {
-  return computeStats(loadLedger(ledgerPath()) ?? []);
+  return computeStats(readLedgerShared(ledgerPath()) ?? []);
 }
 
 // === COMMANDES DU DASHBOARD ===
@@ -912,7 +912,7 @@ const FV_EXIT_EDGE = (() => {
  * gain espéré : sinon les 4 couches de risque deviennent inertes (cf. audit dashboard).
  */
 function syncRealizedPnl() {
-  const trades = loadLedger(ledgerPath()) ?? [];
+  const trades = readLedgerShared(ledgerPath()) ?? [];
   const st = computeStats(trades);
   const v = st.pnl;
   state.totalPnL = v;

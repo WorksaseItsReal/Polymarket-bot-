@@ -7,8 +7,30 @@ interface CacheEntry<T> {
   expiresAt: number;
 }
 
+/** Au-delà, les entrées les plus anciennes sont abandonnées (borne mémoire). */
+const MAX_ENTRIES = 10_000;
+/** Balayage des entrées expirées toutes les N écritures. */
+const SWEEP_EVERY = 500;
+
 export class Cache {
   private store: Map<string, CacheEntry<unknown>> = new Map();
+  private writes = 0;
+
+  /**
+   * ⚠️ FIX 2026-10-07 (fuite mémoire) : une entrée expirée n'était supprimée que si la
+   * MÊME clé était relue. Les clés par round (`clob:market:<id>`, une nouvelle toutes
+   * les 5 min et par coin) s'accumulaient donc indéfiniment sur un bot qui tourne des
+   * semaines. On balaie les expirées régulièrement et on borne la taille.
+   */
+  private sweep(now: number): void {
+    for (const [k, e] of this.store) if (now > e.expiresAt) this.store.delete(k);
+    while (this.store.size > MAX_ENTRIES) {
+      const oldest = this.store.keys().next().value;
+      if (oldest === undefined) break;
+      this.store.delete(oldest);
+    }
+  }
+
 
   /**
    * Get a cached value
@@ -27,10 +49,13 @@ export class Cache {
    * Set a cached value with TTL
    */
   set<T>(key: string, value: T, ttlMs: number): void {
+    const now = Date.now();
+    this.store.delete(key); // réinsertion en fin : l'ordre d'insertion reste l'ordre d'âge
     this.store.set(key, {
       value,
-      expiresAt: Date.now() + ttlMs,
+      expiresAt: now + ttlMs,
     });
+    if (++this.writes % SWEEP_EVERY === 0 || this.store.size > MAX_ENTRIES) this.sweep(now);
   }
 
   /**
