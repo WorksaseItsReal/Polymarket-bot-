@@ -28,7 +28,7 @@ import { computeStake } from './src/services/stake-sizing.js';
 import { fairValueConfigFromEnv } from './src/services/fair-value.js';
 import { getRoundMarketData } from './src/services/round-market-data.js';
 import { computeStats, fetchRoundOutcome, readLedgerShared, type LedgerStats } from './src/services/paper-ledger.js';
-import { FairValueRunner, STRATEGY_COINS, type ScannedMarket } from './src/strategy/fair-value-runner.js';
+import { FairValueRunner, coinsFromEnv, type ScannedMarket } from './src/strategy/fair-value-runner.js';
 import { RoundDiscovery } from './src/services/round-discovery.js';
 import { SpotStream } from './src/services/spot-stream.js';
 import { DecisionJournal } from './src/services/decision-journal.js';
@@ -901,6 +901,8 @@ const FV_POLL_MS = Math.min(300, Math.max(5, Number(process.env.FV_POLL_SEC ?? '
 /** Mouvement du spot (points de base) qui déclenche une évaluation immédiate. */
 const FV_MOVE_BPS = Math.min(50, Math.max(1, Number(process.env.FV_MOVE_BPS ?? '') || 3));
 let spotStream: SpotStream | null = null;
+/** Coins tradés (FV_COINS=BTC,ETH… ; défaut : les 5). */
+const FV_COINS = coinsFromEnv(process.env.FV_COINS);
 let decisionJournal: DecisionJournal | null = null;
 let shadowTracker: ShadowTracker | null = null;
 const FV_EXIT_EDGE = (() => {
@@ -1090,7 +1092,7 @@ async function setupTelegram() {
   log('INFO', `📨 Telegram ${check.detail}`);
   notify(msgStartup({
     capital: CONFIG.capital.totalUsd, minEdge: FV_CFG.minEdge, minProb: FV_CFG.minProb, feeRate: FV_CFG.takerFeeRate,
-    pollSec: FV_POLL_MS / 1000, coins: [...STRATEGY_COINS], stats: ledgerStats(),
+    pollSec: FV_POLL_MS / 1000, coins: [...FV_COINS], stats: ledgerStats(),
   }));
 
   // Bilan périodique, seulement s'il s'est passé quelque chose depuis le précédent.
@@ -1164,7 +1166,7 @@ async function setupFairValueStrategy(sdk: PolymarketSDK) {
   // Prix spot temps réel (WebSocket Binance) ; sans lui, repli automatique sur le REST.
   const stream = (process.env.FV_SPOT_STREAM ?? 'true').toLowerCase() === 'false'
     ? null
-    : new SpotStream({ coins: STRATEGY_COINS, moveBps: FV_MOVE_BPS, log: (l, m) => log(l, m) });
+    : new SpotStream({ coins: FV_COINS, moveBps: FV_MOVE_BPS, log: (l, m) => log(l, m) });
   spotStream = stream;
   const runner = new FairValueRunner({
     cfg: FV_CFG,
@@ -1176,8 +1178,8 @@ async function setupFairValueStrategy(sdk: PolymarketSDK) {
     // Découverte directe par slug (rapide, cache par round) ; l'ancien scan ne sert
     // qu'en repli pour les coins que Gamma n'a pas encore exposés.
     scanMarkets: async () => {
-      const found: ScannedMarket[] = await discovery.current(Date.now());
-      if (found.length >= STRATEGY_COINS.length) return found;
+      const found: ScannedMarket[] = await discovery.current(Date.now(), FV_COINS);
+      if (found.length >= FV_COINS.length) return found;
       try {
         const scanned = (await withTimeout(sdk.dipArb.scanUpcomingMarkets({
           coin: 'all', duration: '5m', minMinutesUntilEnd: 0, maxMinutesUntilEnd: 6, limit: 12,
@@ -1189,6 +1191,7 @@ async function setupFairValueStrategy(sdk: PolymarketSDK) {
       }
     },
     marketsRefreshMs: 10_000,
+    coins: FV_COINS,
     // Délai garanti : le client CLOB n'en a aucun, une réponse bloquée figeait la boucle.
     getBook: tokenId => withTimeout(sdk.markets.getTokenOrderbook(tokenId), 8000, 'carnet CLOB'),
     getRoundData: (coin, slot, now) => (isSpotCoin(coin)

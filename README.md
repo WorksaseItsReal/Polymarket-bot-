@@ -146,6 +146,7 @@ Variables (nom → rôle) :
 | `FV_TWAP_WINDOW_SEC` | `0` | Résolution ponctuelle (règle officielle : prix Chainlink à la fin vs au début). |
 | `FV_TAILS` | `normal` | Loi des rendements. `t4` est **plus** confiante pour \|z\| < 2 (pas plus prudente). |
 | `FV_POLL_SEC` | `10` | Période de scrutation de fond (bornée à [5 ; 300] s). |
+| `FV_COINS` | les 5 | Coins tradés, ex. `BTC,ETH` (à décider avec `fv-report.ts`, section 3b). |
 | `FV_SPOT_STREAM` | `true` | Prix spot temps réel par WebSocket Binance (`false` = REST seul). |
 | `FV_MOVE_BPS` | `3` | Mouvement du spot (points de base) qui déclenche une évaluation immédiate du coin. |
 

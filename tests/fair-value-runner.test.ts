@@ -293,3 +293,13 @@ test('chien de garde : fin de passage, échecs consécutifs et dernier marché t
   assert.equal(r.consecutiveTickFailures, 0);
   assert.equal(r.lastMarketsFoundAt, (SLOT + 250) * 1000);
 });
+
+test('FV_COINS : liste filtrée, valeurs invalides ignorées, coins exclus jamais tradés', async () => {
+  const { coinsFromEnv } = await import('../src/strategy/fair-value-runner.ts');
+  assert.deepEqual(coinsFromEnv('btc, eth'), ['BTC', 'ETH']);
+  assert.deepEqual(coinsFromEnv('PEPE'), ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE'], 'rien de valide → tous');
+  assert.deepEqual(coinsFromEnv(undefined).length, 5);
+  const env = setup({ coins: ['ETH'] });
+  await env.runner().tick();
+  assert.equal(loadLedger(env.ledgerPath)!.length, 0, 'BTC exclu → aucun pari');
+});

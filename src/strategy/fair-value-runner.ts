@@ -43,6 +43,14 @@ import { computeStake } from '../services/stake-sizing.js';
 import { msgAlert, msgTradeClosed, msgTradeOpened } from '../services/telegram-messages.js';
 
 export const STRATEGY_COINS = ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE'] as const;
+export type StrategyCoin = (typeof STRATEGY_COINS)[number];
+
+/** Coins tradés, depuis une liste « BTC,ETH » (env FV_COINS). Vide/invalide → tous. */
+export function coinsFromEnv(raw: string | undefined): StrategyCoin[] {
+  const wanted = (raw ?? '').split(',').map(c => c.trim().toUpperCase()).filter(Boolean);
+  const valid = STRATEGY_COINS.filter(c => wanted.includes(c));
+  return valid.length ? valid : [...STRATEGY_COINS];
+}
 
 export interface ScannedMarket {
   conditionId: string;
@@ -80,6 +88,8 @@ export interface RunnerDeps {
   /** Porte de risque du bot (pause, limites). */
   canTrade: () => boolean;
   scanMarkets: () => Promise<ScannedMarket[]>;
+  /** Coins autorisés (défaut : les 5). */
+  coins?: readonly string[];
   /** Âge max de la liste des marchés (ms, défaut 60 s). Toujours rafraîchie à chaque
    *  nouveau round, pour ne jamais manquer le début de la fenêtre d'entrée. */
   marketsRefreshMs?: number;
@@ -295,7 +305,7 @@ export class FairValueRunner {
     this.marketsSlot = slot;
     const scanned = await this.d.scanMarkets();
     this.markets = (Array.isArray(scanned) ? scanned : []).filter(
-      m => !!m && !!m.conditionId && m.durationMinutes === 5 && (STRATEGY_COINS as readonly string[]).includes(m.underlying) && slotOf(m) !== null,
+      m => !!m && !!m.conditionId && m.durationMinutes === 5 && (this.d.coins ?? STRATEGY_COINS).includes(m.underlying) && slotOf(m) !== null,
     );
     this.marketsTs = now;
     if (this.markets.length) this.lastMarketsFoundAt = now;
