@@ -259,6 +259,25 @@ pas ; face à un carnet en retard de 10 s il gagne, avec un win rate ≈ 69 % é
 probabilité annoncée (calibration). Cela valide la logique, **pas** l'existence d'un edge sur
 le vrai Polymarket.
 
+### Mesurer si ça marche (journal des décisions)
+
+Chaque évaluation — pari **ou** abstention — est écrite dans
+`~/.polymarket/journal/decisions-AAAA-MM-JJ.jsonl` (≤ 1 ligne / round / 10 s, 10 jours
+gardés, `FV_JOURNAL=false` pour couper). Après quelques jours :
+
+```bash
+npx tsx scripts/analysis/fv-report.ts --days 7
+```
+
+Le rapport règle les rounds (cache `~/.polymarket/outcomes-cache.json`) et répond dans l'ordre :
+1. **Le modèle prédit-il mieux que le carnet ?** (score de Brier). Si non : aucun seuil ne
+   rendra la stratégie rentable.
+2. **Est-il calibré ?** (« 70 % » gagne-t-il ~70 % du temps ?)
+3. **Quels seuils (`FV_MIN_EDGE` × `FV_MIN_PROB`) auraient rapporté**, avec l'EV sur chaque
+   moitié de l'échantillon : ne retenir qu'un réglage positif sur les deux moitiés.
+
+C'est des milliers de rounds par jour, au lieu de ~1 trade par heure.
+
 `history.json` enregistre aussi pour chaque trade `modelProb`, `edge`, `tauSec`, `spot`, `strike`,
 `sigma1m`, `ask` et `feePerShare` ; `price` y est le **coût réel par part, frais inclus**, donc
 le PnL résolu inclut les frais. C'est ce qui permet de **mesurer la calibration** du modèle

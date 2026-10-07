@@ -220,3 +220,34 @@ test('le scan des marchés est mis en cache 60 s (pas de spam de l\'API)', async
   await r.tick();
   assert.equal(env.scans(), 2);
 });
+
+test('journal : chaque évaluation est transmise (abstention puis pari), avec asks et tailles', async () => {
+  const evals: Array<Record<string, unknown>> = [];
+  const p = probUp({ spot: 100.12, strike: 100, sigmaPerSqrtSec: SIGMA, tauSec: 120 })!;
+  let fair = true;
+  const env = setup({
+    onEvaluation: r => evals.push({ ...r }),
+    getBook: async id => {
+      const ask = id === 'UP' ? (fair ? Math.ceil(p * 100) / 100 : 0.6) : 0.41;
+      return { asks: [{ price: ask, size: 50 }], bids: [] };
+    },
+  });
+  const r = env.runner();
+  await r.tick();
+  assert.equal(evals.length, 1);
+  assert.equal(evals[0].act, 'hold');
+  assert.equal(evals[0].slug, MARKET.slug);
+  assert.equal(evals[0].upAskSz, 50);
+  assert.ok(Math.abs((evals[0].pUp as number) - p) < 1e-12);
+  fair = false;
+  env.setNow((SLOT + 190) * 1000);
+  await r.tick();
+  assert.equal(evals.length, 2);
+  assert.equal(evals[1].act, 'buy');
+  assert.equal(evals[1].side, 'UP');
+  assert.ok((evals[1].stake as number) > 0);
+  // un journal qui plante ne casse pas la stratégie
+  const env2 = setup({ onEvaluation: () => { throw new Error('disque plein'); } });
+  await env2.runner().tick();
+  assert.equal(loadLedger(env2.ledgerPath)!.length, 1);
+});

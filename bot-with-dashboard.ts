@@ -30,6 +30,7 @@ import { computeStats, fetchRoundOutcome, loadLedger, type LedgerStats } from '.
 import { FairValueRunner, STRATEGY_COINS, type ScannedMarket } from './src/strategy/fair-value-runner.js';
 import { RoundDiscovery } from './src/services/round-discovery.js';
 import { SpotStream } from './src/services/spot-stream.js';
+import { DecisionJournal } from './src/services/decision-journal.js';
 import { MoveScheduler } from './src/strategy/move-scheduler.js';
 import { TelegramClient, telegramConfigFromEnv } from './src/services/telegram.js';
 import { msgAlert, msgStartup, msgSummary } from './src/services/telegram-messages.js';
@@ -873,6 +874,7 @@ const FV_POLL_MS = Math.min(300, Math.max(5, Number(process.env.FV_POLL_SEC ?? '
 /** Mouvement du spot (points de base) qui déclenche une évaluation immédiate. */
 const FV_MOVE_BPS = Math.min(50, Math.max(1, Number(process.env.FV_MOVE_BPS ?? '') || 3));
 let spotStream: SpotStream | null = null;
+let decisionJournal: DecisionJournal | null = null;
 const FV_EXIT_EDGE = (() => {
   const v = Number(process.env.FV_EXIT_EDGE ?? '');
   return Number.isFinite(v) && v >= 0 && v <= 0.5 && (process.env.FV_EXIT_EDGE ?? '').trim() !== '' ? v : FV_CFG.minEdge;
@@ -1092,6 +1094,10 @@ async function setupFairValueStrategy(sdk: PolymarketSDK) {
   await setupTelegram();
 
   const discovery = new RoundDiscovery();
+  const journal = (process.env.FV_JOURNAL ?? 'true').toLowerCase() === 'false'
+    ? null
+    : new DecisionJournal({ dir: polyDir() + '/journal', log: m => log('WARN', m) });
+  decisionJournal = journal;
   // Prix spot temps réel (WebSocket Binance) ; sans lui, repli automatique sur le REST.
   const stream = (process.env.FV_SPOT_STREAM ?? 'true').toLowerCase() === 'false'
     ? null
@@ -1128,6 +1134,7 @@ async function setupFairValueStrategy(sdk: PolymarketSDK) {
     notify,
     log: (level, msg) => log(level, msg),
     timeZone: TG_TZ,
+    onEvaluation: r => { journal?.record(r); },
     onTradeOpened: e => {
       simulateTrade(e.winProfit, 'dipArb', e.description);
       // Journal historique (lu par les outils externes paperbot-pnl.py / recap).

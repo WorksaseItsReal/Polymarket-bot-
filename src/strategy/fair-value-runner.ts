@@ -35,6 +35,7 @@ import {
   type LedgerTrade,
   type RoundOutcome,
 } from '../services/paper-ledger.js';
+import type { DecisionRecord } from '../services/decision-journal.js';
 import type { RoundMarketData } from '../services/round-market-data.js';
 import { computeStake } from '../services/stake-sizing.js';
 import { msgAlert, msgTradeClosed, msgTradeOpened } from '../services/telegram-messages.js';
@@ -89,6 +90,8 @@ export interface RunnerDeps {
   /** Rappels optionnels (journal historique, compteurs du dashboard). */
   onTradeOpened?: (e: TradeOpenedEvent) => void;
   onTradeClosed?: (t: LedgerTrade) => void;
+  /** Chaque évaluation complète (pari ou abstention), pour le journal des décisions. */
+  onEvaluation?: (r: DecisionRecord) => void;
 }
 
 const SLUG_RE = /^(btc|eth|sol|xrp|doge)-updown-5m-(\d{9,})$/;
@@ -291,6 +294,7 @@ export class FairValueRunner {
       const tauSec = (endMs - now) / 1000;
       if (tauSec < cfg.minTauSec || tauSec > cfg.maxTauSec) continue; // aucun appel réseau hors fenêtre
       const coin = market.underlying;
+      let rec: DecisionRecord | null = null; // évaluation journalisée (pari ou abstention)
       try {
         const data = await this.d.getRoundData(coin, slot, now);
         if (!data) {
@@ -298,8 +302,17 @@ export class FairValueRunner {
           continue;
         }
         const [upBook, downBook] = await Promise.all([this.d.getBook(market.upTokenId), this.d.getBook(market.downTokenId)]);
-        const bestAsk = (b: Book) => b.asks.filter(l => l.price > 0 && l.size > 0).reduce<number | null>((m, l) => (m === null || l.price < m ? l.price : m), null);
-        const decision = decide({ ...data, tauSec, upAsk: bestAsk(upBook), downAsk: bestAsk(downBook) }, cfg);
+        const bestAsk = (b: Book) => b.asks
+          .filter(l => l.price > 0 && l.size > 0)
+          .reduce<BookLevel | null>((m, l) => (m === null || l.price < m.price ? l : m), null);
+        const upBest = bestAsk(upBook);
+        const downBest = bestAsk(downBook);
+        const decision = decide({ ...data, tauSec, upAsk: upBest?.price ?? null, downAsk: downBest?.price ?? null }, cfg);
+        rec = {
+          t: now, slug: market.slug, coin, tau: Math.round(tauSec * 10) / 10, spot: data.spot, strike: data.strike,
+          sig: data.sigmaPerSqrtSec, pUp: decision.pUp, upAsk: upBest?.price ?? null, downAsk: downBest?.price ?? null,
+          upAskSz: upBest?.size ?? null, downAskSz: downBest?.size ?? null, src: data.source, act: 'hold',
+        };
         const ctx = `${coin} spot ${data.spot} vs strike ${data.strike} (${data.source}), `
           + `σ1m ${(data.sigmaPerSqrtSec * Math.sqrt(60) * 100).toFixed(3)} %, τ ${Math.round(tauSec)} s`;
         if (!decision.side || !decision.best) {
@@ -363,9 +376,14 @@ export class FairValueRunner {
           coin, side: decision.side, slotSec: slot, tauSec, strike: data.strike, spot: data.spot,
           modelProb: q.prob, costPerShare: entryCost, edge: edgeAtFill, stake, winProfit, timeZone: this.d.timeZone,
         }));
+        rec = { ...(rec as DecisionRecord), act: 'buy', side: decision.side, stake };
         this.d.onTradeOpened?.({ trade, market, data, ask: fill.avgPrice, tauSec, winProfit, description });
       } catch (err) {
         this.holdLog(market.conditionId, `   ↳ ${market.slug} : erreur d'analyse (${String((err as Error)?.message ?? err).slice(0, 160)}) → pas de mise`);
+      } finally {
+        if (rec) {
+          try { this.d.onEvaluation?.(rec); } catch { /* le journal ne doit jamais bloquer la stratégie */ }
+        }
       }
     }
   }
