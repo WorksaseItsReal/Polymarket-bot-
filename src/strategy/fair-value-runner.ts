@@ -92,6 +92,9 @@ export interface RunnerDeps {
   onTradeClosed?: (t: LedgerTrade) => void;
   /** Chaque évaluation complète (pari ou abstention), pour le journal des décisions. */
   onEvaluation?: (r: DecisionRecord) => void;
+  /** Raison de bloquer les NOUVELLES entrées (arrêt de performance), ou null. Les
+   *  évaluations continuent d'être journalisées : on garde l'œil sur le marché. */
+  entryBlock?: () => string | null;
 }
 
 const SLUG_RE = /^(btc|eth|sol|xrp|doge)-updown-5m-(\d{9,})$/;
@@ -317,6 +320,12 @@ export class FairValueRunner {
           + `σ1m ${(data.sigmaPerSqrtSec * Math.sqrt(60) * 100).toFixed(3)} %, τ ${Math.round(tauSec)} s`;
         if (!decision.side || !decision.best) {
           this.holdLog(market.conditionId, `   ↳ ${ctx} → HOLD : ${decision.reason}`);
+          continue;
+        }
+
+        const block = this.d.entryBlock?.() ?? null;
+        if (block) {
+          this.holdLog(market.conditionId, `   ↳ ${ctx} → signal ${decision.side} ignoré : entrées bloquées (${block})`);
           continue;
         }
 

@@ -32,6 +32,7 @@ import { RoundDiscovery } from './src/services/round-discovery.js';
 import { SpotStream } from './src/services/spot-stream.js';
 import { DecisionJournal } from './src/services/decision-journal.js';
 import { MoveScheduler } from './src/strategy/move-scheduler.js';
+import { PersistentGuard, evaluateGuard } from './src/strategy/performance-guard.js';
 import { TelegramClient, telegramConfigFromEnv } from './src/services/telegram.js';
 import { msgAlert, msgStartup, msgSummary } from './src/services/telegram-messages.js';
 
@@ -1084,6 +1085,34 @@ async function setupTelegram() {
 // calculée depuis le spot, le strike, la vol et le temps restant dépasse son coût
 // RÉEL (VWAP du carnet + frais taker) d'au moins FV_MIN_EDGE. Au plus une entrée par
 // round. La décision et ses entrées sont journalisées pour mesurer la calibration.
+// === ARRÊT SUR PERFORMANCE RÉELLE (src/strategy/performance-guard.ts) ===
+const guardFile = () => new PersistentGuard(polyDir() + '/fv-guard.json');
+let guardLoggedAt = 0;
+/** Raison de bloquer les entrées, ou null. Évalué à chaque signal (lecture du registre). */
+function perfGuard(): string | null {
+  const g = guardFile();
+  const existing = g.current();
+  if (existing) {
+    if (Date.now() - guardLoggedAt > 3_600_000) {
+      guardLoggedAt = Date.now();
+      log('WARN', `🛑 Entrées bloquées : ${existing}. Pour reprendre : supprimer ${polyDir()}/fv-guard.json`);
+    }
+    return existing;
+  }
+  const v = evaluateGuard(ledgerStats());
+  if (v.warn) {
+    log('WARN', `⚠️ ${v.warn}`);
+    alertOnce('calibration', `${v.warn} — augmente FV_MIN_EDGE ou analyse le journal (scripts/analysis/fv-report.ts)`);
+  }
+  if (v.stop) {
+    try { g.trip(v.stop, Date.now()); } catch { /* le blocage reste effectif pour cette session */ }
+    log('ERROR', `🛑 ARRÊT DE SÉCURITÉ : ${v.stop}. Les nouvelles entrées sont bloquées.`);
+    notify(msgAlert(`ARRÊT DE SÉCURITÉ — ${v.stop}. Le bot n'ouvre plus de position (il continue d'observer). Pour reprendre : supprimer ~/.polymarket/fv-guard.json puis redémarrer.`));
+    return v.stop;
+  }
+  return null;
+}
+
 async function setupFairValueStrategy(sdk: PolymarketSDK) {
   log('INFO', `📐 Stratégie juste valeur : p_modèle ≥ ${FV_CFG.minProb} et edge ≥ ${(FV_CFG.minEdge * 100).toFixed(1)} pt après frais `
     + `(taker ${FV_CFG.takerFeeRate}), τ ∈ [${FV_CFG.minTauSec}, ${FV_CFG.maxTauSec}] s, ask ∈ [${FV_CFG.minAsk}, ${FV_CFG.maxAsk}], `
@@ -1135,6 +1164,7 @@ async function setupFairValueStrategy(sdk: PolymarketSDK) {
     log: (level, msg) => log(level, msg),
     timeZone: TG_TZ,
     onEvaluation: r => { journal?.record(r); },
+    entryBlock: () => perfGuard(),
     onTradeOpened: e => {
       simulateTrade(e.winProfit, 'dipArb', e.description);
       // Journal historique (lu par les outils externes paperbot-pnl.py / recap).

@@ -251,3 +251,12 @@ test('journal : chaque évaluation est transmise (abstention puis pari), avec as
   await env2.runner().tick();
   assert.equal(loadLedger(env2.ledgerPath)!.length, 1);
 });
+
+test('entrées bloquées (arrêt de sécurité) : aucun pari, mais l\'évaluation est journalisée', async () => {
+  const evals: string[] = [];
+  const env = setup({ entryBlock: () => 'perte significative', onEvaluation: r => evals.push(r.act) });
+  await env.runner().tick();
+  assert.equal(loadLedger(env.ledgerPath)!.length, 0);
+  assert.deepEqual(evals, ['hold']);
+  assert.ok(env.logs.some(l => /entrées bloquées \(perte significative\)/.test(l)));
+});
