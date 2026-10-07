@@ -109,13 +109,15 @@ Variables (nom → rôle) :
 | Variable | Défaut | Rôle |
 |---|---|---|
 | `FV_MIN_EDGE` | `0.04` | Edge minimal exigé (probabilité modèle − coût réel par part), **après frais**. |
+| `FV_MIN_PROB` | `0.60` | Probabilité modèle minimale du côté acheté : ne parie que sur le côté probable → **win rate attendu ≥ 60 %** (au prix de quelques paris +EV sur l'outsider). |
 | `FV_EXIT_EDGE` | = `FV_MIN_EDGE` | Vente anticipée si `bid − frais` dépasse `p_modèle` d'au moins cette marge. |
-| `FV_MIN_TAU_SEC` / `FV_MAX_TAU_SEC` | `60` / `270` | Fenêtre de temps restant où l'on peut entrer (pas d'entrée dans la fenêtre TWAP finale). |
+| `FV_MIN_TAU_SEC` / `FV_MAX_TAU_SEC` | `45` / `270` | Fenêtre de temps restant où l'on peut entrer (en toute fin de round, latence et écart d'oracle dominent). |
 | `FV_MIN_ASK` / `FV_MAX_ASK` | `0.08` / `0.92` | Bornes d'ask achetable (au-delà, gain minuscule et erreur de modèle dominante). |
-| `FV_TAKER_FEE_RATE` | `0.07` | Taux `crypto_fees_v2` : frais = parts · taux · p · (1−p). |
+| `FV_TAKER_FEE_RATE` | `0.072` | Taux `crypto_fees_v2` : frais = parts · taux · p · (1−p) (pic 1,8 % à p = 0,5). |
 | `FV_BASIS_BPS` | `2` | Écart de flux Binance/Coinbase vs Chainlink (bps), ajouté à l'incertitude. |
-| `FV_TWAP_WINDOW_SEC` | `60` | Fenêtre du TWAP Chainlink de résolution. |
-| `FV_TAILS` | `t4` | Queues des rendements : `t4` (épaisses, prudent) ou `normal`. |
+| `FV_STRIKE_NOISE_SEC` | `10` | Incertitude du strike (open de bougie 1 min ≠ point Chainlink), en secondes de variance. |
+| `FV_TWAP_WINDOW_SEC` | `0` | Résolution ponctuelle (règle officielle : prix Chainlink à la fin vs au début). |
+| `FV_TAILS` | `normal` | Loi des rendements. `t4` est **plus** confiante pour \|z\| < 2 (pas plus prudente). |
 | `FV_POLL_SEC` | `10` | Période de scrutation (bornée à [5 ; 300] s). |
 
 Les anciennes variables `P_STRONG_MIN`, `P_STRONG_MAX`, `P_MIN_PRICE`, `P_TAKE_PROFIT`,
@@ -132,8 +134,9 @@ Tout vit dans **`~/.polymarket/`** (`/root/.polymarket/`) :
 
 | Fichier | Contenu | Statut |
 |---|---|---|
+| `fv-ledger.json` | **Registre de la stratégie juste valeur — SOURCE DE VÉRITÉ du bot.** Un trade par round : mise, coût par part, `modelProb`, statut (`open`/`won`/`lost`/`sold`), PnL. Le bot y lit son PnL, son drawdown, sa série de pertes et ses positions ouvertes ; il résout lui-même les rounds (Gamma `events?slug=`). Écriture atomique, jamais écrasé s'il est illisible. | **Autorité (stratégie)** |
 | `history.json` | Fenêtre glissante des décisions/mises récentes (avec `roundId`, `side`, `price`, `realized`, `stake`…). Les HOLD ne sont **plus** écrits. | **Fenêtre** (300 max), pas un historique complet |
-| `cumulative.json` | **Registre PnL cumulé — SOURCE DE VÉRITÉ.** Contient `pnl`, `resolved` (par clé), `total_trades`, `wins`, `losses`, `audit_ledger`. | **Autorité** |
+| `cumulative.json` | Registre PnL des scripts externes Hermes (ancienne chaîne). Contient `pnl`, `resolved` (par clé), `total_trades`, `wins`, `losses`, `audit_ledger`. | **Autorité** |
 | `pnl.json` | Instantané de sortie (ce que lit le recap) : `trades`, `wins`, `losses`, `win_rate`, `pnl`, `pending`, `window_pnl`. | Dérivé du registre |
 | `llm-calls.json` | Compteur d'appels LLM par jour (`calls: 0`). | — |
 | `archive/AAAA-MM-JJ/` | Archives quotidiennes (`resume.json`). | — |
@@ -170,15 +173,48 @@ Champs et **pièges** :
 - Pour auditer : `python3 /root/.hermes/scripts/paperbot-pnl-audit.py` (auto-test a–e,
   échoue si un doublon ou un `realized:0` entre dans le ledger).
 
-### 4.2 Le recap Telegram
+### 4.2 Telegram (intégré au bot)
 
-Un **cron Hermes** (`paperbot-recap-telegram`, toutes les 5 min) exécute
-`/root/.hermes/scripts/paperbot-recap.py`, qui envoie sur Telegram : prix live, probabilités
-UP/DOWN du round, PnL réalisé, win rate et une ligne **📐 Edge** (moyenne/mise, t-stat, verdict
-« significatif » / « non significatif (bruit) »).
+Le bot envoie lui-même ses notifications (`src/services/telegram.ts`,
+`src/services/telegram-messages.ts`). Configuration dans `.env` :
 
-> La ligne « Edge » affiche **volontairement** le **n** et le **t** pour empêcher de lire un
-> PnL positif comme une preuve. Voir [`docs/rebuild/recap/REPORT.md`](docs/rebuild/recap/REPORT.md).
+| Variable | Rôle |
+|---|---|
+| `TELEGRAM_BOT_TOKEN` | Token donné par **@BotFather** (`123456789:ABC…`). |
+| `TELEGRAM_CHAT_ID` | Ton chat (nombre) ou un groupe (`-100…`). Trouvable via **@userinfobot**. |
+| `TELEGRAM_ENABLED` | `false` pour couper sans retirer le token. |
+| `TELEGRAM_SUMMARY_MIN` | Période du bilan (défaut 60, bornée 15–1440). Envoyé seulement s'il y a du nouveau. |
+| `TELEGRAM_TZ` | Fuseau des heures de round (défaut `Europe/Paris`). |
+
+**Au démarrage**, la connexion est vérifiée (`getMe` + `getChat`) et le log dit exactement quoi
+faire si elle échoue : token refusé → le régénérer chez @BotFather ; « chat introuvable » →
+envoyer **/start** au bot (ou l'ajouter au groupe) ; bot bloqué → le débloquer. Une panne
+Telegram n'arrête jamais le bot. Les envois sont en file (≥ 1,1 s d'écart, respect des 429,
+4 essais réseau, repli texte brut si le HTML est refusé) et le token n'apparaît jamais dans
+les logs.
+
+**Messages envoyés :**
+
+```
+🎯 NOUVEAU PARI — BTC ⬆️ HAUSSE
+Round 16:15 → 16:20 · fin dans 2 min 10 s
+Prix à battre : 62 345,10 $ · actuel : 62 401,50 $ (+0,090 %)
+Chance de gagner (modèle) : 78 % · prix payé : 0,661 $ par part (frais inclus)
+Avantage : +11,9 pts · mise : 0,50 $
+Si gagné : +0,26 $ · si perdu : −0,50 $
+
+✅ GAGNÉ — BTC ⬆️ HAUSSE · +0,26 $
+Round 16:15 → 16:20
+Bilan : 12 trades · 9 ✅ / 3 ❌ (75 %) · PnL +1,84 $
+```
+
+plus un message de démarrage, un **📊 BILAN** périodique (taux de réussite réel vs attendu par
+le modèle, PnL, pire baisse, fiabilité statistique) et des **⚠️ ALERTES** (pause de risque,
+registre illisible), au plus une par motif toutes les 6 h.
+
+> ⚠️ **Ancien recap Hermes** (`paperbot-recap-telegram` → `/root/.hermes/scripts/paperbot-recap.py`,
+> hors dépôt) : il décrit encore l'ancienne règle « fenêtre [0,58–0,65] » et enverrait des
+> messages contradictoires. **Désactive ce cron** une fois le Telegram intégré configuré.
 
 ---
 
@@ -196,20 +232,28 @@ Toutes les ~10 s, pour chaque round 5 min ouvert (au plus **une entrée par roun
 1. **Données** (une seule source de bougies 1 min, Binance → binance.vision → Coinbase) :
    strike = ouverture de la bougie du slot, spot = dernier prix, σ = max(vol réalisée 60 min,
    15 min). Flux absent ou figé → pas de mise.
-2. **Probabilité** : `P(Up) = F(ln(S/K) / √(σ²·(τ_TWAP + W/3) + basis²))`, `F` = Student t4
-   réduite (queues épaisses), `τ_TWAP` = variance restante du TWAP de résolution.
-3. **Coût réel** d'une part = ask + frais taker `0,07·p·(1−p)`. Edge = P(côté) − coût.
-   Entrée seulement si edge ≥ `FV_MIN_EDGE`, τ ∈ [60 ; 270] s et ask ∈ [0,08 ; 0,92].
+2. **Probabilité** : `P(Up) = Φ(ln(S/K) / √(σ²·(τ + bruit_strike) + basis²))` — résolution
+   ponctuelle Chainlink (« Up » si prix final ≥ prix d'ouverture).
+3. **Coût réel** d'une part = ask + frais taker `0,072·p·(1−p)`. Edge = P(côté) − coût.
+   Entrée seulement si **P(côté) ≥ `FV_MIN_PROB` (0,60)**, edge ≥ `FV_MIN_EDGE`,
+   τ ∈ [45 ; 270] s et ask ∈ [0,08 ; 0,92].
 4. **Mise** : `computeStake` (Kelly ×0,25, probabilité du modèle **shrinkée de moitié** vers le
    prix, plafonds durs 1 % du capital/trade, 10 % d'exposition, modérateurs drawdown et
-   **série de pertes réelle** lue dans `history.json`).
+   **série de pertes réelle** lus dans `fv-ledger.json`).
 5. **Exécution simulée réaliste** : la mise consomme le carnet niveau par niveau (VWAP) ; si la
    profondeur manque ou si l'edge au VWAP passe sous le seuil → pas de mise.
 6. **Sortie** : on garde jusqu'à la résolution, sauf si `bid − frais > p_modèle + FV_EXIT_EDGE`
    (le marché paie plus que la position ne vaut). Plus de TP/SL en % (vendre au bid coûte
    spread + frais, et le stop-loss était inerte sur un binaire).
 
-`history.json` enregistre pour chaque trade `modelProb`, `edge`, `tauSec`, `spot`, `strike`,
+La boucle vit dans `src/strategy/fair-value-runner.ts` (dépendances injectées, testée de bout
+en bout sans réseau : `tests/fair-value-runner.test.ts`). La logique de décision est validée
+par simulation (`tests/strategy-simulation.test.ts`) : face à un carnet juste le bot ne parie
+pas ; face à un carnet en retard de 10 s il gagne, avec un win rate ≈ 69 % égal à la
+probabilité annoncée (calibration). Cela valide la logique, **pas** l'existence d'un edge sur
+le vrai Polymarket.
+
+`history.json` enregistre aussi pour chaque trade `modelProb`, `edge`, `tauSec`, `spot`, `strike`,
 `sigma1m`, `ask` et `feePerShare` ; `price` y est le **coût réel par part, frais inclus**, donc
 le PnL résolu inclut les frais. C'est ce qui permet de **mesurer la calibration** du modèle
 (`modelProb` moyen vs taux de réussite réel par tranche).

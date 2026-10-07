@@ -4,20 +4,20 @@
  * La mise vient de `computeStake` (module pur, `src/services/stake-sizing.ts`) et
  * l'issue d'un trade de `binaryPayoff` (module pur, `src/services/fair-value.ts`) :
  * gain = parts − mise, perte = mise, le tout LINÉAIRE en la mise et frais inclus.
- * Le monolithe n'étant pas importable sans démarrer le bot, on vérifie par extraction
- * de source qu'il passe bien par ces deux fonctions, et on teste les fonctions elles-mêmes.
+ * On vérifie que la boucle (src/strategy/fair-value-runner.ts) passe bien par ces deux
+ * fonctions, et on teste les fonctions elles-mêmes.
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { extractFromBot, pySourcesAvailable, runHarness } from './harness.ts';
+import { readFileSync } from 'node:fs';
+import { pySourcesAvailable, runHarness } from './harness.ts';
 import { binaryPayoff, effectiveCostPerShare } from '../src/services/fair-value.ts';
 
-test('la mise vient du module de sizing et le gain de binaryPayoff (pas de mise figée)', () => {
-  assert.match(extractFromBot(/const stake = stakeRes\.stake;/, 'source de la mise'), /stakeRes\.stake/);
-  assert.match(
-    extractFromBot(/binaryPayoff\(stake, entryCost\)/, 'gain via binaryPayoff'),
-    /binaryPayoff/,
-  );
+test('la boucle de stratégie passe par computeStake et binaryPayoff (pas de mise figée)', () => {
+  const src = readFileSync(new URL('../src/strategy/fair-value-runner.ts', import.meta.url), 'utf8');
+  assert.match(src, /const stakeRes = computeStake\(/, 'la mise vient du module de sizing');
+  assert.match(src, /binaryPayoff\(stake, entryCost\)/, 'le gain vient de binaryPayoff, frais inclus');
+  assert.doesNotMatch(src, /BET_STAKE/, 'aucune mise figée lue dans le .env');
 });
 
 test('le gain est linéaire en la mise (5 € = 5× 1 €)', () => {

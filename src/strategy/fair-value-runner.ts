@@ -1,0 +1,353 @@
+/**
+ * fair-value-runner.ts — boucle de la stratégie juste valeur (paper), testable.
+ *
+ * Toutes les entrées/sorties sont INJECTÉES (scan des marchés, carnets, données spot,
+ * résolution, horloge, notifications, porte de risque) : le même code tourne dans le bot
+ * et dans les tests de bout en bout (tests/fair-value-runner.test.ts), sans réseau.
+ *
+ * Un tick, dans cet ordre :
+ *   1. résoudre les rounds terminés (même en pause : sinon le PnL et la levée de pause
+ *      restent figés) ;
+ *   2. porte de risque (`canTrade`) ;
+ *   3. sorties anticipées si le marché paie plus que la position ne vaut ;
+ *   4. nouvelles entrées : au plus une par round, décision `decide()`, mise
+ *      `computeStake()`, exécution simulée au VWAP du carnet, re-contrôle de l'edge.
+ * Le registre (fv-ledger.json) est écrit AVANT toute annonce : un trade non enregistré
+ * n'est jamais notifié.
+ */
+
+import {
+  binaryPayoff,
+  decide,
+  effectiveCostPerShare,
+  estimateFill,
+  probUp,
+  takerFeePerShare,
+  type BookLevel,
+  type FairValueConfig,
+} from '../services/fair-value.js';
+import {
+  computeStats,
+  loadLedger,
+  saveLedger,
+  settlePnl,
+  type LedgerStats,
+  type LedgerTrade,
+  type RoundOutcome,
+} from '../services/paper-ledger.js';
+import type { RoundMarketData } from '../services/round-market-data.js';
+import { computeStake } from '../services/stake-sizing.js';
+import { msgAlert, msgTradeClosed, msgTradeOpened } from '../services/telegram-messages.js';
+
+export const STRATEGY_COINS = ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE'] as const;
+
+export interface ScannedMarket {
+  conditionId: string;
+  name?: string;
+  slug: string;
+  underlying: string;
+  durationMinutes: number;
+  upTokenId: string;
+  downTokenId: string;
+}
+
+export interface Book {
+  bids: BookLevel[];
+  asks: BookLevel[];
+}
+
+export interface TradeOpenedEvent {
+  trade: LedgerTrade;
+  market: ScannedMarket;
+  data: RoundMarketData;
+  ask: number;
+  tauSec: number;
+  winProfit: number;
+  /** Ligne de journal lisible (contexte + décision). */
+  description: string;
+}
+
+export interface RunnerDeps {
+  cfg: FairValueConfig;
+  /** Marge de sortie anticipée (bid net − p_modèle). */
+  exitEdge: number;
+  ledgerPath: string;
+  capital: () => number;
+  now: () => number;
+  /** Porte de risque du bot (pause, limites). */
+  canTrade: () => boolean;
+  scanMarkets: () => Promise<ScannedMarket[]>;
+  getBook: (tokenId: string) => Promise<Book>;
+  getRoundData: (coin: string, slotSec: number, nowMs: number) => Promise<RoundMarketData | null>;
+  fetchOutcome: (slug: string) => Promise<RoundOutcome>;
+  notify: (html: string) => void;
+  log: (level: 'INFO' | 'WARN' | 'ERROR' | 'SIGNAL' | 'TRADE', msg: string) => void;
+  timeZone?: string;
+  /** Rappels optionnels (journal historique, compteurs du dashboard). */
+  onTradeOpened?: (e: TradeOpenedEvent) => void;
+  onTradeClosed?: (t: LedgerTrade) => void;
+}
+
+const SLUG_RE = /^(btc|eth|sol|xrp|doge)-updown-5m-(\d{9,})$/;
+
+/** Début du round (s) si le slug est EXACTEMENT `<coin>-updown-5m-<slot>` du bon coin. */
+export function slotOf(market: Pick<ScannedMarket, 'slug' | 'underlying'>): number | null {
+  const m = SLUG_RE.exec(market.slug);
+  if (!m || m[1] !== market.underlying.toLowerCase()) return null;
+  const slot = Number(m[2]);
+  return Number.isFinite(slot) && slot > 0 ? slot : null;
+}
+
+export class FairValueRunner {
+  private readonly d: RunnerDeps;
+  private readonly traded = new Set<string>();
+  private readonly lastHoldLog = new Map<string, number>();
+  private readonly unresolvedWarned = new Set<string>();
+  private markets: ScannedMarket[] = [];
+  private marketsTs = 0;
+  private running = false;
+  private ledgerBrokenWarned = false;
+
+  constructor(deps: RunnerDeps) {
+    this.d = deps;
+    // Après un redémarrage, ne jamais rejouer un round déjà joué.
+    for (const t of this.trades() ?? []) this.traded.add(t.id);
+  }
+
+  // ---------------------------------------------------------------- registre
+
+  /** Trades du registre ; null si le fichier est illisible (alerte une seule fois). */
+  private trades(): LedgerTrade[] | null {
+    const t = loadLedger(this.d.ledgerPath);
+    if (t === null) {
+      if (!this.ledgerBrokenWarned) {
+        this.ledgerBrokenWarned = true;
+        this.d.log('ERROR', `Registre ${this.d.ledgerPath} illisible : aucune position ne sera ouverte avant réparation (fichier préservé)`);
+        this.d.notify(msgAlert('registre des trades illisible — le bot ne prend plus de position jusqu\'à réparation'));
+      }
+      return null;
+    }
+    this.ledgerBrokenWarned = false;
+    return t;
+  }
+
+  private update(fn: (trades: LedgerTrade[]) => void): boolean {
+    const trades = this.trades();
+    if (trades === null) return false;
+    fn(trades);
+    try {
+      saveLedger(this.d.ledgerPath, trades);
+      return true;
+    } catch (err) {
+      this.d.log('ERROR', `Registre : écriture impossible (${(err as Error).message})`);
+      return false;
+    }
+  }
+
+  stats(): LedgerStats {
+    return computeStats(this.trades() ?? []);
+  }
+
+  private holdLog(id: string, msg: string): void {
+    const now = this.d.now();
+    if (now - (this.lastHoldLog.get(id) ?? 0) < 60_000) return;
+    this.lastHoldLog.set(id, now);
+    if (this.lastHoldLog.size > 200) {
+      for (const [k, t] of this.lastHoldLog) if (now - t > 600_000) this.lastHoldLog.delete(k);
+    }
+    this.d.log('SIGNAL', msg);
+  }
+
+  // ---------------------------------------------------------------- tick
+
+  async tick(): Promise<void> {
+    if (this.running) return; // un tick lent ne chevauche jamais le suivant
+    this.running = true;
+    try {
+      await this.resolveFinishedRounds();
+      if (!this.d.canTrade()) return;
+      if (this.trades() === null) return;
+      await this.checkExits();
+      await this.enterNewTrades();
+    } catch (err) {
+      this.d.log('WARN', `Stratégie juste valeur : tick en échec (${String((err as Error)?.message ?? err).slice(0, 160)}) — nouvel essai au prochain tick`);
+    } finally {
+      this.running = false;
+    }
+  }
+
+  /** Règle les trades dont le round est terminé et annonce le résultat. */
+  async resolveFinishedRounds(): Promise<void> {
+    const now = this.d.now();
+    const due = (this.trades() ?? []).filter(t => t.status === 'open' && now > t.endMs + 15_000);
+    for (const t of due) {
+      const outcome = await this.d.fetchOutcome(t.slug);
+      if (!outcome.resolved) {
+        if (now > t.endMs + 30 * 60_000 && !this.unresolvedWarned.has(t.id)) {
+          this.unresolvedWarned.add(t.id);
+          this.d.log('WARN', `Round ${t.slug} toujours non réglé 30 min après la fin (${outcome.reason}) — nouvel essai en continu`);
+        }
+        continue;
+      }
+      const won = outcome.upWon === (t.side === 'UP');
+      const pnl = settlePnl(t, won);
+      let closed: LedgerTrade | null = null;
+      const saved = this.update(trades => {
+        const x = trades.find(y => y.id === t.id && y.status === 'open');
+        if (x) {
+          Object.assign(x, { status: won ? 'won' : 'lost', pnl, resolvedAt: new Date(now).toISOString() });
+          closed = x;
+        }
+      });
+      if (!saved || !closed) continue;
+      this.unresolvedWarned.delete(t.id);
+      const stats = this.stats();
+      this.d.log('TRADE', `[SIMULATION] ${won ? 'GAGNÉ' : 'PERDU'} ${t.coin} ${t.side} (${t.slug}) ${pnl >= 0 ? '+' : ''}$${pnl.toFixed(4)} — `
+        + `bilan ${stats.n} trades, WR ${stats.winRate === null ? '—' : (stats.winRate * 100).toFixed(1) + ' %'}, PnL $${stats.pnl.toFixed(2)}`);
+      this.d.notify(msgTradeClosed({
+        coin: t.coin, side: t.side, slotSec: t.slotSec ?? t.endMs / 1000 - 300, outcome: won ? 'won' : 'lost', pnl, stats, timeZone: this.d.timeZone,
+      }));
+      this.d.onTradeClosed?.(closed);
+    }
+  }
+
+  /** Revend une position si (bid − frais) dépasse sa valeur modèle d'au moins exitEdge. */
+  async checkExits(): Promise<void> {
+    const { cfg } = this.d;
+    const now = this.d.now();
+    for (const pos of (this.trades() ?? []).filter(t => t.status === 'open')) {
+      const tauSec = (pos.endMs - now) / 1000;
+      // En fin de round le modèle n'est pas fiable : on garde jusqu'à la résolution.
+      if (tauSec < cfg.minTauSec || !pos.tokenId || !pos.slotSec) continue;
+      try {
+        const data = await this.d.getRoundData(pos.coin, pos.slotSec, now);
+        const pUp = data ? probUp({ ...data, tauSec }, cfg) : null;
+        if (pUp === null) continue;
+        const best = (await this.d.getBook(pos.tokenId)).bids
+          .filter(l => l.price > 0 && l.size > 0)
+          .sort((a, b) => b.price - a.price)[0];
+        if (!best) continue;
+        const pHeld = pos.side === 'UP' ? pUp : 1 - pUp;
+        const bidNet = best.price - takerFeePerShare(best.price, cfg.takerFeeRate);
+        if (bidNet - pHeld < this.d.exitEdge || best.size < pos.shares) continue;
+
+        const profit = pos.shares * bidNet - pos.stake;
+        let closed: LedgerTrade | null = null;
+        const saved = this.update(trades => {
+          const x = trades.find(y => y.id === pos.id && y.status === 'open');
+          if (x) {
+            Object.assign(x, { status: 'sold', pnl: profit, resolvedAt: new Date(now).toISOString(), exitPrice: best.price });
+            closed = x;
+          }
+        });
+        if (!saved || !closed) continue;
+        this.d.log('TRADE', `[SIMULATION] VENTE ${pos.coin} ${pos.side} @ $${best.price.toFixed(3)} (net frais ${bidNet.toFixed(3)} > p_modèle ${pHeld.toFixed(3)} + ${this.d.exitEdge}) `
+          + `round ${pos.slug} — PnL réalisé ${profit >= 0 ? '+' : ''}$${profit.toFixed(4)}`);
+        this.d.notify(msgTradeClosed({ coin: pos.coin, side: pos.side, slotSec: pos.slotSec, outcome: 'sold', pnl: profit, stats: this.stats(), timeZone: this.d.timeZone }));
+        this.d.onTradeClosed?.(closed);
+      } catch {
+        /* carnet ou flux indisponible : on garde la position */
+      }
+    }
+  }
+
+  private async refreshMarkets(): Promise<void> {
+    const now = this.d.now();
+    if (now - this.marketsTs <= 60_000 && this.markets.length) return;
+    const scanned = await this.d.scanMarkets();
+    this.markets = (Array.isArray(scanned) ? scanned : []).filter(
+      m => !!m && !!m.conditionId && m.durationMinutes === 5 && (STRATEGY_COINS as readonly string[]).includes(m.underlying) && slotOf(m) !== null,
+    );
+    this.marketsTs = now;
+  }
+
+  async enterNewTrades(): Promise<void> {
+    const { cfg } = this.d;
+    await this.refreshMarkets();
+    for (const market of this.markets) {
+      if (this.traded.has(market.conditionId)) continue;
+      const slot = slotOf(market) as number;
+      const endMs = slot * 1000 + 300_000;
+      const now = this.d.now();
+      const tauSec = (endMs - now) / 1000;
+      if (tauSec < cfg.minTauSec || tauSec > cfg.maxTauSec) continue; // aucun appel réseau hors fenêtre
+      const coin = market.underlying;
+      try {
+        const data = await this.d.getRoundData(coin, slot, now);
+        if (!data) {
+          this.holdLog(market.conditionId, `   ↳ ${market.slug} : spot/strike/vol indisponibles ou périmés → pas de mise`);
+          continue;
+        }
+        const [upBook, downBook] = await Promise.all([this.d.getBook(market.upTokenId), this.d.getBook(market.downTokenId)]);
+        const bestAsk = (b: Book) => b.asks.filter(l => l.price > 0 && l.size > 0).reduce<number | null>((m, l) => (m === null || l.price < m ? l.price : m), null);
+        const decision = decide({ ...data, tauSec, upAsk: bestAsk(upBook), downAsk: bestAsk(downBook) }, cfg);
+        const ctx = `${coin} spot ${data.spot} vs strike ${data.strike} (${data.source}), `
+          + `σ1m ${(data.sigmaPerSqrtSec * Math.sqrt(60) * 100).toFixed(3)} %, τ ${Math.round(tauSec)} s`;
+        if (!decision.side || !decision.best) {
+          this.holdLog(market.conditionId, `   ↳ ${ctx} → HOLD : ${decision.reason}`);
+          continue;
+        }
+
+        const q = decision.best;
+        const stats = this.stats();
+        const capital = this.d.capital();
+        const peakCapital = capital + stats.peakPnl;
+        const stakeRes = computeStake({
+          capital,
+          entryPrice: q.cost,
+          // Probabilité du MODÈLE, shrinkée de moitié vers le prix par computeStake (λ = 0,5).
+          bookProb: q.prob,
+          consecutiveLosses: stats.lossStreak,
+          drawdownCurrent: peakCapital > 0 ? stats.drawdownNow / peakCapital : 0,
+          openExposureEur: stats.openExposure,
+          openPositions: stats.open,
+        });
+        if (stakeRes.skipped || !(stakeRes.stake > 0)) {
+          this.holdLog(market.conditionId, `   ↳ ${ctx} → PAS de mise : ${stakeRes.rationale}`);
+          continue;
+        }
+
+        // Prix RÉEL : la mise consomme le carnet niveau par niveau ; l'edge est re-vérifié au VWAP.
+        const book = decision.side === 'UP' ? upBook : downBook;
+        const fill = estimateFill(book.asks, stakeRes.stake, cfg.maxAsk);
+        if (!fill.complete || fill.avgPrice === null) {
+          this.holdLog(market.conditionId, `   ↳ ${ctx} → PAS de mise : profondeur insuffisante pour $${stakeRes.stake.toFixed(2)} sous ${cfg.maxAsk}`);
+          continue;
+        }
+        const entryCost = effectiveCostPerShare(fill.avgPrice, cfg.takerFeeRate);
+        const edgeAtFill = q.prob - entryCost;
+        if (edgeAtFill < cfg.minEdge) {
+          this.holdLog(market.conditionId, `   ↳ ${ctx} → PAS de mise : edge au VWAP ${(edgeAtFill * 100).toFixed(1)} pt < ${(cfg.minEdge * 100).toFixed(1)} pt`);
+          continue;
+        }
+
+        const stake = stakeRes.stake;
+        const { shares, winProfit } = binaryPayoff(stake, entryCost);
+        const trade: LedgerTrade = {
+          id: market.conditionId, slug: market.slug, coin, side: decision.side, stake, costPerShare: entryCost, shares,
+          modelProb: q.prob, edge: edgeAtFill, openedAt: new Date(now).toISOString(), endMs, status: 'open', pnl: null,
+          tokenId: decision.side === 'UP' ? market.upTokenId : market.downTokenId, slotSec: slot,
+        };
+        if (!this.update(trades => { if (!trades.some(t => t.id === trade.id)) trades.push(trade); })) {
+          this.holdLog(market.conditionId, `   ↳ ${ctx} → PAS de mise : registre non enregistrable`);
+          continue;
+        }
+        this.traded.add(market.conditionId);
+        if (this.traded.size > 2000) {
+          const first = this.traded.values().next().value;
+          if (first) this.traded.delete(first);
+        }
+        const description = `📈 ${ctx} → Décision ${decision.side} @ VWAP $${fill.avgPrice.toFixed(3)} + frais = $${entryCost.toFixed(4)}/part, `
+          + `p_modèle ${q.prob.toFixed(3)}, edge ${(edgeAtFill * 100).toFixed(1)} pt, mise $${stake.toFixed(2)} (${stakeRes.bindingConstraint}) `
+          + `— gain $${winProfit.toFixed(4)} si ${decision.side} / perte $${stake.toFixed(2)} sinon`;
+        this.d.notify(msgTradeOpened({
+          coin, side: decision.side, slotSec: slot, tauSec, strike: data.strike, spot: data.spot,
+          modelProb: q.prob, costPerShare: entryCost, edge: edgeAtFill, stake, winProfit, timeZone: this.d.timeZone,
+        }));
+        this.d.onTradeOpened?.({ trade, market, data, ask: fill.avgPrice, tauSec, winProfit, description });
+      } catch (err) {
+        this.holdLog(market.conditionId, `   ↳ ${market.slug} : erreur d'analyse (${String((err as Error)?.message ?? err).slice(0, 160)}) → pas de mise`);
+      }
+    }
+  }
+}

@@ -22,26 +22,36 @@ import { CTFClient } from './src/clients/ctf-client.js';
 import { startDashboard, dashboardEmitter } from './src/dashboard/index.js';
 import type { BotState, BotConfig, LogLevel, DipArbSignal, SmartMoneySignal } from './src/dashboard/types.js';
 import { addSession, createSessionFromState, type TradeRecord } from './src/dashboard/session-history.js';
-import { getSpotPrice, formatSpotPrice, isSpotCoin, type SpotCoin } from './src/services/spot-price-service.js';
+import { isSpotCoin, type SpotCoin } from './src/services/spot-price-service.js';
 import { computeStake } from './src/services/stake-sizing.js';
-import {
-  binaryPayoff,
-  decide,
-  effectiveCostPerShare,
-  estimateFill,
-  fairValueConfigFromEnv,
-  probUp,
-  takerFeePerShare,
-} from './src/services/fair-value.js';
+import { fairValueConfigFromEnv } from './src/services/fair-value.js';
 import { getRoundMarketData } from './src/services/round-market-data.js';
+import { computeStats, fetchRoundOutcome, loadLedger, type LedgerStats } from './src/services/paper-ledger.js';
+import { FairValueRunner, STRATEGY_COINS, type ScannedMarket } from './src/strategy/fair-value-runner.js';
+import { TelegramClient, telegramConfigFromEnv } from './src/services/telegram.js';
+import { msgAlert, msgStartup, msgSummary } from './src/services/telegram-messages.js';
 
 // ============================================================================
 // CONFIGURATION (same as bot-config.ts)
 // ============================================================================
 
+const DRY_RUN = process.env.DRY_RUN !== 'false';
+/**
+ * Capital de référence UNIQUE. En papier : PAPER_CAPITAL (sinon CAPITAL_USD, sinon 50).
+ * Avant : les limites de risque utilisaient CAPITAL_USD (250) et la mise PAPER_CAPITAL
+ * (50) — deux capitaux différents pour le même portefeuille.
+ */
+function positiveEnv(...keys: string[]): number | null {
+  for (const k of keys) {
+    const v = Number(process.env[k] ?? '');
+    if (Number.isFinite(v) && v > 0) return v;
+  }
+  return null;
+}
+
 let CONFIG = {
   capital: {
-    totalUsd: parseFloat(process.env.CAPITAL_USD || '250'),
+    totalUsd: DRY_RUN ? (positiveEnv('PAPER_CAPITAL', 'CAPITAL_USD') ?? 50) : (positiveEnv('CAPITAL_USD') ?? 250),
     maxPerTradePct: 0.02,  // 🔴 FIXED: Reduced from 3% to 2%
     maxPerMarketPct: 0.10,
     maxTotalExposurePct: 0.30,
@@ -74,7 +84,7 @@ let CONFIG = {
   },
 
   smartMoney: {
-    enabled: process.env.SMARTMONEY_ENABLED !== 'false',
+    enabled: process.env.SMARTMONEY_ENABLED === 'true',
     topN: 20,
     // 🔴 FIXED: Stricter criteria (v3.1)
     minWinRate: 0.60,  // Up from 0.70 to match bot-config (60%+)
@@ -149,7 +159,7 @@ let CONFIG = {
     minRiskReward: 1.5,
   },
 
-  dryRun: process.env.DRY_RUN !== 'false',
+  dryRun: DRY_RUN,
 };
 
 // ============================================================================
@@ -248,7 +258,10 @@ function updateDashboard() {
 function canTrade(): boolean {
   // Check if permanently halted
   if (state.permanentlyHalted) {
-    log('ERROR', '🛑 Trading permanently halted - total loss limit reached');
+    if (Date.now() - (state._lastPauseLog || 0) > 60 * 60_000) {
+      state._lastPauseLog = Date.now();
+      log('ERROR', '🛑 Trading permanently halted - total loss limit reached');
+    }
     return false;
   }
 
@@ -304,6 +317,7 @@ function canTrade(): boolean {
     state.isPaused = true;
     state.pauseUntil = Date.now() + CONFIG.risk.pauseOnBreachMinutes * 60 * 1000;
     log('WARN', `Daily loss limit breached: -$${Math.abs(state.dailyPnL).toFixed(2)} (limit: $${dailyLossLimit.toFixed(2)})`);
+    alertOnce('daily', `perte du jour ${Math.abs(state.dailyPnL).toFixed(2)} $ ≥ limite ${dailyLossLimit.toFixed(2)} $ : pause de ${CONFIG.risk.pauseOnBreachMinutes} min`);
     updateDashboard();
     return false;
   }
@@ -314,6 +328,7 @@ function canTrade(): boolean {
     log('ERROR', `🛑 Monthly loss limit breached: -$${Math.abs(state.monthlyPnL).toFixed(2)} (limit: $${monthlyLossLimit.toFixed(2)})`);
     state.isPaused = true;
     state.pauseUntil = Date.now() + (30 * 24 * 60 * 60 * 1000);
+    alertOnce('monthly', `perte du mois ≥ ${monthlyLossLimit.toFixed(2)} $ : trading en pause 30 jours`);
     updateDashboard();
     return false;
   }
@@ -323,6 +338,7 @@ function canTrade(): boolean {
     log('ERROR', `🛑 Maximum drawdown reached: ${(state.currentDrawdown * 100).toFixed(1)}%`);
     state.isPaused = true;
     state.pauseUntil = Date.now() + (7 * 24 * 60 * 60 * 1000);
+    alertOnce('drawdown', `baisse de ${(state.currentDrawdown * 100).toFixed(1)} % depuis le plus haut : trading en pause 7 jours`);
     updateDashboard();
     return false;
   }
@@ -332,6 +348,7 @@ function canTrade(): boolean {
   if (state.totalPnL <= -totalLossLimit) {
     state.permanentlyHalted = true;
     log('ERROR', '💀 TOTAL LOSS LIMIT REACHED - TRADING PERMANENTLY HALTED');
+    alertOnce('halt', `perte totale ≥ ${totalLossLimit.toFixed(2)} $ : trading ARRÊTÉ définitivement (redémarrage manuel requis)`);
     log('ERROR', `Total loss: -$${Math.abs(state.totalPnL).toFixed(2)} (limit: $${totalLossLimit.toFixed(2)})`);
     updateDashboard();
     return false;
@@ -396,18 +413,6 @@ function logLearning(e: { roundId?: string; market?: string; side: string; price
   } catch (err) { log('WARN', `learning store: ${(err as Error).message}`); }
 }
 
-/**
- * Fin du round encodé dans un slug `<coin>-updown-5m-<slot>` (slot = début, en
- * secondes epoch). Renvoie null si le slug ne suit pas ce format.
- */
-function roundEndMsFromSlug(slug: string | undefined): number | null {
-  if (!slug) return null;
-  const m = slug.match(/-(\d{9,})$/);
-  if (!m) return null;
-  const slot = Number(m[1]);
-  if (!Number.isFinite(slot) || slot <= 0) return null;
-  return slot * 1000 + 300 * 1000; // round 5m
-}
 
 /** Dossier d'état local du bot (history.json, pnl.json). */
 function polyDir(): string {
@@ -430,24 +435,35 @@ function readHistory(): any[] | null {
   }
 }
 
-/** Début du round (s epoch) encodé dans un slug `<coin>-updown-5m-<slot>`, ou null. */
-function slotFromSlug(slug: string | undefined): number | null {
-  const end = roundEndMsFromSlug(slug);
-  return end === null ? null : end / 1000 - 300;
+
+// === REGISTRE DES TRADES (src/services/paper-ledger.ts) — source de vérité du PnL ===
+// Écrit UNIQUEMENT par la stratégie (src/strategy/fair-value-runner.ts) ; le reste du bot
+// ne fait que le lire pour la compta affichée et la porte de risque.
+function ledgerPath(): string {
+  return polyDir() + '/fv-ledger.json';
 }
 
-/**
- * Pertes consécutives RÉELLES (trades résolus de history.json, du plus récent au plus
- * ancien). `state.consecutiveLosses` ne bouge jamais en paper (aucun PnL réalisé ne
- * transite par recordTrade) : le modérateur « série de pertes » du sizing était inerte.
- */
-function realLossStreak(): number {
-  const resolved = (readHistory() ?? [])
-    .filter(t => t && t.side !== 'HOLD' && typeof t.realized === 'number' && t.realized !== 0)
-    .sort((x, y) => String(x.ts).localeCompare(String(y.ts)));
-  let streak = 0;
-  for (let i = resolved.length - 1; i >= 0 && resolved[i].realized < 0; i--) streak++;
-  return streak;
+function ledgerStats(): LedgerStats {
+  return computeStats(loadLedger(ledgerPath()) ?? []);
+}
+
+// === NOTIFICATIONS TELEGRAM (src/services/telegram.ts) ===
+let telegram: TelegramClient | null = null;
+const TG_TZ = process.env.TELEGRAM_TZ || 'Europe/Paris';
+/** Alerte de risque, au plus une fois toutes les 6 h par motif (pas de spam horaire). */
+const lastAlertAt = new Map<string, number>();
+function alertOnce(key: string, text: string): void {
+  const now = Date.now();
+  if (now - (lastAlertAt.get(key) ?? 0) < 6 * 3_600_000) return;
+  lastAlertAt.set(key, now);
+  notify(msgAlert(text));
+}
+
+/** Envoie un message si Telegram est configuré ; ne lève jamais, ne bloque jamais. */
+function notify(html: string): void {
+  try {
+    telegram?.send(html);
+  } catch { /* les notifications ne doivent jamais casser le bot */ }
 }
 
 function simulateTrade(profit: number, strategy: string, description: string) {
@@ -465,55 +481,6 @@ function simulateTrade(profit: number, strategy: string, description: string) {
   log('TRADE', `[SIMULATION] ${description} | Gain espéré (non réalisé): $${profit.toFixed(2)}`);
   // Compté comme trade, mais SANS credit de PnL : le realise vient du resolveur.
   recordTrade(profit, strategy, false);
-}
-
-// === SORTIE ANTICIPÉE (paper) fondée sur l'espérance ===
-// Remplace le take-profit / stop-loss en % (P_TAKE_PROFIT / P_STOP_LOSS) : vendre un
-// binaire au bid coûte le demi-spread + les frais taker ; ce n'est rentable QUE si le
-// marché paie plus que ce que la position vaut selon le modèle. Règle :
-//   vendre ⟺ (bid − frais) − p_modèle(côté détenu) ≥ FV_EXIT_EDGE
-// Dans la fenêtre TWAP finale (τ < FV_MIN_TAU_SEC) le modèle n'est pas fiable : on
-// garde jusqu'à la résolution. Un round terminé est laissé au résolveur.
-async function checkPaperExits(sdk: PolymarketSDK) {
-  if (!CONFIG.dryRun || !state.paper || paperOpen.length === 0) return;
-  const now = Date.now();
-  const stillOpen: typeof paperOpen = [];
-  for (const pos of paperOpen) {
-    if (now > pos.endMs + 30_000) continue; // round terminé → résolveur
-    const tauSec = (pos.endMs - now) / 1000;
-    if (tauSec < FV_CFG.minTauSec) { stillOpen.push(pos); continue; }
-    try {
-      const data = await getRoundMarketData(pos.coin as SpotCoin, pos.slot, now);
-      const pUp = data ? probUp({ ...data, tauSec }, FV_CFG) : null;
-      const book = await sdk.markets.getTokenOrderbook(pos.tokenId);
-      const best = book.bids[0];
-      if (pUp === null || !best || !(best.price > 0)) { stillOpen.push(pos); continue; }
-      const pHeld = pos.side === 'YES' ? pUp : 1 - pUp;
-      const bidNet = best.price - takerFeePerShare(best.price, FV_CFG.takerFeeRate);
-      if (bidNet - pHeld < FV_EXIT_EDGE || best.size < pos.shares) { stillOpen.push(pos); continue; }
-
-      const profit = pos.shares * bidNet - pos.stake;
-      state.paper.pnl += profit;
-      state.paper.balance += profit;
-      log('TRADE', `[SIMULATION] VENTE ${pos.coin} ${pos.side} @ $${best.price.toFixed(3)} (net frais ${bidNet.toFixed(3)} > p_modèle ${pHeld.toFixed(3)} + ${FV_EXIT_EDGE}) `
-        + `round ${pos.slug} — PnL réalisé ${profit >= 0 ? '+' : ''}$${profit.toFixed(4)}`);
-      try {
-        const h = readHistory();
-        if (h === null) throw new Error('history.json illisible');
-        const entry = h.find(x => x.conditionId === pos.conditionId && x.side === pos.side && !x.soldTp);
-        if (entry) {
-          entry.realized = Math.round(profit * 10000) / 10000;
-          entry.soldTp = true;
-          entry.exitPrice = best.price;
-          entry.exitModelProb = Math.round(pHeld * 10000) / 10000;
-        }
-        writeFileSync(polyDir() + '/history.json', JSON.stringify(h, null, 2));
-      } catch { /* non bloquant : le résolveur reste la source de vérité */ }
-    } catch {
-      stillOpen.push(pos);
-    }
-  }
-  paperOpen = stillOpen;
 }
 
 // ============================================================================
@@ -786,13 +753,13 @@ async function setupDipArb(sdk: PolymarketSDK) {
       const _sigHint = ((s as any).estimatedProfitRate ?? (s as any).expectedProfitRate);
       const _entry = Number(s.currentPrice) > 0 && Number(s.currentPrice) < 1 ? Number(s.currentPrice) : 0;
       const _sizeSig = computeStake({
-        capital: Number(process.env.PAPER_CAPITAL ?? '') || 50,
+        capital: CONFIG.capital.totalUsd,
         entryPrice: _entry,
         bookProb: typeof _sigHint === 'number' && _sigHint > 1 ? 1 / _sigHint : null,
         consecutiveLosses: state.consecutiveLosses,
         drawdownCurrent: realDrawdownPct(),
-        openExposureEur: paperOpen.reduce((a, o) => a + (Number(o.stake) || 0), 0),
-        openPositions: paperOpen.length,
+        openExposureEur: ledgerStats().openExposure,
+        openPositions: ledgerStats().open,
       });
       if (_sizeSig.skipped || !(_sizeSig.stake > 0)) {
         log('LEARN', `   ↳ signal ${s.type} ignoré (pas de mise) : ${_sizeSig.rationale}`);
@@ -894,14 +861,8 @@ async function setupDipArb(sdk: PolymarketSDK) {
 
 let swapService: SwapService | null = null;
 let currentRoundId: string = '';
-// Positions paper ouvertes (achat simulé) — clôturées par la sortie EV ou à la résolution.
-// `entry` = coût réel par part (VWAP + frais taker), `shares` = parts détenues.
-let paperOpen: Array<{
-  side: string; entry: number; shares: number; conditionId: string; slug: string; coin: string; stake: number;
-  tokenId: string; slot: number; endMs: number;
-}> = [];
-// Rounds déjà joués : au plus UNE entrée par round (la scrutation est fréquente).
-const tradedMarkets = new Set<string>();
+// Les positions ouvertes vivent dans le registre (fv-ledger.json) : elles survivent à un
+// redémarrage et alimentent exposition, sorties anticipées et résolution.
 
 // Paramètres de la stratégie juste valeur (src/services/fair-value.ts, surchargeables par .env).
 const FV_CFG = fairValueConfigFromEnv(process.env);
@@ -912,36 +873,28 @@ const FV_EXIT_EDGE = (() => {
 })();
 
 /**
- * Drawdown REEL, lu sur le PnL du resolveur (`~/.polymarket/pnl.json`), la seule
- * source de verite. `state.currentDrawdown` est inutilisable : il derive de
- * `state.totalPnL`, un compteur en memoire qui ne credite que des gains estimes et
- * ne debite JAMAIS une perte (cf. docs/rebuild/dashboard/AUDIT.md : +12 745 $ en
- * memoire contre +40,28 $ reels). On mesure donc la perte par rapport au capital de
- * depart, ce qui ne depend d'aucun pic fictif.
- */
-function realPnl(): number | null {
-  try {
-    const p = JSON.parse(readFileSync(polyDir() + '/pnl.json', 'utf8')) as { pnl?: number };
-    const v = Number(p?.pnl);
-    return Number.isFinite(v) ? v : null;
-  } catch {
-    return null; // fichier absent/illisible : on ne fabrique aucun chiffre
-  }
-}
-
-/**
- * Recale la comptabilite AFFICHEE sur le PnL REALISE du resolveur (pnl.json), seule
- * source de verite. Sans ca, `state.totalPnL` ne credite que des gains estimes et ne
- * debite jamais une perte (audit : +12 745 $ affiches vs +40,28 $ reels), ce qui rendait
- * les 4 couches de risque inertes. Si le fichier est illisible, on ne touche a RIEN
- * (mieux vaut un chiffre perime qu'un chiffre inventé).
+ * Recale la comptabilité AFFICHÉE et la porte de risque sur le PnL RÉALISÉ du registre
+ * (fv-ledger.json), seule source de vérité. `state.totalPnL` ne doit jamais contenir de
+ * gain espéré : sinon les 4 couches de risque deviennent inertes (cf. audit dashboard).
  */
 function syncRealizedPnl() {
-  const v = realPnl();
-  if (v === null) return;
+  const trades = loadLedger(ledgerPath()) ?? [];
+  const st = computeStats(trades);
+  const v = st.pnl;
   state.totalPnL = v;
+  // Pertes du jour / du mois sur fenêtres GLISSANTES (24 h / 30 j), recalculées à chaque
+  // tick depuis le registre : avant, ces compteurs n'étaient jamais alimentés en papier
+  // (aucun PnL réalisé ne passait par recordTrade) → limites journalière et mensuelle
+  // inertes. Fenêtres glissantes = insensibles à un redémarrage.
+  const now = Date.now();
+  const since = (ms: number) => trades
+    .filter(t => t.status !== 'open' && typeof t.pnl === 'number' && Date.parse(t.resolvedAt ?? '') >= now - ms)
+    .reduce((acc, t) => acc + (t.pnl as number), 0);
+  state.dailyPnL = since(24 * 3_600_000);
+  state.monthlyPnL = since(30 * 24 * 3_600_000);
   state.currentCapital = CONFIG.capital.totalUsd + v;
-  if (state.currentCapital > state.peakCapital) state.peakCapital = state.currentCapital;
+  // Plus haut historique (registre) : un redémarrage ne doit pas effacer le drawdown.
+  state.peakCapital = Math.max(state.peakCapital, CONFIG.capital.totalUsd + st.peakPnl, state.currentCapital);
   state.currentDrawdown =
     state.peakCapital > 0 ? Math.max(0, (state.peakCapital - state.currentCapital) / state.peakCapital) : 0;
   if (state.paper) {
@@ -951,23 +904,18 @@ function syncRealizedPnl() {
   updateDashboard();
 }
 
+/** Baisse actuelle du capital sous son plus haut, en fraction (registre). */
 function realDrawdownPct(): number {
-  try {
-    const p = JSON.parse(readFileSync(polyDir() + '/pnl.json', 'utf8')) as { pnl?: number };
-    const cap = Number(process.env.PAPER_CAPITAL ?? '') || 50;
-    const pnl = Number(p?.pnl);
-    if (Number.isFinite(pnl) && cap > 0 && pnl < 0) return Math.min(1, -pnl / cap);
-    return 0;
-  } catch {
-    return 0; // fichier absent/illisible : on ne fabrique pas un chiffre de risque
-  }
+  const st = ledgerStats();
+  const peakCapital = CONFIG.capital.totalUsd + st.peakPnl;
+  return peakCapital > 0 ? Math.min(1, st.drawdownNow / peakCapital) : 0;
 }
 
 async function updateBalances() {
   if (CONFIG.dryRun) {
     // SIMULATION: Mock balances
     // Base 10,000 + whatever PnL we've made in this session
-    state.usdcEBalance = (Number(process.env.PAPER_CAPITAL ?? '') || 10000) + state.totalPnL;
+    state.usdcEBalance = CONFIG.capital.totalUsd + state.totalPnL;
     state.maticBalance = 100;
 
     // Only verify once/log sparsely
@@ -1086,6 +1034,40 @@ async function setupOnchain() {
 }
 
 // ============================================================================
+// TELEGRAM — connexion vérifiée au démarrage, bilan périodique
+// ============================================================================
+async function setupTelegram() {
+  const cfg = telegramConfigFromEnv(process.env);
+  if (!cfg) {
+    log('INFO', '📵 Telegram désactivé (TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID absents ou TELEGRAM_ENABLED=false)');
+    return;
+  }
+  const client = new TelegramClient({ ...cfg, log: (level, msg) => log(level, msg) });
+  const check = await client.check();
+  if (!check.ok) {
+    log('ERROR', `📵 Telegram NON connecté : ${check.detail}. Le bot continue sans notifications.`);
+    return;
+  }
+  telegram = client;
+  log('INFO', `📨 Telegram ${check.detail}`);
+  notify(msgStartup({
+    capital: CONFIG.capital.totalUsd, minEdge: FV_CFG.minEdge, minProb: FV_CFG.minProb, feeRate: FV_CFG.takerFeeRate,
+    pollSec: FV_POLL_MS / 1000, coins: [...STRATEGY_COINS], stats: ledgerStats(),
+  }));
+
+  // Bilan périodique, seulement s'il s'est passé quelque chose depuis le précédent.
+  const everyMin = Math.min(24 * 60, Math.max(15, Number(process.env.TELEGRAM_SUMMARY_MIN ?? '') || 60));
+  let lastKey = '';
+  setInterval(() => {
+    const st = ledgerStats();
+    const key = `${st.n}|${st.open}`;
+    if (key === lastKey || (st.n === 0 && st.open === 0)) return;
+    lastKey = key;
+    notify(msgSummary(st, CONFIG.capital.totalUsd));
+  }, everyMin * 60_000);
+}
+
+// ============================================================================
 // STRATÉGIE PRINCIPALE — juste valeur Up/Down 5 min (src/services/fair-value.ts)
 // ============================================================================
 // Remplace la règle « acheter le favori si son ask ∈ [0,58 ; 0,65] » : mesurée sur
@@ -1095,161 +1077,60 @@ async function setupOnchain() {
 // RÉEL (VWAP du carnet + frais taker) d'au moins FV_MIN_EDGE. Au plus une entrée par
 // round. La décision et ses entrées sont journalisées pour mesurer la calibration.
 async function setupFairValueStrategy(sdk: PolymarketSDK) {
-  log('INFO', `📐 Stratégie juste valeur : edge min ${(FV_CFG.minEdge * 100).toFixed(1)} pt après frais `
+  log('INFO', `📐 Stratégie juste valeur : p_modèle ≥ ${FV_CFG.minProb} et edge ≥ ${(FV_CFG.minEdge * 100).toFixed(1)} pt après frais `
     + `(taker ${FV_CFG.takerFeeRate}), τ ∈ [${FV_CFG.minTauSec}, ${FV_CFG.maxTauSec}] s, ask ∈ [${FV_CFG.minAsk}, ${FV_CFG.maxAsk}], `
-    + `queues ${FV_CFG.tails}, sortie si bid net > p_modèle + ${FV_EXIT_EDGE}, scrutation ${FV_POLL_MS / 1000} s`);
+    + `loi ${FV_CFG.tails}, sortie si bid net > p_modèle + ${FV_EXIT_EDGE}, scrutation ${FV_POLL_MS / 1000} s`);
   if (!CONFIG.dryRun) {
     log('WARN', 'Stratégie juste valeur : exécution LIVE non implémentée — décisions journalisées, AUCUN ordre envoyé.');
   }
+  await setupTelegram();
 
-  type ScannedMarket = { conditionId: string; name: string; slug: string; underlying: string; durationMinutes: number; upTokenId: string; downTokenId: string };
-  let markets: ScannedMarket[] = [];
-  let marketsTs = 0;
-  let running = false;
-  const lastHoldLog = new Map<string, number>();
-
-  const holdLog = (cid: string, msg: string) => {
-    const now = Date.now();
-    if (now - (lastHoldLog.get(cid) ?? 0) < 60_000) return;
-    lastHoldLog.set(cid, now);
-    if (lastHoldLog.size > 200) {
-      for (const [k, t] of lastHoldLog) if (now - t > 600_000) lastHoldLog.delete(k);
-    }
-    log('SIGNAL', msg);
-  };
-
-  async function tick() {
-    if (running) return; // un tick lent ne doit jamais se chevaucher avec le suivant
-    running = true;
-    try {
-      // Compta recalée sur le PnL RÉALISÉ avant la porte de risque (sinon garde-fous inertes).
+  const runner = new FairValueRunner({
+    cfg: FV_CFG,
+    exitEdge: FV_EXIT_EDGE,
+    ledgerPath: ledgerPath(),
+    capital: () => CONFIG.capital.totalUsd,
+    now: () => Date.now(),
+    canTrade: () => { syncRealizedPnl(); return canTrade(); },
+    scanMarkets: async () => (await sdk.dipArb.scanUpcomingMarkets({
+      coin: 'all', duration: '5m', minMinutesUntilEnd: 0, maxMinutesUntilEnd: 6, limit: 12,
+    })) as ScannedMarket[],
+    getBook: tokenId => sdk.markets.getTokenOrderbook(tokenId),
+    getRoundData: (coin, slot, now) => (isSpotCoin(coin) ? getRoundMarketData(coin as SpotCoin, slot, now) : Promise.resolve(null)),
+    fetchOutcome: slug => fetchRoundOutcome(slug),
+    notify,
+    log: (level, msg) => log(level, msg),
+    timeZone: TG_TZ,
+    onTradeOpened: e => {
+      simulateTrade(e.winProfit, 'dipArb', e.description);
+      // Journal historique (lu par les outils externes paperbot-pnl.py / recap).
+      logLearning({
+        roundId: e.market.slug, market: e.market.name?.slice(0, 40), side: e.trade.side === 'UP' ? 'YES' : 'NO',
+        // `price` = coût RÉEL par part (VWAP + frais) : le PnL résolu inclut donc les frais.
+        price: Math.round(e.trade.costPerShare * 10000) / 10000,
+        estGain: e.winProfit, conf: e.trade.modelProb, winProb: e.trade.modelProb, coin: e.trade.coin, stake: e.trade.stake,
+        conditionId: e.trade.id, strategy: 'fair-value', ask: e.ask, feePerShare: e.trade.costPerShare - e.ask,
+        modelProb: e.trade.modelProb, edge: e.trade.edge, tauSec: Math.round(e.tauSec),
+        spot: e.data.spot, strike: e.data.strike, sigma1m: e.data.sigmaPerSqrtSec * Math.sqrt(60), priceSource: e.data.source,
+      });
+      updateDashboard();
+    },
+    onTradeClosed: t => {
       syncRealizedPnl();
-      // Seul le mode PAPER est implémenté : en LIVE (bascule possible depuis le dashboard)
-      // on n'écrit RIEN — un trade journalisé sans ordre réel fausserait le PnL résolu.
-      if (!CONFIG.dryRun || !state.paper) return;
-      if (!canTrade()) return;
-      await checkPaperExits(sdk);
-
-      if (Date.now() - marketsTs > 60_000 || markets.length === 0) {
-        const scanned = await sdk.dipArb.scanUpcomingMarkets({
-          coin: 'all', duration: '5m', minMinutesUntilEnd: 0, maxMinutesUntilEnd: 6, limit: 12,
-        });
-        markets = (scanned as Array<ScannedMarket | undefined>)
-          .filter((m): m is ScannedMarket => !!m && !!m.conditionId && m.durationMinutes === 5 && isSpotCoin(m.underlying));
-        marketsTs = Date.now();
+      if (t.status !== 'sold') return;
+      // Compatibilité des outils externes : une revente est marquée comme avant (soldTp).
+      const h = readHistory();
+      const entry = h?.find(x => x.conditionId === t.id && !x.soldTp);
+      if (h && entry) {
+        Object.assign(entry, { realized: Math.round((t.pnl ?? 0) * 10000) / 10000, soldTp: true, exitPrice: t.exitPrice });
+        try { writeFileSync(polyDir() + '/history.json', JSON.stringify(h, null, 2)); } catch { /* non bloquant */ }
       }
+    },
+  });
 
-      for (const market of markets) {
-        if (tradedMarkets.has(market.conditionId)) continue;
-        // Slug exact `<coin>-updown-5m-<slot>` : parseUnderlyingFromSlug retombe sur 'BTC'
-        // pour un slug inconnu — on ne laisse jamais un autre marché passer pour un round BTC.
-        if (!new RegExp(`^${market.underlying.toLowerCase()}-updown-5m-\\d{9,}$`).test(market.slug)) continue;
-        const slot = slotFromSlug(market.slug);
-        if (slot === null) continue;
-        const endMs = slot * 1000 + 300_000;
-        const now = Date.now();
-        const tauSec = (endMs - now) / 1000;
-        // Filtre sans réseau : hors fenêtre de τ, rien à évaluer (et pas de log).
-        if (tauSec < FV_CFG.minTauSec || tauSec > FV_CFG.maxTauSec) continue;
-        const coin = market.underlying as SpotCoin;
-
-        try {
-          const data = await getRoundMarketData(coin, slot, now);
-          if (!data) {
-            holdLog(market.conditionId, `   ↳ ${market.slug} : spot/strike/vol indisponibles ou périmés → pas de mise`);
-            continue;
-          }
-          const [upBook, downBook] = await Promise.all([
-            sdk.markets.getTokenOrderbook(market.upTokenId),
-            sdk.markets.getTokenOrderbook(market.downTokenId),
-          ]);
-          const upAsk = upBook.asks[0]?.price ?? null;
-          const downAsk = downBook.asks[0]?.price ?? null;
-          const decision = decide({ ...data, tauSec, upAsk, downAsk }, FV_CFG);
-          const ctx = `${coin} spot ${formatSpotPrice(coin, data.spot)} vs strike ${formatSpotPrice(coin, data.strike)} `
-            + `(${data.source}), σ1m ${(data.sigmaPerSqrtSec * Math.sqrt(60) * 100).toFixed(3)} %, τ ${Math.round(tauSec)} s`;
-          if (!decision.side || !decision.best) {
-            holdLog(market.conditionId, `   ↳ ${ctx} → HOLD : ${decision.reason}`);
-            continue;
-          }
-
-          const q = decision.best;
-          const capital = Number(process.env.PAPER_CAPITAL ?? '') || 50;
-          const stakeRes = computeStake({
-            capital,
-            entryPrice: q.cost,
-            // Probabilité du MODÈLE, shrinkée vers le prix par computeStake (λ = 0,5) :
-            // un modèle non validé ne reçoit que la moitié de sa propre conviction.
-            bookProb: q.prob,
-            consecutiveLosses: realLossStreak(),
-            drawdownCurrent: realDrawdownPct(),
-            openExposureEur: paperOpen.reduce((s, o) => s + (Number(o.stake) || 0), 0),
-            openPositions: paperOpen.length,
-          });
-          if (stakeRes.skipped || !(stakeRes.stake > 0)) {
-            holdLog(market.conditionId, `   ↳ ${ctx} → PAS de mise : ${stakeRes.rationale}`);
-            continue;
-          }
-
-          // Prix RÉEL : on consomme le carnet pour la mise (le meilleur ask ne contient
-          // souvent que 5 parts, COSTS.md §1.1) et on re-vérifie l'edge au VWAP.
-          const book = decision.side === 'UP' ? upBook : downBook;
-          const fill = estimateFill(book.asks, stakeRes.stake, FV_CFG.maxAsk);
-          if (!fill.complete || fill.avgPrice === null) {
-            holdLog(market.conditionId, `   ↳ ${ctx} → PAS de mise : profondeur insuffisante pour $${stakeRes.stake.toFixed(2)} sous ${FV_CFG.maxAsk}`);
-            continue;
-          }
-          const entryCost = effectiveCostPerShare(fill.avgPrice, FV_CFG.takerFeeRate);
-          const edgeAtFill = q.prob - entryCost;
-          if (edgeAtFill < FV_CFG.minEdge) {
-            holdLog(market.conditionId, `   ↳ ${ctx} → PAS de mise : edge au VWAP ${(edgeAtFill * 100).toFixed(1)} pt < ${(FV_CFG.minEdge * 100).toFixed(1)} pt`);
-            continue;
-          }
-
-          const stake = stakeRes.stake;
-          const { shares, winProfit: estProfit } = binaryPayoff(stake, entryCost); // frais inclus
-          const side = decision.side === 'UP' ? 'YES' : 'NO';
-          tradedMarkets.add(market.conditionId);
-          simulateTrade(estProfit, 'dipArb',
-            `📈 ${ctx} → Décision ${side} (${decision.side}) @ VWAP $${fill.avgPrice.toFixed(3)} + frais = $${entryCost.toFixed(4)}/part, `
-            + `p_modèle ${q.prob.toFixed(3)}, edge ${(edgeAtFill * 100).toFixed(1)} pt, mise $${stake.toFixed(2)} (${stakeRes.bindingConstraint}) `
-            + `— gain $${estProfit.toFixed(4)} si ${decision.side} / perte $${stake.toFixed(2)} sinon`);
-          logLearning({
-            roundId: market.slug, market: market.name?.slice(0, 40), side,
-            // `price` = coût RÉEL par part (VWAP + frais) : le PnL résolu inclut donc les frais.
-            price: Math.round(entryCost * 10000) / 10000,
-            estGain: estProfit, conf: q.prob, winProb: q.prob, coin, stake, conditionId: market.conditionId,
-            strategy: 'fair-value', ask: fill.avgPrice, feePerShare: entryCost - fill.avgPrice,
-            modelProb: q.prob, edge: edgeAtFill, tauSec: Math.round(tauSec),
-            spot: data.spot, strike: data.strike, sigma1m: data.sigmaPerSqrtSec * Math.sqrt(60), priceSource: data.source,
-          });
-          paperOpen.push({
-            side, entry: entryCost, shares, conditionId: market.conditionId, slug: market.slug, coin, stake,
-            tokenId: decision.side === 'UP' ? market.upTokenId : market.downTokenId, slot, endMs,
-          });
-          if (tradedMarkets.size > 500) {
-            const first = tradedMarkets.values().next().value;
-            if (first) tradedMarkets.delete(first);
-          }
-          updateDashboard();
-        } catch (err) {
-          holdLog(market.conditionId, `   ↳ ${market.slug} : erreur d'analyse (${String((err as Error)?.message ?? err).slice(0, 160)}) → pas de mise`);
-        }
-      }
-    } catch (err) {
-      log('WARN', `Stratégie juste valeur : tick en échec (${String((err as Error)?.message ?? err).slice(0, 160)}) — nouvel essai au prochain tick`);
-    } finally {
-      running = false;
-    }
-  }
-
-  // Après un redémarrage, ne pas re-jouer un round déjà joué (la mémoire est perdue,
-  // history.json non) : on recharge les conditionId des 15 dernières minutes.
-  const since = Date.now() - 15 * 60_000;
-  for (const t of readHistory() ?? []) {
-    if (t && typeof t.conditionId === 'string' && Date.parse(String(t.ts)) >= since) tradedMarkets.add(t.conditionId);
-  }
-
+  // Seul le mode PAPER est implémenté : en LIVE (bascule possible depuis le dashboard)
+  // la stratégie n'écrit RIEN — un trade journalisé sans ordre réel fausserait le PnL.
+  const tick = () => (CONFIG.dryRun && state.paper ? runner.tick() : Promise.resolve());
   await tick();
   setInterval(() => { void tick(); }, FV_POLL_MS);
 }
@@ -1566,7 +1447,7 @@ async function main() {
       trades: 0,
       totalVolume: 0,
     };
-    log('INFO', '📝 Paper Trading Activated: Simulating trades with $250 initial capital');
+    log('INFO', `📝 Paper Trading Activated: capital papier $${CONFIG.capital.totalUsd.toFixed(2)}`);
     updateDashboard();
   }
 

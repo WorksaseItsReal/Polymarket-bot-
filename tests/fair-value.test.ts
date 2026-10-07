@@ -68,13 +68,13 @@ test('variance TWAP : continue en τ = W, plein chemin au-delà', () => {
 });
 
 test('probUp : 0,5 au strike, monotone en spot, se rapproche de 0,5 quand τ augmente', () => {
-  close(probUp({ spot: 100, strike: 100, sigmaPerSqrtSec: SIGMA, tauSec: 120 })!, 0.5, 1e-12);
+  close(probUp({ spot: 100, strike: 100, sigmaPerSqrtSec: SIGMA, tauSec: 120 })!, 0.5, 1e-6); // précision de normCdf ≈ 1,5e-7
   const up = probUp({ spot: 100.05, strike: 100, sigmaPerSqrtSec: SIGMA, tauSec: 120 })!;
   const upMore = probUp({ spot: 100.1, strike: 100, sigmaPerSqrtSec: SIGMA, tauSec: 120 })!;
   const upLong = probUp({ spot: 100.05, strike: 100, sigmaPerSqrtSec: SIGMA, tauSec: 240 })!;
   assert.ok(up > 0.5 && upMore > up && upLong < up && upLong > 0.5);
   // symétrie : spot sous le strike du même écart log
-  close(probUp({ spot: 100 * 100 / 100.05, strike: 100, sigmaPerSqrtSec: SIGMA, tauSec: 120 })!, 1 - up, 1e-9);
+  close(probUp({ spot: 100 * 100 / 100.05, strike: 100, sigmaPerSqrtSec: SIGMA, tauSec: 120 })!, 1 - up, 1e-6);
   // jamais 0 ni 1
   assert.ok(probUp({ spot: 200, strike: 100, sigmaPerSqrtSec: SIGMA, tauSec: 120 })! <= 0.99);
 });
@@ -139,12 +139,13 @@ test('estimateFill : trie les asks, consomme la profondeur, respecte le prix lim
 });
 
 test('config depuis env : valeurs invalides ignorées, bornes incohérentes rejetées', () => {
-  const c = fairValueConfigFromEnv({ FV_MIN_EDGE: 'abc', FV_BASIS_BPS: '-3', FV_MIN_TAU_SEC: '200', FV_MAX_TAU_SEC: '100', FV_TAILS: 'normal' });
+  const c = fairValueConfigFromEnv({ FV_MIN_EDGE: 'abc', FV_BASIS_BPS: '-3', FV_MIN_TAU_SEC: '200', FV_MAX_TAU_SEC: '100', FV_TAILS: 't4' });
   assert.equal(c.minEdge, CFG.minEdge);
   assert.equal(c.basisBps, CFG.basisBps);
   assert.equal(c.minTauSec, CFG.minTauSec);
   assert.equal(c.maxTauSec, CFG.maxTauSec);
-  assert.equal(c.tails, 'normal');
+  assert.equal(c.tails, 't4');
+  assert.equal(fairValueConfigFromEnv({}).tails, 'normal', 'normale par défaut');
   assert.equal(fairValueConfigFromEnv({ FV_MIN_EDGE: '0.06' }).minEdge, 0.06);
 });
 
