@@ -146,6 +146,7 @@ Variables (nom → rôle) :
 | `FV_TWAP_WINDOW_SEC` | `0` | Résolution ponctuelle (règle officielle : prix Chainlink à la fin vs au début). |
 | `FV_TAILS` | `normal` | Loi des rendements. `t4` est **plus** confiante pour \|z\| < 2 (pas plus prudente). |
 | `FV_POLL_SEC` | `10` | Période de scrutation de fond (bornée à [5 ; 300] s). |
+| `FV_FILL_DELAY_MS` | `1000` | Latence d'exécution simulée : le carnet est relu après ce délai et le pari n'est « exécuté » que si l'avantage existe encore (papier plus réaliste). |
 | `FV_COINS` | les 5 | Coins tradés, ex. `BTC,ETH` (à décider avec `fv-report.ts`, section 3b). |
 | `FV_SPOT_STREAM` | `true` | Prix spot temps réel par WebSocket Binance (`false` = REST seul). |
 | `FV_MOVE_BPS` | `3` | Mouvement du spot (points de base) qui déclenche une évaluation immédiate du coin. |
@@ -334,6 +335,10 @@ C'est des milliers de rounds par jour, au lieu de ~1 trade par heure.
 `sigma1m`, `ask` et `feePerShare` ; `price` y est le **coût réel par part, frais inclus**, donc
 le PnL résolu inclut les frais. C'est ce qui permet de **mesurer la calibration** du modèle
 (`modelProb` moyen vs taux de réussite réel par tranche).
+
+**Latence simulée** : entre la décision et l'exécution, le bot attend `FV_FILL_DELAY_MS`
+(1 s) et relit le carnet ; il ne « remplit » que si l'avantage y est encore. Sans cela, le
+papier encaisserait des prix en retard qu'un bot plus rapide aurait déjà pris en réel.
 
 **Limites honnêtes** : le modèle n'a **pas** été validé sur historique (aucune donnée
 spot+carnet horodatée n'existe) ; le strike est approché (ouverture Binance/Coinbase, pas le

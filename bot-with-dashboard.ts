@@ -903,6 +903,11 @@ const FV_MOVE_BPS = Math.min(50, Math.max(1, Number(process.env.FV_MOVE_BPS ?? '
 let spotStream: SpotStream | null = null;
 /** Coins tradés (FV_COINS=BTC,ETH… ; défaut : les 5). */
 const FV_COINS = coinsFromEnv(process.env.FV_COINS);
+/** Latence d'exécution simulée (ms) : le carnet est relu après ce délai avant de « remplir ». */
+const FV_FILL_DELAY_MS = (() => {
+  const v = Number(process.env.FV_FILL_DELAY_MS ?? '');
+  return (process.env.FV_FILL_DELAY_MS ?? '').trim() !== '' && Number.isFinite(v) && v >= 0 && v <= 10_000 ? v : 1000;
+})();
 let decisionJournal: DecisionJournal | null = null;
 let shadowTracker: ShadowTracker | null = null;
 const FV_EXIT_EDGE = (() => {
@@ -1192,6 +1197,7 @@ async function setupFairValueStrategy(sdk: PolymarketSDK) {
     },
     marketsRefreshMs: 10_000,
     coins: FV_COINS,
+    fillDelayMs: FV_FILL_DELAY_MS,
     // Délai garanti : le client CLOB n'en a aucun, une réponse bloquée figeait la boucle.
     getBook: tokenId => withTimeout(sdk.markets.getTokenOrderbook(tokenId), 8000, 'carnet CLOB'),
     getRoundData: (coin, slot, now) => (isSpotCoin(coin)

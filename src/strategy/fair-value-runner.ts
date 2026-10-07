@@ -88,6 +88,10 @@ export interface RunnerDeps {
   /** Porte de risque du bot (pause, limites). */
   canTrade: () => boolean;
   scanMarkets: () => Promise<ScannedMarket[]>;
+  /** Délai simulé entre décision et exécution (ms) ; le carnet est relu après. 0 = aucun. */
+  fillDelayMs?: number;
+  /** Attente injectable (tests). */
+  sleep?: (ms: number) => Promise<void>;
   /** Coins autorisés (défaut : les 5). */
   coins?: readonly string[];
   /** Âge max de la liste des marchés (ms, défaut 60 s). Toujours rafraîchie à chaque
@@ -378,7 +382,15 @@ export class FairValueRunner {
         }
 
         // Prix RÉEL : la mise consomme le carnet niveau par niveau ; l'edge est re-vérifié au VWAP.
-        const book = decision.side === 'UP' ? upBook : downBook;
+        let book = decision.side === 'UP' ? upBook : downBook;
+        // Latence d'exécution simulée : en réel l'ordre arrive après la décision, et les
+        // prix en retard sont souvent déjà pris. On relit le carnet après `fillDelayMs` et
+        // on n'exécute QUE sur ce carnet-là (sinon le papier gonfle les gains).
+        const delay = this.d.fillDelayMs ?? 0;
+        if (delay > 0) {
+          await (this.d.sleep ?? (ms => new Promise(r => setTimeout(r, ms))))(delay);
+          book = await this.d.getBook(decision.side === 'UP' ? market.upTokenId : market.downTokenId);
+        }
         const fill = estimateFill(book.asks, stakeRes.stake, cfg.maxAsk);
         if (!fill.complete || fill.avgPrice === null) {
           this.holdLog(market.conditionId, `   ↳ ${ctx} → PAS de mise : profondeur insuffisante pour $${stakeRes.stake.toFixed(2)} sous ${cfg.maxAsk}`);
@@ -387,7 +399,8 @@ export class FairValueRunner {
         const entryCost = effectiveCostPerShare(fill.avgPrice, cfg.takerFeeRate);
         const edgeAtFill = q.prob - entryCost;
         if (edgeAtFill < cfg.minEdge) {
-          this.holdLog(market.conditionId, `   ↳ ${ctx} → PAS de mise : edge au VWAP ${(edgeAtFill * 100).toFixed(1)} pt < ${(cfg.minEdge * 100).toFixed(1)} pt`);
+          this.holdLog(market.conditionId, `   ↳ ${ctx} → PAS de mise : edge au VWAP ${(edgeAtFill * 100).toFixed(1)} pt < ${(cfg.minEdge * 100).toFixed(1)} pt`
+            + (delay > 0 ? ` (carnet relu ${delay} ms après la décision : opportunité disparue)` : ''));
           continue;
         }
 

@@ -303,3 +303,29 @@ test('FV_COINS : liste filtrée, valeurs invalides ignorées, coins exclus jamai
   await env.runner().tick();
   assert.equal(loadLedger(env.ledgerPath)!.length, 0, 'BTC exclu → aucun pari');
 });
+
+test('latence simulée : exécution sur le carnet relu ; opportunité disparue → pas de pari', async () => {
+  // Le carnet UP passe de 0,60 (en retard) à la juste valeur entre la décision et l'exécution.
+  const p = probUp({ spot: 100.12, strike: 100, sigmaPerSqrtSec: SIGMA, tauSec: 120 })!;
+  let reads = 0;
+  const sleeps: number[] = [];
+  const env = setup({
+    fillDelayMs: 1000,
+    sleep: async ms => { sleeps.push(ms); },
+    getBook: async id => {
+      if (id !== 'UP') return { asks: [{ price: 0.41, size: 100 }], bids: [] };
+      reads++;
+      return { asks: [{ price: reads === 1 ? 0.6 : Math.ceil(p * 100) / 100, size: 100 }], bids: [] };
+    },
+  });
+  await env.runner().tick();
+  assert.deepEqual(sleeps, [1000]);
+  assert.equal(reads, 2, 'carnet relu après le délai');
+  assert.equal(loadLedger(env.ledgerPath)!.length, 0);
+  assert.ok(env.logs.some(l => /opportunité disparue/.test(l)));
+
+  // Carnet stable : le pari passe, au prix relu.
+  const stable = setup({ fillDelayMs: 1000, sleep: async () => undefined });
+  await stable.runner().tick();
+  assert.equal(loadLedger(stable.ledgerPath)!.length, 1);
+});
