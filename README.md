@@ -21,6 +21,25 @@ mesures ne sont pas favorables, **aucune hausse de mise ni passage en réel n'es
 
 ---
 
+## Comment décider (4 étapes, dans l'ordre)
+
+1. **Jours 1–3 — le modèle voit-il quelque chose que le marché ne voit pas ?** Ligne
+   « Modèle vs carnet » du bilan Telegram (ou du dashboard). `t ≥ +2` : le carnet prédit
+   mieux → **arrêter la stratégie**, aucun réglage ne la rendra rentable. `t ≤ −2` sur ≥ 500
+   rounds : continuer. Entre les deux : attendre.
+2. **Semaine 1 — est-ce que ça paierait, frais et spread compris ?**
+   `npx tsx scripts/analysis/fv-report.ts --days 7` : section 1 significative, réglage actuel
+   positif sur **les deux moitiés** (section 3), calibration correcte (section 2). Un réglage
+   positif sur une seule moitié est du hasard.
+3. **Avant tout argent réel** : ligne « Avant le réel » entièrement ✅ (modèle > carnet,
+   gain significatif sur ≥ 200 trades, calibration) **et** un capital permettant des mises
+   ≥ 5 $. Puis commencer petit : le papier reste optimiste face aux bots les plus rapides.
+4. **Ce qu'il ne faut pas faire** : changer les seuils jusqu'à ce qu'un résultat « marche »
+   (sur-ajustement) ; juger sur le taux de réussite seul (66 % de réussite peut perdre de
+   l'argent) ; cumuler FV_Z_SCALE et le mélange.
+
+---
+
 ## Mise en route (version juste valeur)
 
 Sur le serveur, dans le dossier du bot :
