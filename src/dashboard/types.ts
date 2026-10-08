@@ -180,6 +180,8 @@ export interface BotConfig {
   dryRun: boolean;
   /** Adresse du wallet du bot (absente en papier avec une clé éphémère). */
   walletAddress?: string;
+  /** Démarré en réel ? Sinon le passage en LIVE depuis le dashboard est refusé (redémarrage). */
+  startedLive?: boolean;
 }
 
 export type LogLevel =

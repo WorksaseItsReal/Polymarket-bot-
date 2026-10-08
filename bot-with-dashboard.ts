@@ -1049,6 +1049,13 @@ async function setupSwap() {
   log('SWAP', 'Setting up Wallet & Balance Monitor...');
 
   try {
+    // Papier SANS clé : soldes simulés (capital + PnL réalisé), aucun wallet nécessaire.
+    // Avant : retour immédiat → le dashboard affichait 0 $ partout en papier.
+    if (CONFIG.dryRun && !process.env.POLYMARKET_PRIVATE_KEY) {
+      await updateBalances();
+      setInterval(updateBalances, 30000);
+      return;
+    }
     if (!process.env.POLYMARKET_PRIVATE_KEY) return;
 
     // Create SwapService with signer
@@ -1715,7 +1722,7 @@ async function main() {
     binance: {
       enabled: CONFIG.binance.enabled,
     },
-    dryRun: CONFIG.dryRun,
+    dryRun: CONFIG.dryRun, startedLive: STARTED_LIVE,
   };
   dashboardEmitter.updateConfig(dashboardConfig);
   dashboardEmitter.updateState(state);
@@ -1829,7 +1836,7 @@ async function main() {
           dipArb: { ...CONFIG.dipArb },
           directTrading: { ...CONFIG.directTrading },
           binance: { ...CONFIG.binance },
-          dryRun: CONFIG.dryRun,
+          dryRun: CONFIG.dryRun, startedLive: STARTED_LIVE,
         };
         dashboardEmitter.updateConfig({ ...newDashboardConfig, walletAddress: dashboardEmitter.getConfig()?.walletAddress });
 
@@ -2036,7 +2043,7 @@ async function main() {
           binance: {
             enabled: CONFIG.binance.enabled,
           },
-          dryRun: CONFIG.dryRun,
+          dryRun: CONFIG.dryRun, startedLive: STARTED_LIVE,
         };
         dashboardEmitter.updateConfig({ ...dashboardConfig, walletAddress: dashboardEmitter.getConfig()?.walletAddress });
       } else {

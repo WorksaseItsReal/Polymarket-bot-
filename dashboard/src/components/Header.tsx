@@ -19,7 +19,8 @@ export function Header({ state, config, connected, onHistoryClick, onPositionsCl
     if (!state?.startTime) return;
 
     const updateRuntime = () => {
-      const diff = Date.now() - state.startTime;
+      // jamais négatif (horloges du serveur et du navigateur légèrement décalées)
+      const diff = Math.max(0, Date.now() - state.startTime);
       const hours = Math.floor(diff / 3600000);
       const minutes = Math.floor((diff % 3600000) / 60000);
       const seconds = Math.floor((diff % 60000) / 1000);
@@ -122,11 +123,17 @@ export function Header({ state, config, connected, onHistoryClick, onPositionsCl
             Positions
           </button>
 
-          {/* Toggle Dry Run / Live */}
+          {/* Toggle Dry Run / Live — refusé par le bot s'il a démarré en papier : bouton désactivé */}
           <button
             onClick={onToggleDryRun}
+            disabled={isDryRun && config?.startedLive === false}
+            title={isDryRun && config?.startedLive === false
+              ? 'Démarré en papier : le passage en réel se fait au redémarrage (DRY_RUN=false), jamais d\'un clic'
+              : undefined}
             className={`btn text-sm ${isDryRun
-                ? 'bg-green-500/10 border-green-500/30 hover:bg-green-500/20 text-green-300'
+                ? (config?.startedLive === false
+                  ? 'bg-white/5 border-white/10 text-gray-500 cursor-not-allowed'
+                  : 'bg-green-500/10 border-green-500/30 hover:bg-green-500/20 text-green-300')
                 : 'bg-red-500/10 border-red-500/30 hover:bg-red-500/20 text-red-300'
               }`}
           >

@@ -51,7 +51,7 @@ export function PnLPanel({ state, config }: PnLPanelProps) {
         {/* Main P&L Display */}
         <div className="flex items-end justify-between">
           <div>
-            <div className="text-xs text-gray-500 uppercase tracking-wider mb-1">Total P&L (Live)</div>
+            <div className="text-xs text-gray-500 uppercase tracking-wider mb-1">Total P&L</div>
             <div className={`text-4xl font-bold ${total > 0 ? 'glow-text-green' : total < 0 ? 'glow-text-red' : ''}`}>
               <AnimatedCounter
                 value={total}

@@ -21,14 +21,15 @@ function BalanceCard({ icon, label, value, subLabel, gradient, iconBg }: Balance
           {icon}
         </div>
         <div className="flex-1 min-w-0">
-          <div className="text-[10px] text-gray-500 uppercase tracking-wider">{label}</div>
-          <div className="text-lg font-bold font-mono text-white truncate">
+          <div className="text-[10px] text-gray-500 uppercase tracking-wider truncate">
+            {label}{subLabel && <span className="text-gray-600 normal-case"> · {subLabel}</span>}
+          </div>
+          {/* étiquette secondaire sous le titre (et non plus en colonne à droite) : la valeur
+              a toute la largeur et n'est plus tronquée (« $1,0… ») */}
+          <div className="text-base font-bold font-mono text-white whitespace-nowrap">
             {value}
           </div>
         </div>
-        {subLabel && (
-          <div className="text-[10px] text-gray-600 hidden xl:block">{subLabel}</div>
-        )}
       </div>
     </div>
   );
@@ -40,10 +41,12 @@ export function BalanceCards({ state }: BalanceCardsProps) {
   const usdce = state?.usdcEBalance ?? 0;
   const total = usdc + usdce;
 
+  // Au-delà de 1 000, sans décimales : sinon la carte tronque (« $1,0… »).
   const formatCurrency = (value: number, decimals: number = 2) => {
+    const d = Math.abs(value) >= 1000 ? 0 : decimals;
     return value.toLocaleString(undefined, {
-      minimumFractionDigits: decimals,
-      maximumFractionDigits: decimals,
+      minimumFractionDigits: d,
+      maximumFractionDigits: d,
     });
   };
 

@@ -14,7 +14,8 @@ export function SessionSummary({ state }: SessionSummaryProps) {
   const avgProfit = trades > 0 ? totalPnL / trades : 0;
   const wins = ledger?.wins ?? 0;
   const losses = ledger?.losses ?? 0;
-  const winRate = ledger?.winRate != null ? ledger.winRate * 100 : 0;
+  // null tant qu'aucun trade n'est réglé : « — » et barre neutre (pas « 0 % » en rouge)
+  const winRate = ledger?.winRate != null ? ledger.winRate * 100 : null;
   const fairValueTrades = state?.fairValueTrades ?? 0;
 
   const arbProfit = state?.arbProfit ?? 0;
@@ -48,13 +49,13 @@ export function SessionSummary({ state }: SessionSummaryProps) {
             <div className="text-xs text-gray-500 uppercase tracking-wider mt-1">Losses</div>
           </div>
           <div className="text-center">
-            <div className={`text-3xl font-bold font-mono ${winRate >= 50 ? 'text-green-400' : 'text-red-400'}`}>
-              {winRate.toFixed(0)}%
+            <div className={`text-3xl font-bold font-mono ${winRate === null ? 'text-gray-500' : winRate >= 50 ? 'text-green-400' : 'text-red-400'}`}>
+              {winRate === null ? '—' : `${winRate.toFixed(0)}%`}
             </div>
             <div className="text-xs text-gray-500 uppercase tracking-wider mt-1">Win Rate</div>
           </div>
           <div className="text-center">
-            <div className={`text-3xl font-bold font-mono ${avgProfit >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+            <div className={`text-2xl font-bold font-mono ${avgProfit >= 0 ? 'text-green-400' : 'text-red-400'}`}>
               ${avgProfit.toFixed(2)}
             </div>
             <div className="text-xs text-gray-500 uppercase tracking-wider mt-1">Avg/Trade</div>
@@ -68,14 +69,18 @@ export function SessionSummary({ state }: SessionSummaryProps) {
             <span>{wins}W - {losses}L</span>
           </div>
           <div className="h-3 rounded-full bg-gray-800 overflow-hidden flex">
-            <div 
-              className="h-full progress-gradient-green transition-all duration-500"
-              style={{ width: `${winRate}%` }}
-            />
-            <div 
-              className="h-full progress-gradient-red transition-all duration-500"
-              style={{ width: `${100 - winRate}%` }}
-            />
+            {winRate !== null && (
+              <>
+                <div
+                  className="h-full progress-gradient-green transition-all duration-500"
+                  style={{ width: `${winRate}%` }}
+                />
+                <div
+                  className="h-full progress-gradient-red transition-all duration-500"
+                  style={{ width: `${100 - winRate}%` }}
+                />
+              </>
+            )}
           </div>
         </div>
 
