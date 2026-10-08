@@ -2008,6 +2008,11 @@ async function main() {
     console.log(`    USDC.e:       $${state.usdcEBalance.toFixed(2)}`);
     console.log('─'.repeat(70));
     console.log('  STRATEGIES:');
+    const fv = ledgerStats();
+    const sh = shadowTracker?.stats();
+    console.log(`    Juste valeur: ${fv.n} trades (${fv.wins} ✅ / ${fv.losses} ❌${fv.winRate === null ? '' : `, ${(fv.winRate * 100).toFixed(0)} %`})`
+      + ` | en cours ${fv.open} | PnL ${fv.pnl >= 0 ? '+' : ''}$${fv.pnl.toFixed(2)}`
+      + (sh ? ` | modèle vs carnet : ${sh.n} rounds${sh.tDiff === null ? '' : `, t ${sh.tDiff.toFixed(1)}`}` : ''));
     console.log(`    Smart Money:  ${state.smartMoneyTrades} trades | ${state.followedWallets.length} wallets`);
     console.log(`    Arbitrage:    ${state.arbTrades} trades`);
     console.log(`    DipArb:       ${state.dipArbTrades} trades`);
