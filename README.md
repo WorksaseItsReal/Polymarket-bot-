@@ -9,20 +9,15 @@
 
 ## ⚠️ Statut réel — à lire avant tout le reste
 
-**L'edge n'est pas prouvé.** Sur les données disponibles (n = 167 trades résolus re-mesurés),
-le PnL moyen par trade est **+0,0696 €** avec **t = +1,25** et un intervalle de confiance à 95 %
-du PnL total de **[-6,59 €; +29,84 €]** — qui **contient zéro**. Aucun coin, aucune tranche de
-prix n'est significatif après correction pour comparaisons multiples (seuil de Bonferroni ≈ 2,81) ;
-le t = +2,15 de BTC est exactement ce qu'un tirage au sort produits en testant 10 sous-groupes.
+**L'edge n'est pas prouvé.** La stratégie actuelle (juste valeur, §5) est mesurée en continu :
+le bilan Telegram dit si le modèle prédit mieux que les prix Polymarket (« Modèle vs carnet ») et
+où en sont les critères à remplir avant d'envisager de l'argent réel (« Avant le réel » :
+⏳ / ✅ / ❌). Le rapport `scripts/analysis/fv-report.ts` donne le détail. Tant que ces
+mesures ne sont pas favorables, **aucune hausse de mise ni passage en réel n'est justifié**.
 
-Détail complet et sources : [`docs/rebuild/strategy/EDGE.md`](docs/rebuild/strategy/EDGE.md) et
-[`docs/rebuild/SYNTHESIS.md`](docs/rebuild/SYNTHESIS.md).
-
-**Conséquence pratique :** toute hausse de mise serait un pari **non étayé par les données**.
-
-> Ces chiffres portent sur l'**ancienne** règle « favori dans [0,58 ; 0,65] », retirée parce
-> qu'elle n'a pas d'edge (§5). La stratégie actuelle (juste valeur) n'a **pas encore** de
-> mesure : c'est le rôle du journal des décisions et de `scripts/analysis/fv-report.ts`.
+> L'**ancienne** règle « favori dans [0,58 ; 0,65] », retirée, n'avait pas d'edge : 167 trades,
+> PnL moyen +0,07 € par trade, t = +1,25, IC 95 % du PnL total [−6,59 € ; +29,84 €] (contient
+> zéro). Détail : [`docs/rebuild/strategy/EDGE.md`](docs/rebuild/strategy/EDGE.md).
 
 ---
 
@@ -65,8 +60,8 @@ Puis :
   le temps restant ; le bot n'achète un côté que si cette probabilité dépasse son **coût réel**
   (VWAP du carnet + frais taker) d'au moins `FV_MIN_EDGE`. Sinon → **HOLD** (aucune mise).
   L'ancienne règle « favori dans [0,58 ; 0,65] » a été retirée : mesurée sans edge (§5).
-- **Mode** : **PAPER** (`DRY_RUN=true`). Aucune transaction, aucune clé privée utilisée ;
-  chaque décision gagnante/perdante est simulée et enregistrée.
+- **Mode** : **PAPER** (`DRY_RUN=true`). Aucune transaction ni aucun ordre ; chaque pari est
+  simulé sur le vrai carnet (latence, frais, profondeur) et réglé sur le vrai résultat.
 - **Coins** : BTC, ETH, SOL, XRP, DOGE.
 - **IA / LLM** : **désactivé** (`DEEPSEEK_ANALYZER_ENABLED=false`, module en mode `DEGRADED
   (local HOLD)`) → **zéro token consommé** (`/root/.polymarket/llm-calls.json`).
@@ -436,24 +431,25 @@ ils réagissaient à du bruit (`docs/EDGE-VALIDATION.md` §9).
 
 ## 8. Ce qui reste ouvert (honnêtement)
 
-- **L'edge reste non prouvé** : il faut **≈ 427 trades** résolus pour trancher au bruit mesuré
-  (`EDGE.md`), la dernière mesure comptait 167 trades.
-- **Non transposable au réel** (mesuré sur l'ancienne stratégie, reste vrai pour la mise) : la mise paper historique (base 1 € → **0,65–1,30 €**/trade)
-  était **4 à 8× sous le minimum live (5 USDC)** ; la profondeur au meilleur prix (~12 $ médiane)
-  est insuffisante dans **17,7 %** des cas en zone de mise ; la part du PnL paper qui survivrait
-  au réel est **≈ 0 %** (le paper a déjà une EV négative, le réel ≈ double la perte).
-  → `docs/rebuild/execution/COSTS.md`.
-- **Modèle juste valeur non validé** : juger sur `n ≥ 200` trades résolus la calibration
-  (`modelProb` vs résultat) **et** la t-stat du PnL, jamais le win rate seul.
+- **L'edge de la stratégie juste valeur n'est PAS prouvé.** Il ne le sera que par la mesure en
+  direct : ligne « Modèle vs carnet » et « Avant le réel » du bilan Telegram, puis
+  `fv-report.ts` (Brier, calibration, seuils stables sur les deux moitiés). Si le modèle ne
+  prédit pas mieux que le carnet, aucun réglage ne rendra la stratégie rentable : l'arrêter.
+- **Capital papier** : avec `PAPER_CAPITAL` < 100 $, la mise plafonnée (1 %) reste sous le
+  minimum Polymarket de 1 $ → aucun pari. 250 $ recommandé.
+- **Papier ≠ réel** : latence simulée d'1 s et ordres limites, mais des bots co-localisés restent
+  plus rapides ; la profondeur au meilleur prix est souvent faible (`docs/rebuild/execution/COSTS.md`).
+  En réel, les mises doivent aussi être ≥ 5 $ pour revendre (minimum 5 parts).
+- **Exécution réelle non implémentée** (volontaire) : à n'envisager qu'après les critères
+  « Avant le réel » remplis et le rapport favorable sur les deux moitiés.
+- *(Ancienne stratégie, retirée)* : 167 trades, t = +1,25, edge non prouvé et non transposable
+  au réel (`docs/rebuild/strategy/EDGE.md`).
 - **Topics WS `clob_market`** à retirer proprement une fois DipArb/Arbitrage migrés vers REST
   (`docs/rebuild/code/REPORT.md`).
-- **Mise** : les rapports historiques mesurent sur une base de 1 € ; chaque entrée de
-  `history.json` enregistre désormais sa mise réelle (`stake`) et son coût par part frais inclus
-  (`price`). La mise vient de `computeStake` (voir §5), plus de `BET_STAKE`.
 
 ---
 
-## 9. Vérification live (commandes exécutées le 2026-09-26 ~23:25 UTC)
+## 9. Vérification live — ANCIENNE stratégie (instantané du 2026-09-26 ~23:25 UTC)
 
 ```text
 $ pm2 describe polymarket-paperbot
