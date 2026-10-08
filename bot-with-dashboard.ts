@@ -1594,17 +1594,22 @@ async function main() {
   startDashboard(dashPort, { host: dashHost, token: process.env.DASHBOARD_TOKEN || undefined });
   console.log(`\n🌐 Dashboard: http://${dashHost === '0.0.0.0' ? '<ip-du-serveur>' : dashHost}:${dashPort}\n`);
 
-  // En papier, aucune signature n'est faite : une clé absente ou factice (placeholder de
-  // .env.example) ne doit pas empêcher le démarrage. Clé éphémère, sans fonds, pour les
-  // seuls appels publics du SDK. En réel, une clé valide reste obligatoire.
+  // En papier, une clé absente ou factice (placeholder de .env.example) ne doit pas
+  // empêcher le démarrage : clé éphémère sans fonds, et AUCUNE dérivation de clé API
+  // Polymarket (rien n'est signé ni enregistré chez eux). En réel, clé valide obligatoire.
+  const validKey = (k: string | undefined): k is string => {
+    if (!k || !/^(0x)?[0-9a-fA-F]{64}$/.test(k)) return false;
+    try { new ethers.Wallet(k); return true; } catch { return false; } // ex. clé nulle
+  };
   let sdkPrivateKey = process.env.POLYMARKET_PRIVATE_KEY?.trim();
-  if (!sdkPrivateKey || !/^(0x)?[0-9a-fA-F]{64}$/.test(sdkPrivateKey)) {
+  const ephemeralKey = !validKey(sdkPrivateKey);
+  if (ephemeralKey) {
     if (!CONFIG.dryRun) {
       log('ERROR', 'POLYMARKET_PRIVATE_KEY absente ou invalide (64 caractères hexadécimaux attendus)');
       process.exit(1);
     }
     sdkPrivateKey = ethers.Wallet.createRandom().privateKey;
-    log('INFO', 'Mode papier : pas de clé de wallet valide — clé éphémère sans fonds (lecture seule).');
+    log('INFO', 'Mode papier : pas de clé de wallet valide — clé éphémère sans fonds, aucune clé API créée (DRY_RUN : aucun ordre).');
   }
 
   // Send config to dashboard
@@ -1660,7 +1665,12 @@ async function main() {
     privateKey: sdkPrivateKey,
   });
   try {
-    await sdk.start({ timeout: 15_000 });
+    if (ephemeralKey) {
+      sdk.connect(); // WebSocket public seulement : pas de dérivation de clé API
+      await sdk.waitForConnection(15_000);
+    } else {
+      await sdk.start({ timeout: 15_000 });
+    }
   } catch (err) {
     // La stratégie papier n'utilise ni la clé API CLOB (ordres) ni le WebSocket Polymarket :
     // carnets, marchés et résultats passent par des API publiques. Un échec ici ne doit

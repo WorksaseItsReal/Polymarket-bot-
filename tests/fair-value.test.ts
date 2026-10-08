@@ -367,3 +367,37 @@ test('verdict du mélange : carnet = vérité, modèle = copie bruitée et peu c
     assert.notEqual(blendVerdict(fit, { blendModel: 1, blendMarket: 0 }), 'apply', describeBlend(fit, { blendModel: 1, blendMarket: 0 }).join('\n'));
   }
 });
+
+test('fitBlendParams : modèle très confiant (logits saturés à ±4,6) → même optimum qu\'une recherche exhaustive', async () => {
+  const { blendLogLik, fitBlendParams } = await import('../src/analysis/fv-analysis.ts');
+  const sig = (x: number) => 1 / (1 + Math.exp(-x));
+  const L = Math.log(0.99 / 0.01);
+  for (const [ta, tb] of [[0.3, 0.7], [0.2, -0.5], [0.1, 1]]) {
+    for (const seed0 of [1, 2, 3]) {
+      let seed = seed0 * 104_729;
+      const rnd = () => ((seed = (seed * 1103515245 + 12345) % 2 ** 31) / 2 ** 31);
+      const gauss = () => Math.sqrt(-2 * Math.log(rnd() + 1e-12)) * Math.cos(2 * Math.PI * rnd());
+      const pts = Array.from({ length: 2000 }, (_, i) => {
+        const lm = Math.max(-L, Math.min(L, 3 * gauss()));
+        const lk = Math.max(-L, Math.min(L, 1.2 * gauss()));
+        return { slug: `s${i}`, lm, lk, y: (rnd() < sig(ta * lm + tb * lk) ? 1 : 0) as 0 | 1, w: 1 };
+      });
+      let gridBest = -Infinity;
+      for (let a = 0; a <= 3 + 1e-9; a += 0.05) for (let b = 0; b <= 3 + 1e-9; b += 0.05) gridBest = Math.max(gridBest, blendLogLik(pts, a, b));
+      const f = fitBlendParams(pts);
+      // l'arrondi à 0,01 coûte au plus une fraction de point de log-vraisemblance
+      assert.ok(blendLogLik(pts, f.a, f.b) >= gridBest - 0.5, `(${ta}, ${tb}) graine ${seed0} : (${f.a}, ${f.b}) sous la grille`);
+      if (tb < 0) assert.equal(f.b, 0, 'poids négatif interdit → bord b = 0');
+    }
+  }
+});
+
+test('FV_Z_SCALE jamais suggéré en plus d\'un mélange actif ou proposé', async () => {
+  const { zScaleConflictsWithBlend } = await import('../src/analysis/fv-analysis.ts');
+  const raw = { blendModel: 1, blendMarket: 0 };
+  assert.equal(zScaleConflictsWithBlend('keep', raw), false);
+  assert.equal(zScaleConflictsWithBlend('noEdge', raw), false);
+  assert.equal(zScaleConflictsWithBlend('apply', raw), true);
+  assert.equal(zScaleConflictsWithBlend('current', { blendModel: 0.6, blendMarket: 0.4 }), true);
+  assert.equal(zScaleConflictsWithBlend('keep', { blendModel: 0.6, blendMarket: 0.4 }), true, 'mélange déjà actif');
+});

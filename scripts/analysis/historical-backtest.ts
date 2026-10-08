@@ -22,7 +22,7 @@ import {
 } from '../../src/analysis/historical-backtest.js';
 import { fetchKlinesRange, fetchPriceHistory, fetchRoundsMeta, mapLimit, type RoundMeta } from '../../src/analysis/historical-data.js';
 import {
-  applyBlend, blendVerdict, byRound, calibration, describeBlend, fitBlend, fitZScale, halves, replay, thresholdGrid,
+  applyBlend, blendVerdict, zScaleConflictsWithBlend, byRound, calibration, describeBlend, fitBlend, fitZScale, halves, replay, thresholdGrid,
 } from '../../src/analysis/fv-analysis.js';
 
 function arg(name: string): string | undefined {
@@ -149,8 +149,8 @@ async function main() {
     console.log(`   Calibration à un paramètre : multiplicateur ${fit.m} (IC95 ${fit.lo}–${fit.hi})`
       + (fit.lo <= 1 && fit.hi >= 1
         ? ' → compatible avec FV_Z_SCALE actuel'
-        : blendVerdict(blend, cfg) === 'apply'
-          ? ' → déjà incluse dans le mélange proposé en 3b (l\'un OU l\'autre, jamais les deux)'
+        : zScaleConflictsWithBlend(blendVerdict(blend, cfg), cfg)
+          ? ' → déjà corrigée par le mélange (actif ou proposé en 3b) : ré-estimer le mélange, pas FV_Z_SCALE'
           : ` → essayer FV_Z_SCALE=${Math.round(cfg.zScale * fit.m * 100) / 100}`));
   }
 

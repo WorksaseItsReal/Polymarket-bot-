@@ -548,3 +548,24 @@ test('bestLevel : plus bas ask, plus haut bid ; niveaux vides ou hors ]0 ; 1[ ig
   assert.deepEqual(bestLevel(lv, 'bid'), { price: 0.6, size: 5 });
   assert.equal(bestLevel([], 'bid'), null);
 });
+
+test('mélange actif, redémarrage avec entrées bloquées : la revente reste possible (token opposé enregistré)', async () => {
+  const env = setup();
+  await env.runner().tick();
+  const t = loadLedger(env.ledgerPath)![0];
+  assert.equal(t.otherTokenId, 'DOWN', 'token opposé enregistré à l\'entrée');
+  // Redémarrage : nouvelle instance, porte de risque fermée → la liste des marchés reste vide.
+  env.deps.canTrade = () => false;
+  env.deps.cfg = { ...DEFAULT_FAIR_VALUE_CONFIG, blendModel: 0.9, blendMarket: 0.1 };
+  env.deps.getRoundData = async () => ({ spot: 100, strike: 100, sigmaPerSqrtSec: SIGMA, source: 'test', candleAgeMs: 0 });
+  const reads: string[] = [];
+  const books: Record<string, Book> = {
+    UP: { asks: [{ price: 0.92, size: 1000 }], bids: [{ price: 0.9, size: 1000 }] },
+    DOWN: { asks: [{ price: 0.1, size: 1000 }], bids: [] },
+  };
+  env.deps.getBook = async id => { reads.push(id); return books[id]; };
+  env.setNow((SLOT + 200) * 1000);
+  await env.runner().tick();
+  assert.equal(loadLedger(env.ledgerPath)![0].status, 'sold');
+  assert.ok(reads.includes('DOWN'));
+});

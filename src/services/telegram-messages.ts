@@ -186,10 +186,10 @@ export function goLiveLine(stats: LedgerStats, shadow?: ShadowStats): string {
   const sh = shadow?.n ?? 0;
   crit.push(sh < 500 || shadow?.tDiff == null
     ? { label: 'modèle > carnet', state: '⏳', detail: `${sh}/500 rounds` }
-    : { label: 'modèle > carnet', state: shadow.tDiff <= -2 ? '✅' : '❌', detail: `t ${shadow.tDiff.toFixed(1).replace('.', ',')}` });
+    : { label: 'modèle > carnet', state: shadow.tDiff <= -2 ? '✅' : '❌', detail: `t ${shadow.tDiff.toFixed(2).replace('.', ',')}` });
   crit.push(stats.n < 200 || stats.tStat === null
     ? { label: 'gain significatif', state: '⏳', detail: `${stats.n}/200 trades` }
-    : { label: 'gain significatif', state: stats.tStat >= 2 ? '✅' : '❌', detail: `t ${stats.tStat.toFixed(1).replace('.', ',')}` });
+    : { label: 'gain significatif', state: stats.tStat >= 2 ? '✅' : '❌', detail: `t ${stats.tStat.toFixed(2).replace('.', ',')}` });
   if (stats.calibN < 100 || stats.calibWinRate === null || stats.avgModelProb === null) {
     crit.push({ label: 'calibration', state: '⏳', detail: `${stats.calibN}/100 trades` });
   } else {
@@ -201,7 +201,7 @@ export function goLiveLine(stats: LedgerStats, shadow?: ShadowStats): string {
   const all = crit.every(c => c.state === '✅');
   const failed = crit.some(c => c.state === '❌');
   return `Avant le réel : ${crit.map(c => `${c.label} ${c.state} (${c.detail})`).join(' · ')} → `
-    + (all ? 'critères remplis : décision à prendre (vérifier le rapport sur les deux moitiés)'
+    + (all ? 'critères remplis : décision à prendre (vérifier le rapport sur les deux moitiés, et un capital réel permettant des mises ≥ 5 $)'
       : failed ? 'rester en papier ❌' : 'rester en papier, mesure en cours');
 }
 

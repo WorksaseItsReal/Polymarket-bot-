@@ -134,7 +134,6 @@ export const LOSS_STREAK_WINDOW_MS = 6 * 3_600_000;
 
 const SLUG_RE = /^(btc|eth|sol|xrp|doge)-updown-5m-(\d{9,})$/;
 
-/** Début du round (s) si le slug est EXACTEMENT `<coin>-updown-5m-<slot>` du bon coin. */
 /** Meilleur niveau d'un côté du carnet (prix le plus bas pour les asks, le plus haut pour les bids). */
 export function bestLevel(levels: BookLevel[], side: 'ask' | 'bid'): BookLevel | null {
   let best: BookLevel | null = null;
@@ -145,6 +144,7 @@ export function bestLevel(levels: BookLevel[], side: 'ask' | 'bid'): BookLevel |
   return best;
 }
 
+/** Début du round (s) si le slug est EXACTEMENT `<coin>-updown-5m-<slot>` du bon coin. */
 export function slotOf(market: Pick<ScannedMarket, 'slug' | 'underlying'>): number | null {
   const m = SLUG_RE.exec(market.slug);
   if (!m || m[1] !== market.underlying.toLowerCase()) return null;
@@ -342,8 +342,10 @@ export class FairValueRunner {
         // lu seulement dans ce cas : sans mélange, aucun appel de plus).
         let marketUp: number | null = null;
         if ((cfg.blendMarket ?? 0) !== 0) {
-          const m = this.markets.find(x => x.slug === pos.slug);
-          const otherId = m ? (pos.side === 'UP' ? m.downTokenId : m.upTokenId) : null;
+          // Token opposé enregistré à l'entrée (indépendant de la liste des marchés, vide
+          // après un redémarrage tant que les entrées sont bloquées) ; anciens trades : liste.
+          const m = pos.otherTokenId ? null : this.markets.find(x => x.slug === pos.slug);
+          const otherId = pos.otherTokenId ?? (m ? (pos.side === 'UP' ? m.downTokenId : m.upTokenId) : null);
           if (!otherId) continue; // round introuvable : on garde la position
           const heldAsk = bestLevel(book.asks, 'ask')?.price ?? null;
           const otherAsk = bestLevel((await this.d.getBook(otherId)).asks, 'ask')?.price ?? null;
@@ -532,7 +534,8 @@ export class FairValueRunner {
         const trade: LedgerTrade = {
           id: market.conditionId, slug: market.slug, coin, side: decision.side, stake, costPerShare: entryCost, shares,
           modelProb: q.prob, edge: edgeAtFill, openedAt: new Date(fillAt).toISOString(), endMs, status: 'open', pnl: null,
-          tokenId: decision.side === 'UP' ? market.upTokenId : market.downTokenId, slotSec: slot,
+          tokenId: decision.side === 'UP' ? market.upTokenId : market.downTokenId,
+          otherTokenId: decision.side === 'UP' ? market.downTokenId : market.upTokenId, slotSec: slot,
         };
         let pushed = false;
         const saved = this.update(trades => {

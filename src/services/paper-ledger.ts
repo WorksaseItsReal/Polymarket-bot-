@@ -49,6 +49,8 @@ export interface LedgerTrade {
   exitPrice?: number;
   /** Token acheté (sortie anticipée) et début du round (s epoch). */
   tokenId?: string;
+  /** Token du côté opposé (prix du carnet pour le mélange modèle/carnet en sortie). */
+  otherTokenId?: string;
   slotSec?: number;
   /** Issue réelle du round (« Up » a gagné ?), connue même pour une position revendue :
    *  sert à la calibration, qui ne doit pas dépendre de la règle de vente. */

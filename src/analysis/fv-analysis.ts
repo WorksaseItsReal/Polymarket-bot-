@@ -241,10 +241,13 @@ const blendProb = (pt: Pick<BlendPoint, 'lm' | 'lk'>, a: number, b: number) => c
 
 /** Log-vraisemblance pondérée du mélange (a, b). */
 export function blendLogLik(pts: BlendPoint[], a: number, b: number): number {
+  // Log-vraisemblance logistique exacte (concave), calculée de façon stable :
+  // log σ(x) = x − softplus(x), log(1 − σ(x)) = −softplus(x).
   let s = 0;
   for (const pt of pts) {
-    const p = blendProb(pt, a, b);
-    s += pt.w * (pt.y ? Math.log(p) : Math.log(1 - p));
+    const x = a * pt.lm + b * pt.lk;
+    const softplus = x > 0 ? x + Math.log1p(Math.exp(-x)) : Math.log1p(Math.exp(x));
+    s += pt.w * (pt.y * x - softplus);
   }
   return s;
 }
@@ -258,10 +261,13 @@ export function blendLogLik(pts: BlendPoint[], a: number, b: number): number {
 export function fitBlendParams(pts: BlendPoint[]): { a: number; b: number } {
   const LIM = 3;
   // Newton sur les paramètres libres ; `fixA`/`fixB` figent un paramètre.
+  // Newton amorti : le pas est divisé par deux tant que la vraisemblance baisse (sans
+  // cela, un modèle très confiant — logits à ±4,6 — fait diverger le premier pas).
   const newton = (a0: number, b0: number, freeA: boolean, freeB: boolean): { a: number; b: number } | null => {
     let a = a0;
     let b = b0;
-    for (let it = 0; it < 60; it++) {
+    let ll = blendLogLik(pts, a, b);
+    for (let it = 0; it < 100; it++) {
       let ga = 0, gb = 0, haa = 0, hab = 0, hbb = 0;
       for (const pt of pts) {
         const p = 1 / (1 + Math.exp(-(a * pt.lm + b * pt.lk)));
@@ -287,26 +293,35 @@ export function fitBlendParams(pts: BlendPoint[]): { a: number; b: number } {
         if (!(hbb > 1e-12)) return null;
         db = gb / hbb;
       }
-      a += da;
-      b += db;
+      let step = 1;
+      let next = blendLogLik(pts, a + da, b + db);
+      while (!(next >= ll - 1e-12) && step > 1e-8) {
+        step /= 2;
+        next = blendLogLik(pts, a + step * da, b + step * db);
+      }
+      if (!(next >= ll - 1e-12)) break; // plus de progrès possible
+      a += step * da;
+      b += step * db;
+      ll = next;
       if (!Number.isFinite(a) || !Number.isFinite(b) || Math.abs(a) > 50 || Math.abs(b) > 50) return null;
-      if (Math.abs(da) + Math.abs(db) < 1e-10) break;
+      if (step * (Math.abs(da) + Math.abs(db)) < 1e-10) break;
     }
     return { a, b };
   };
   const clamp = (x: number) => Math.min(LIM, Math.max(0, x));
   const cands: Array<{ a: number; b: number }> = [{ a: 1, b: 0 }];
-  const free = newton(1, 0, true, true);
+  const free = newton(0, 0, true, true);
   if (free && free.a >= 0 && free.a <= LIM && free.b >= 0 && free.b <= LIM) {
     cands.push(free);
   } else {
+    // Optimum libre hors du domaine (ou introuvable) : le maximum contraint est sur un bord.
     for (const a of [0, LIM]) {
       const e = newton(a, 0, false, true);
       cands.push({ a, b: e ? clamp(e.b) : 0 }, { a, b: LIM });
     }
     for (const b of [0, LIM]) {
-      const e = newton(1, b, true, false);
-      cands.push({ a: e ? clamp(e.a) : 1, b }, { a: 0, b });
+      const e = newton(0, b, true, false);
+      cands.push({ a: e ? clamp(e.a) : 0, b }, { a: LIM, b });
     }
   }
   let best = cands[0];
@@ -420,6 +435,14 @@ export function blendVerdict(fit: BlendFit | null, current: { blendModel: number
     return current.blendModel === fit.a && current.blendMarket === fit.b ? 'current' : 'apply';
   }
   return 'keep';
+}
+
+/**
+ * FV_Z_SCALE et le mélange corrigent tous deux la confiance du modèle : ne jamais suggérer
+ * l'un si l'autre est déjà actif ou proposé (les corrections s'additionneraient).
+ */
+export function zScaleConflictsWithBlend(verdict: BlendVerdict, current: { blendModel: number; blendMarket: number }): boolean {
+  return verdict === 'apply' || verdict === 'current' || current.blendModel !== 1 || current.blendMarket !== 0;
 }
 
 /** Lignes de rapport (FR) pour un mélange estimé ; partagées par les deux scripts. */

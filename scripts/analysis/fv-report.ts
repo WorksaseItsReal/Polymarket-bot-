@@ -18,7 +18,7 @@ import type { DecisionRecord } from '../../src/services/decision-journal.js';
 import { fetchRoundOutcome } from '../../src/services/paper-ledger.js';
 import { fairValueConfigFromEnv } from '../../src/services/fair-value.js';
 import {
-  applyBlend, blendVerdict, bookStats, brier, byRound, calibration, describeBlend, fitBlend, fitZScale, halves, marketProbUp, rawModelProb, replay,
+  applyBlend, blendVerdict, zScaleConflictsWithBlend, bookStats, brier, byRound, calibration, describeBlend, fitBlend, fitZScale, halves, marketProbUp, rawModelProb, replay,
   thresholdGrid, type ResolvedRecord,
 } from '../../src/analysis/fv-analysis.js';
 
@@ -129,8 +129,8 @@ async function main() {
     console.log(`\n2b) Calibration (un paramètre, ${fit.n} rounds) : multiplicateur optimal ${fit.m} (IC95 ${fit.lo}–${fit.hi})`);
     console.log(ok
       ? `   → compatible avec le réglage actuel (FV_Z_SCALE=${cfg.zScale}) : rien à changer.`
-      : blendVerdict(blend, cfg) === 'apply'
-        ? '   → correction de confiance déjà incluse dans le mélange proposé en 1b : appliquer l\'un OU l\'autre, jamais les deux.'
+      : zScaleConflictsWithBlend(blendVerdict(blend, cfg), cfg)
+        ? '   → la confiance est déjà corrigée par le mélange (actif ou proposé en 1b) : ré-estimer le mélange, pas FV_Z_SCALE.'
         : `   → le modèle est ${fit.m < 1 ? 'SUR-confiant' : 'SOUS-confiant'} : essayer FV_Z_SCALE=${suggested} (actuel ${cfg.zScale}), puis re-mesurer.`);
   }
 
