@@ -278,7 +278,11 @@ Bilan : 12 trades · 9 ✅ / 3 ❌ (75 %) · PnL +1,84 $
 
 plus un message de démarrage, un **📊 BILAN** périodique (taux de réussite réel vs attendu par
 le modèle, PnL, pire baisse, fiabilité statistique, et **« modèle vs carnet »** : sur tous les
-rounds observés, le modèle prédit-il mieux que les prix Polymarket ? — la condition pour gagner) et des **⚠️ ALERTES** (pause de risque,
+rounds observés, le modèle prédit-il mieux que les prix Polymarket ? — la condition pour gagner,
+et **« Avant le réel »** : les 3 critères à remplir avant d'envisager de l'argent réel — modèle
+meilleur que le carnet sur ≥ 500 rounds, gain significatif (t ≥ 2) sur ≥ 200 trades, réussite
+réelle pas significativement sous la probabilité annoncée sur ≥ 100 trades ; ⏳ en attente,
+✅ rempli, ❌ échoué) et des **⚠️ ALERTES** (pause de risque,
 registre illisible), au plus une par motif toutes les 6 h.
 
 > ⚠️ **Ancien recap Hermes** (`paperbot-recap-telegram` → `/root/.hermes/scripts/paperbot-recap.py`,

@@ -263,3 +263,28 @@ test('check : seules les pannes passagères sont marquées « à réessayer »',
   assert.ok(!(await client(fakeTelegram(() => fail(401, 'Unauthorized')).fetchImpl).check()).retryable, 'token refusé : définitif');
   assert.ok(!(await client(fakeTelegram(m => (m === 'getMe' ? ok({ username: 'b' }) : fail(400, 'Bad Request: chat not found'))).fetchImpl).check()).retryable, 'chat introuvable : définitif');
 });
+
+test('critères avant le réel : en attente, remplis, ou échoués — jamais de feu vert prématuré', async () => {
+  const { goLiveLine } = await import('../src/services/telegram-messages.ts');
+  const early = goLiveLine(stats([0.6, -1]), { n: 120, brierModel: 0.2, brierMarket: 0.21, tDiff: -3 });
+  noJunk(early);
+  assert.match(early, /modèle > carnet ⏳ \(120\/500 rounds\)/);
+  assert.match(early, /gain significatif ⏳ \(2\/200 trades\)/);
+  assert.match(early, /calibration ⏳/);
+  assert.match(early, /rester en papier, mesure en cours/);
+  // 300 trades gagnants à 70 % pour une probabilité annoncée de 68 % : tout est rempli.
+  const good = stats(Array.from({ length: 300 }, (_, i) => (i % 10 < 7 ? 0.6 : -1)));
+  const ok = goLiveLine(good, { n: 2000, brierModel: 0.2, brierMarket: 0.21, tDiff: -2.5 });
+  assert.match(ok, /modèle > carnet ✅/);
+  assert.match(ok, /gain significatif ✅/);
+  assert.match(ok, /calibration ✅/);
+  assert.match(ok, /critères remplis/);
+  // Le carnet prédit aussi bien que le modèle : échec, quel que soit le PnL.
+  const bad = goLiveLine(good, { n: 2000, brierModel: 0.21, brierMarket: 0.21, tDiff: 0.3 });
+  assert.match(bad, /modèle > carnet ❌/);
+  assert.match(bad, /rester en papier ❌/);
+  // Réussite 50 % pour 68 % annoncés sur 300 trades : calibration échouée.
+  const overconf = stats(Array.from({ length: 300 }, (_, i) => (i % 2 ? 0.6 : -1)));
+  assert.match(goLiveLine(overconf, { n: 2000, brierModel: 0.2, brierMarket: 0.21, tDiff: -2.5 }), /calibration ❌ \(50 % pour 68 % annoncés\)/);
+  assert.match(msgSummary(good, 250), /Avant le réel/);
+});

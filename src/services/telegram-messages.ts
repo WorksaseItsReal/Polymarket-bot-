@@ -177,6 +177,34 @@ export function shadowLine(sh: ShadowStats): string {
   return `Modèle vs carnet (${sh.n} rounds) : erreur ${b(sh.brierModel)} vs ${b(sh.brierMarket)}${t} → ${verdict}`;
 }
 
+/**
+ * Les critères (README) à remplir AVANT d'envisager de l'argent réel, en une ligne :
+ * ⏳ = pas assez de données, ✅ = rempli, ❌ = mesuré et non rempli.
+ */
+export function goLiveLine(stats: LedgerStats, shadow?: ShadowStats): string {
+  const crit: Array<{ label: string; state: '✅' | '❌' | '⏳'; detail: string }> = [];
+  const sh = shadow?.n ?? 0;
+  crit.push(sh < 500 || shadow?.tDiff == null
+    ? { label: 'modèle > carnet', state: '⏳', detail: `${sh}/500 rounds` }
+    : { label: 'modèle > carnet', state: shadow.tDiff <= -2 ? '✅' : '❌', detail: `t ${shadow.tDiff.toFixed(1).replace('.', ',')}` });
+  crit.push(stats.n < 200 || stats.tStat === null
+    ? { label: 'gain significatif', state: '⏳', detail: `${stats.n}/200 trades` }
+    : { label: 'gain significatif', state: stats.tStat >= 2 ? '✅' : '❌', detail: `t ${stats.tStat.toFixed(1).replace('.', ',')}` });
+  if (stats.calibN < 100 || stats.calibWinRate === null || stats.avgModelProb === null) {
+    crit.push({ label: 'calibration', state: '⏳', detail: `${stats.calibN}/100 trades` });
+  } else {
+    // Réussite réelle pas significativement sous la probabilité annoncée (2 écarts-types).
+    const p = stats.avgModelProb;
+    const ok = stats.calibWinRate >= p - 2 * Math.sqrt((p * (1 - p)) / stats.calibN);
+    crit.push({ label: 'calibration', state: ok ? '✅' : '❌', detail: `${pct(stats.calibWinRate)} pour ${pct(p)} annoncés` });
+  }
+  const all = crit.every(c => c.state === '✅');
+  const failed = crit.some(c => c.state === '❌');
+  return `Avant le réel : ${crit.map(c => `${c.label} ${c.state} (${c.detail})`).join(' · ')} → `
+    + (all ? 'critères remplis : décision à prendre (vérifier le rapport sur les deux moitiés)'
+      : failed ? 'rester en papier ❌' : 'rester en papier, mesure en cours');
+}
+
 export function msgSummary(stats: LedgerStats, capital: number, shadow?: ShadowStats): string {
   const expected = stats.avgModelProb === null || stats.calibWinRate === null
     ? ''
@@ -188,6 +216,7 @@ export function msgSummary(stats: LedgerStats, capital: number, shadow?: ShadowS
     `PnL : <b>${money(stats.pnl)}</b> · capital : ${amount(capital + stats.pnl)} · pire baisse : ${money(-stats.maxDrawdown)}`,
     `Fiabilité : ${reliability(stats)}`,
     ...(shadow ? [shadowLine(shadow)] : []),
+    goLiveLine(stats, shadow),
   ].join('\n');
 }
 
