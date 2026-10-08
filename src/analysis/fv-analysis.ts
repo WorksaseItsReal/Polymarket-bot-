@@ -240,7 +240,7 @@ export function blendPoints(rounds: ResolvedRecord[][], opts: { minTau?: number;
 const blendProb = (pt: Pick<BlendPoint, 'lm' | 'lk'>, a: number, b: number) => clampP(1 / (1 + Math.exp(-(a * pt.lm + b * pt.lk))));
 
 /** Log-vraisemblance pondérée du mélange (a, b). */
-function blendLogLik(pts: BlendPoint[], a: number, b: number): number {
+export function blendLogLik(pts: BlendPoint[], a: number, b: number): number {
   let s = 0;
   for (const pt of pts) {
     const p = blendProb(pt, a, b);
@@ -249,22 +249,72 @@ function blendLogLik(pts: BlendPoint[], a: number, b: number): number {
   return s;
 }
 
-/** (a, b) ∈ [0, 3]² maximisant la vraisemblance : grille 0,1 puis affinage à 0,01. */
+/**
+ * Maximum de vraisemblance de (a, b) sur [0, 3]² (régression logistique pondérée, sans
+ * constante). La vraisemblance est concave : l'optimum contraint est soit l'optimum libre
+ * (Newton à 2 paramètres) s'il est dans le domaine, soit sur un bord (Newton à 1 paramètre
+ * sur chacun des 4 bords). Quelques passes sur les données au lieu de ~1 400 pour une grille.
+ */
 export function fitBlendParams(pts: BlendPoint[]): { a: number; b: number } {
-  let best = { a: 1, b: 0, ll: blendLogLik(pts, 1, 0) };
-  const scan = (a0: number, a1: number, b0: number, b1: number, step: number) => {
-    for (let a = a0; a <= a1 + 1e-9; a += step) {
-      for (let b = b0; b <= b1 + 1e-9; b += step) {
-        const aa = Math.min(3, Math.max(0, a));
-        const bb = Math.min(3, Math.max(0, b));
-        const ll = blendLogLik(pts, aa, bb);
-        if (ll > best.ll) best = { a: aa, b: bb, ll };
+  const LIM = 3;
+  // Newton sur les paramètres libres ; `fixA`/`fixB` figent un paramètre.
+  const newton = (a0: number, b0: number, freeA: boolean, freeB: boolean): { a: number; b: number } | null => {
+    let a = a0;
+    let b = b0;
+    for (let it = 0; it < 60; it++) {
+      let ga = 0, gb = 0, haa = 0, hab = 0, hbb = 0;
+      for (const pt of pts) {
+        const p = 1 / (1 + Math.exp(-(a * pt.lm + b * pt.lk)));
+        const r = pt.w * (pt.y - p);
+        const v = pt.w * p * (1 - p);
+        ga += r * pt.lm;
+        gb += r * pt.lk;
+        haa += v * pt.lm * pt.lm;
+        hab += v * pt.lm * pt.lk;
+        hbb += v * pt.lk * pt.lk;
       }
+      let da = 0;
+      let db = 0;
+      if (freeA && freeB) {
+        const det = haa * hbb - hab * hab;
+        if (!(det > 1e-12)) return null;
+        da = (hbb * ga - hab * gb) / det;
+        db = (haa * gb - hab * ga) / det;
+      } else if (freeA) {
+        if (!(haa > 1e-12)) return null;
+        da = ga / haa;
+      } else if (freeB) {
+        if (!(hbb > 1e-12)) return null;
+        db = gb / hbb;
+      }
+      a += da;
+      b += db;
+      if (!Number.isFinite(a) || !Number.isFinite(b) || Math.abs(a) > 50 || Math.abs(b) > 50) return null;
+      if (Math.abs(da) + Math.abs(db) < 1e-10) break;
     }
+    return { a, b };
   };
-  scan(0, 3, 0, 3, 0.1);
-  const { a, b } = best;
-  scan(a - 0.1, a + 0.1, b - 0.1, b + 0.1, 0.01);
+  const clamp = (x: number) => Math.min(LIM, Math.max(0, x));
+  const cands: Array<{ a: number; b: number }> = [{ a: 1, b: 0 }];
+  const free = newton(1, 0, true, true);
+  if (free && free.a >= 0 && free.a <= LIM && free.b >= 0 && free.b <= LIM) {
+    cands.push(free);
+  } else {
+    for (const a of [0, LIM]) {
+      const e = newton(a, 0, false, true);
+      cands.push({ a, b: e ? clamp(e.b) : 0 }, { a, b: LIM });
+    }
+    for (const b of [0, LIM]) {
+      const e = newton(1, b, true, false);
+      cands.push({ a: e ? clamp(e.a) : 1, b }, { a: 0, b });
+    }
+  }
+  let best = cands[0];
+  let bestLL = -Infinity;
+  for (const c of cands) {
+    const ll = blendLogLik(pts, c.a, c.b);
+    if (ll > bestLL) { bestLL = ll; best = c; }
+  }
   const r2 = (x: number) => Math.round(x * 100) / 100;
   return { a: r2(best.a), b: r2(best.b) };
 }

@@ -315,3 +315,33 @@ test('fitBlend : retrouve le poids du carnet, et ne le valide que hors échantil
   assert.deepEqual(applyBlend(r, 1, 0).map(l => l[0].pUp), r.map(l => l[0].pUp));
   for (const [l] of applyBlend(r, 0, 1)) close(l.pUp!, (l.upAsk! + 1 - l.downAsk!) / 2, 1e-9);
 });
+
+test('fitBlendParams : optimum exact, y compris contraint sur un bord (poids négatif interdit)', async () => {
+  const { blendLogLik, fitBlendParams } = await import('../src/analysis/fv-analysis.ts');
+  let seed = 5;
+  const rnd = () => ((seed = (seed * 1103515245 + 12345) % 2 ** 31) / 2 ** 31);
+  const gauss = () => Math.sqrt(-2 * Math.log(rnd() + 1e-12)) * Math.cos(2 * Math.PI * rnd());
+  const sig = (x: number) => 1 / (1 + Math.exp(-x));
+  const pts = (a: number, b: number) => Array.from({ length: 3000 }, (_, i) => {
+    const lm = 1.2 * gauss();
+    const lk = 1.2 * gauss();
+    return { slug: `s${i}`, lm, lk, y: (rnd() < sig(a * lm + b * lk) ? 1 : 0) as 0 | 1, w: 1 };
+  });
+  const isLocalMax = (p: ReturnType<typeof pts>, a: number, b: number) => {
+    const ll = blendLogLik(p, a, b);
+    for (const [da, db] of [[0.03, 0], [-0.03, 0], [0, 0.03], [0, -0.03]]) {
+      const na = a + da;
+      const nb = b + db;
+      if (na < 0 || nb < 0 || na > 3 || nb > 3) continue;
+      assert.ok(blendLogLik(p, na, nb) <= ll + 1e-9, `(${na}, ${nb}) meilleur que (${a}, ${b})`);
+    }
+  };
+  const inner = pts(0.7, 0.5);
+  const f1 = fitBlendParams(inner);
+  isLocalMax(inner, f1.a, f1.b);
+  const edge = pts(1, -0.6); // vrai poids du carnet négatif → borne b = 0
+  const f2 = fitBlendParams(edge);
+  assert.equal(f2.b, 0);
+  isLocalMax(edge, f2.a, f2.b);
+  assert.deepEqual(fitBlendParams([]), { a: 1, b: 0 }, 'aucune donnée : modèle seul');
+});
