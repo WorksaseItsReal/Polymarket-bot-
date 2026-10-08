@@ -295,6 +295,6 @@ test('accords : « 1 trade », « 2 trades » (bilan et fiabilité)', async () =
   assert.equal(plural(0, 'trade'), '0 trade');
   assert.equal(plural(1, 'trade'), '1 trade');
   assert.equal(plural(2, 'trade'), '2 trades');
-  assert.match(msgSummary(stats([-0.8]), 250), /1 trade ·/);
+  assert.match(msgStartup({ capital: 250, minEdge: 0.04, minProb: 0.6, feeRate: 0.07, pollSec: 10, coins: ['BTC'], stats: stats([-0.8]) }), /Historique : 1 trade · 0 ✅ \/ 1 ❌/);
   assert.match(reliability({ n: 1, tStat: null }), /\(1 trade, il en faut/);
 });

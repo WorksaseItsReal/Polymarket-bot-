@@ -1,6 +1,126 @@
 {
   "sessions": [
     {
+      "id": "session-1791451857120",
+      "startTime": "2026-10-08T09:30:57.120Z",
+      "endTime": "2026-10-08T09:42:10.180Z",
+      "durationMs": 673060,
+      "totalPnL": 34.223775915850474,
+      "startingBalance": 0,
+      "endingBalance": 0,
+      "totalTrades": 8,
+      "wins": 7,
+      "losses": 0,
+      "winRate": 100,
+      "avgProfitPerTrade": 4.889110845121496,
+      "largestWin": 8.700282210050009,
+      "largestLoss": 0,
+      "strategyStats": {
+        "smartMoney": {
+          "trades": 0,
+          "profit": 0
+        },
+        "arbitrage": {
+          "trades": 0,
+          "profit": 0
+        },
+        "dipArb": {
+          "trades": 0,
+          "profit": 0
+        },
+        "direct": {
+          "trades": 0,
+          "profit": 0
+        }
+      },
+      "walletPerformance": [],
+      "onChainOps": {
+        "splits": 0,
+        "merges": 0,
+        "redeems": 0,
+        "swaps": 0
+      },
+      "trades": [
+        {
+          "id": "0x0000000000000000000000000000000000000000000000000000179145180001",
+          "timestamp": "2026-10-08T09:36:45.140Z",
+          "strategy": "fairValue",
+          "market": "eth-updown-5m-1791451800",
+          "side": "BUY",
+          "size": 10,
+          "price": 0.557388,
+          "profit": 7.9408239861640375
+        },
+        {
+          "id": "0x0000000000000000000000000000000000000000000000000000179145180003",
+          "timestamp": "2026-10-08T09:36:45.140Z",
+          "strategy": "fairValue",
+          "market": "xrp-updown-5m-1791451800",
+          "side": "BUY",
+          "size": 10,
+          "price": 0.8494079999999999,
+          "profit": 1.7729053646775181
+        },
+        {
+          "id": "0x0000000000000000000000000000000000000000000000000000179145180004",
+          "timestamp": "2026-10-08T09:36:45.140Z",
+          "strategy": "fairValue",
+          "market": "doge-updown-5m-1791451800",
+          "side": "BUY",
+          "size": 10,
+          "price": 0.820773,
+          "profit": 2.18363664496761
+        },
+        {
+          "id": "0x0000000000000000000000000000000000000000000000000000179145210004",
+          "timestamp": "2026-10-08T09:41:45.140Z",
+          "strategy": "fairValue",
+          "market": "doge-updown-5m-1791452100",
+          "side": "BUY",
+          "size": 10.11,
+          "price": 0.5374720000000001,
+          "profit": 8.700282210050009
+        },
+        {
+          "id": "0x0000000000000000000000000000000000000000000000000000179145210000",
+          "timestamp": "2026-10-08T09:41:45.140Z",
+          "strategy": "fairValue",
+          "market": "btc-updown-5m-1791452100",
+          "side": "BUY",
+          "size": 10.11,
+          "price": 0.6463169999999999,
+          "profit": 5.53247884552008
+        },
+        {
+          "id": "0x0000000000000000000000000000000000000000000000000000179145210001",
+          "timestamp": "2026-10-08T09:41:45.140Z",
+          "strategy": "fairValue",
+          "market": "eth-updown-5m-1791452100",
+          "side": "BUY",
+          "size": 10.11,
+          "price": 0.7341120000000001,
+          "profit": 3.6617405518503965
+        },
+        {
+          "id": "0x0000000000000000000000000000000000000000000000000000179145210002",
+          "timestamp": "2026-10-08T09:41:45.140Z",
+          "strategy": "fairValue",
+          "market": "sol-updown-5m-1791452100",
+          "side": "BUY",
+          "size": 10.11,
+          "price": 0.6952320000000001,
+          "profit": 4.431908312620822
+        }
+      ],
+      "dryRun": true,
+      "strategies": {
+        "smartMoney": false,
+        "arbitrage": false,
+        "dipArb": false,
+        "direct": false
+      }
+    },
+    {
       "id": "session-1791451557680",
       "startTime": "2026-10-08T09:25:57.680Z",
       "endTime": "2026-10-08T09:37:11.900Z",
@@ -981,8 +1101,8 @@
       }
     }
   ],
-  "totalSessions": 8,
-  "totalProfit": 176.51180037234536,
-  "totalTrades": 59,
-  "overallWinRate": 79.66101694915254
+  "totalSessions": 9,
+  "totalProfit": 210.73557628819583,
+  "totalTrades": 67,
+  "overallWinRate": 80.59701492537313
 }

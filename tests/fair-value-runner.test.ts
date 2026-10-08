@@ -109,7 +109,7 @@ test('cycle complet : pari → un seul par round → résolution GAGNÉ → mess
   assert.ok(Math.abs(ledger[0].pnl! - (t.shares - t.stake)) < 1e-12);
   assert.equal(env.messages.length, 2);
   assert.match(env.messages[1], /✅ <b>GAGNÉ<\/b> — BTC ⬆️ HAUSSE/);
-  assert.match(env.messages[1], /Bilan : 1 trades · 1 ✅ \/ 0 ❌ \(100 %\)/);
+  assert.match(env.messages[1], /Bilan : 1 trade · 1 ✅ \/ 0 ❌ \(100 %\)/);
 
   // Un redémarrage ne rejoue pas le round (registre relu).
   env.setNow((SLOT + 180) * 1000);
