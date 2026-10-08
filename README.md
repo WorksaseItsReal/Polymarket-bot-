@@ -409,6 +409,8 @@ prix fantômes, mais des bots co-localisés restent plus rapides : le papier peu
 | Données | spot > 3 s (flux) ou bougie > 65 s, strike absent | pas de mise |
 | Horloge | décalage > 2 s / > 5 s vs Binance | alerte / plus de nouvelle entrée |
 | Taille d'ordre | mise < 1 $ (minimum Polymarket) | pas de mise + alerte (capital papier trop petit) |
+| Round jamais réglé | toujours non réglé 6 h après la fin | alerte (une par trade) ; nouvel essai toutes les 5 min |
+| Pendant une pause | toute pause de risque ou arrêt de sécurité | plus d'entrée, mais évaluations, journal et mesure « modèle vs carnet » continuent (pas de trou dans la mesure) |
 
 Le cooldown « santé par coin » et la fenêtre apprise de l'ancienne stratégie ont été retirés :
 ils réagissaient à du bruit (`docs/EDGE-VALIDATION.md` §9).
@@ -497,3 +499,5 @@ $ history.json
 - [`docs/EDGE-VALIDATION.md`](docs/EDGE-VALIDATION.md) — validation d'edge sur 1 411 décisions.
 - [`docs/CHANGES-APPLIED.md`](docs/CHANGES-APPLIED.md) — correctifs C2/C3/C5/C6/C7/C9.
 - [`.env.example`](.env.example) — modèle de configuration (sans secrets).
+- `npm run doctor` — diagnostic d'installation ; `npm run demo` — le bot sur un marché simulé
+  (hors ligne) ; `npm run check` — types et tests.
