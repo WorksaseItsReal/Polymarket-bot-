@@ -37,18 +37,21 @@ export function rawModelProb(r: Pick<DecisionRecord, 'pUp' | 'pRaw'>): number | 
  * estimations (calibration, mélange, seuils) dérivent à chaque itération.
  */
 export function normalizeZScale(rounds: ResolvedRecord[][], zNow: number, tails: 'normal' | 't4' = 'normal'): ResolvedRecord[][] {
-  const { cdf, inv } = link(tails);
+  const { cdf } = link(tails);
   return rounds.map(list => list.map(r => {
     const raw = rawModelProb(r);
     const zRec = r.zs ?? 1; // journaux d'avant l'enregistrement du réglage : supposés à 1
-    if (raw === null || zRec === zNow) {
+    const recTails = r.tl ?? 'normal'; // loi utilisée lors de l'évaluation
+    if (raw === null || (zRec === zNow && recTails === tails)) {
       // Rien à changer : même objet (un journal de 30 jours ≈ 1 million d'évaluations ;
       // une copie de chacune à chaque étape saturait la mémoire).
       return r.pRaw === raw && r.zs === zRec ? r : { ...r, pRaw: raw, zs: zRec };
     }
-    const z = inv(Math.min(0.999999, Math.max(0.000001, raw)));
+    // z du modèle de base avec la loi de l'évaluation, puis probabilité du modèle ACTUEL
+    const z = link(recTails).inv(Math.min(0.999999, Math.max(0.000001, raw)));
     const p = z === null ? raw : cdf((zNow * z) / zRec);
-    return { ...r, pRaw: p, zs: zNow };
+    const { tl: _old, ...rest } = r;
+    return { ...rest, pRaw: p, zs: zNow, ...(tails === 't4' ? { tl: 't4' as const } : {}) };
   }));
 }
 
@@ -206,7 +209,8 @@ export function fitZScale(rounds: ResolvedRecord[][], tauRef = 150, tails: 'norm
     // FV_Z_SCALE agit sur le modèle seul : on calibre la probabilité AVANT mélange, ramenée au
     // modèle de base (z divisé par le FV_Z_SCALE en vigueur lors de l'évaluation). Le
     // multiplicateur estimé est donc directement la valeur de FV_Z_SCALE à essayer.
-    const zRaw = best ? inv(Math.min(0.999, Math.max(0.001, rawModelProb(best) as number))) : null;
+    // inverse avec la loi de L'ÉVALUATION (normalement déjà ramenée à la loi actuelle)
+    const zRaw = best ? link(best.tl ?? 'normal').inv(Math.min(0.999, Math.max(0.001, rawModelProb(best) as number))) : null;
     const z = zRaw === null || !best ? null : zRaw / (best.zs ?? 1);
     if (best && z !== null) pts.push({ z, y: best.upWon ? 1 : 0 });
   }

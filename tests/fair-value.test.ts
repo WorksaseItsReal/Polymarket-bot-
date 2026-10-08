@@ -410,6 +410,7 @@ test('loi t4 : inverse exacte ; remise à l\'échelle de FV_Z_SCALE cohérente a
   for (const tails of ['normal', 't4'] as const) {
     const at = (z: number) => probUp(base, { ...CFG, tails, zScale: z })!;
     const rec = { t: 0, slug: 's', coin: 'BTC', tau: 150, spot: 1, strike: 1, sig: 1, pUp: at(0.6), pRaw: at(0.6), zs: 0.6,
+      ...(tails === 't4' ? { tl: 't4' as const } : {}),
       upAsk: null, downAsk: null, upAskSz: null, downAskSz: null, src: 't', act: 'hold' as const, upWon: true };
     const [[r]] = normalizeZScale([[rec]], 1, tails);
     close(r.pRaw!, at(1), 1e-6); // même probabilité que si le bot avait tourné à FV_Z_SCALE=1
@@ -417,4 +418,15 @@ test('loi t4 : inverse exacte ; remise à l\'échelle de FV_Z_SCALE cohérente a
   assert.match(zScaleAdvice({ n: 100, m: 2.6, lo: 2.3, hi: 2.9 }, 1, false), /hors des bornes/);
   assert.match(zScaleAdvice({ n: 100, m: 0.8, lo: 0.7, hi: 0.9 }, 1, false), /SUR-confiant : essayer FV_Z_SCALE=0.8/);
   assert.match(zScaleAdvice({ n: 100, m: 0.95, lo: 0.8, hi: 1.1 }, 1, false), /rien à changer/);
+});
+
+test('journal couvrant un changement de FV_TAILS : chaque évaluation est convertie depuis SA loi', async () => {
+  const { normalizeZScale } = await import('../src/analysis/fv-analysis.ts');
+  const base = { spot: 100.08, strike: 100, sigmaPerSqrtSec: SIGMA, tauSec: 150 };
+  const pT4 = probUp(base, { ...CFG, tails: 't4', zScale: 0.7 })!;
+  const rec = { t: 0, slug: 's', coin: 'BTC', tau: 150, spot: 1, strike: 1, sig: 1, pUp: pT4, pRaw: pT4, zs: 0.7, tl: 't4' as const,
+    upAsk: null, downAsk: null, upAskSz: null, downAskSz: null, src: 't', act: 'hold' as const, upWon: true };
+  const [[r]] = normalizeZScale([[rec]], 1, 'normal');
+  close(r.pRaw!, probUp(base, { ...CFG, tails: 'normal', zScale: 1 })!, 1e-6);
+  assert.equal(r.tl, undefined, 'converti en loi normale');
 });

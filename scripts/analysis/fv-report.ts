@@ -111,13 +111,17 @@ async function main() {
     console.error('(évaluations sans réglage enregistré : supposées faites avec FV_Z_SCALE=1)');
   }
   const decisionRounds = applyBlend(rounds, cfg.blendModel, cfg.blendMarket);
-  const evals = rounds.flat();
+  // Mesures (modèle vs carnet, mélange, calibration) : passages RÉGULIERS seulement. Les
+  // évaluations déclenchées par un saut du spot restent pour le rejeu des paris (ce sont de
+  // vraies occasions), mais sur-représenteraient les instants favorables au modèle.
+  const measureRounds = rounds.map(l => l.filter(r => !r.mv)).filter(l => l.length);
+  const evals = measureRounds.flat();
   console.log(`\n=== Journal : ${records.length} évaluations, ${new Set(records.map(r => r.slug)).size} rounds, ${rounds.length} rounds réglés ===\n`);
   if (!rounds.length) return;
 
   // 1. Modèle vs marché : appariée (mêmes évaluations), chaque round pesant 1, modèle SEUL
   // (avant mélange), t groupé par créneau (les 5 cryptos d'un round sont corrélées).
-  const cmp = compareModelBook(rounds, { minTau: cfg.minTauSec, maxTau: cfg.maxTauSec });
+  const cmp = compareModelBook(measureRounds, { minTau: cfg.minTauSec, maxTau: cfg.maxTauSec });
   const bm = { n: cmp.rounds, score: cmp.brierModel };
   const bk = { n: cmp.rounds, score: cmp.brierMarket };
   console.log('1) Le modèle prédit-il mieux que le carnet ? (Brier, plus bas = meilleur ; t ≤ −2 = modèle meilleur)');
@@ -137,10 +141,12 @@ async function main() {
   // 1b. Mélange modèle + carnet
   console.log('\n1b) Mélange modèle + carnet (le carnet contient-il une information que le modèle ignore ?)');
   const params = { feeRate: cfg.takerFeeRate, minAsk: cfg.minAsk, maxAsk: cfg.maxAsk, minTau: cfg.minTauSec, maxTau: cfg.maxTauSec };
-  const blend = fitBlend(rounds, { minTau: cfg.minTauSec, maxTau: cfg.maxTauSec });
+  const blend = fitBlend(measureRounds, { minTau: cfg.minTauSec, maxTau: cfg.maxTauSec });
   for (const line of describeBlend(blend, cfg)) console.log(line);
   if (blend?.oos) {
-    const h2 = halves(rounds)[1];
+    // mêmes rounds que la moitié de validation du mélange (aucun round vu à l'estimation)
+    const h2Slugs = new Set(halves(measureRounds)[1].map(l => l[0].slug));
+    const h2 = rounds.filter(l => h2Slugs.has(l[0].slug));
     const raw = replay(applyBlend(h2, 1, 0), cfg.minEdge, cfg.minProb, params);
     const mixed = replay(applyBlend(h2, blend.oos.a, blend.oos.b), cfg.minEdge, cfg.minProb, params);
     console.log(`     seuils actuels sur la 2e moitié : modèle seul EV/$ ${num(raw.evPerDollar, 4)} (n=${raw.n})`
@@ -155,7 +161,7 @@ async function main() {
   }
 
   // 2b. Réglage de calibration suggéré
-  const fit = fitZScale(rounds, 150, cfg.tails);
+  const fit = fitZScale(measureRounds, 150, cfg.tails);
   if (fit) {
     console.log(`\n2b) Calibration (un paramètre, ${fit.n} rounds) : FV_Z_SCALE optimal ${fit.m} (IC95 ${fit.lo}–${fit.hi})`);
     console.log(`   ${zScaleAdvice(fit, cfg.zScale, zScaleConflictsWithBlend(blendVerdict(blend, cfg), cfg))}`);

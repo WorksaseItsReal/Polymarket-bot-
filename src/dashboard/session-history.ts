@@ -168,8 +168,19 @@ export function addSession(session: SessionSummary): void {
   if (existsSync(HISTORY_FILE)) {
     try {
       JSON.parse(readFileSync(HISTORY_FILE, 'utf-8'));
-    } catch {
-      try { renameSync(HISTORY_FILE, `${HISTORY_FILE}.illisible-${Date.now()}`); } catch { return; }
+    } catch (e) {
+      // Mis de côté seulement s'il est CORROMPU ; une erreur de lecture passagère (fichiers
+      // ouverts, droits) ne doit pas faire disparaître un historique valide.
+      if (!(e instanceof SyntaxError)) {
+        console.error('[SessionHistory] historique illisible pour le moment, session non enregistrée :', (e as Error).message);
+        return;
+      }
+      try {
+        renameSync(HISTORY_FILE, `${HISTORY_FILE}.illisible-${Date.now()}`);
+      } catch (err) {
+        console.error('[SessionHistory] historique corrompu non déplaçable, session non enregistrée :', (err as Error).message);
+        return;
+      }
     }
   }
   const history = loadHistory();

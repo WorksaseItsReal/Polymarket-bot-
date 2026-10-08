@@ -45,6 +45,13 @@ export interface DecisionRecord {
   /** FV_Z_SCALE en vigueur (absent des anciens journaux = 1) : l'analyse ramène toutes les
    *  évaluations au même réglage avant d'estimer quoi que ce soit. */
   zs?: number;
+  /** Loi du modèle si ce n'est pas la normale (FV_TAILS=t4). */
+  tl?: 't4';
+  /** Évaluation déclenchée par un MOUVEMENT du spot (et non par le passage régulier) :
+   *  gardée pour rejouer les paris, exclue des mesures « modèle vs carnet » et de la
+   *  calibration (elle sur-représente les instants juste après un saut, où un carnet en
+   *  retard flatte le modèle). */
+  mv?: true;
   upAsk: number | null;
   downAsk: number | null;
   /** Taille (parts) au meilleur ask. */

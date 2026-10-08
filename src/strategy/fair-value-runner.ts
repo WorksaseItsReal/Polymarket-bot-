@@ -473,7 +473,8 @@ export class FairValueRunner {
         const decision = decide({ ...data, tauSec, upAsk: upBest?.price ?? null, downAsk: downBest?.price ?? null }, cfg);
         rec = {
           t: now, slug: market.slug, coin, tau: Math.round(tauSec * 10) / 10, spot: data.spot, strike: data.strike,
-          sig: data.sigmaPerSqrtSec, pUp: decision.pUp, pRaw: decision.pRaw ?? null, zs: cfg.zScale, upAsk: upBest?.price ?? null, downAsk: downBest?.price ?? null,
+          sig: data.sigmaPerSqrtSec, pUp: decision.pUp, pRaw: decision.pRaw ?? null, zs: cfg.zScale,
+          ...(cfg.tails === 't4' ? { tl: 't4' as const } : {}), ...(coins ? { mv: true as const } : {}), upAsk: upBest?.price ?? null, downAsk: downBest?.price ?? null,
           upAskSz: upBest?.size ?? null, downAskSz: downBest?.size ?? null,
           upBid: upBid?.price ?? null, downBid: downBid?.price ?? null, upBidSz: upBid?.size ?? null, downBidSz: downBid?.size ?? null,
           src: data.source, act: 'hold',

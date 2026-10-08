@@ -1,8 +1,8 @@
 /**
  * shadow-tracker.ts — « le modèle prédit-il mieux que le carnet ? », mesuré en continu.
  *
- * Pour chaque round observé (tradé ou non), on garde ses évaluations complètes (au plus
- * une toutes les 10 s) : P(Up) du modèle et P(Up) implicite du carnet (milieu des asks).
+ * Pour chaque round observé (tradé ou non), on garde ses évaluations RÉGULIÈRES (une par
+ * tranche de 10 s ; celles déclenchées par un saut du spot sont exclues) : P(Up) du modèle et P(Up) implicite du carnet (milieu des asks).
  * Une fois le round réglé, on ajoute au bilan l'erreur quadratique (Brier) MOYENNE de
  * chacun sur ces évaluations — chaque round compte pour un. Avant : seule la première
  * évaluation (début de round, où tout est proche de 50 %) comptait, d'où très peu de
@@ -48,9 +48,9 @@ export interface ShadowStats {
 
 interface Pending {
   endMs: number;
-  /** Évaluations retenues (modèle, carnet), au plus une toutes les 10 s. */
+  /** Évaluations retenues (modèle, carnet), au plus une par tranche de 10 s du round. */
   evals: Array<{ pm: number; pk: number }>;
-  lastT: number;
+  lastBucket: number;
 }
 
 export interface ShadowOptions {
@@ -113,28 +113,34 @@ export class ShadowTracker {
     } catch { /* fichier illisible : on repart de zéro, sans l'écraser tant que rien n'est mesuré */ }
   }
 
-  /** Retient la première évaluation exploitable de chaque round. */
+  /** Retient les évaluations régulières du round (une par tranche de 10 s). */
   observe(r: DecisionRecord): void {
     // Modèle SEUL : avec un mélange actif, pUp contient déjà le carnet et la comparaison
     // « modèle vs carnet » serait truquée.
+    // Seulement les passages réguliers : les évaluations déclenchées par un saut du spot
+    // sur-représenteraient les instants où un carnet en retard flatte le modèle.
+    if (r.mv) return;
     const pModel = rawModelProb(r);
     if (pModel === null) return;
     const pMarket = marketProbUp(r);
     if (pMarket === null) return;
-    const existing = this.pending.get(r.slug);
-    if (existing) {
-      if (r.t - existing.lastT < 10_000 || existing.evals.length >= 40) return;
-      existing.evals.push({ pm: pModel, pk: pMarket });
-      existing.lastT = r.t;
-      return;
-    }
     const slot = Number(r.slug.split('-').pop());
     if (!Number.isFinite(slot)) return;
+    // Une évaluation par tranche de 10 s depuis le début du round (grille fixe : un
+    // passage à 9,98 s du précédent n'est plus perdu à cause de la gigue réseau).
+    const bucket = Math.floor((r.t / 1000 - slot) / 10);
+    const existing = this.pending.get(r.slug);
+    if (existing) {
+      if (bucket <= existing.lastBucket || existing.evals.length >= 40) return;
+      existing.evals.push({ pm: pModel, pk: pMarket });
+      existing.lastBucket = bucket;
+      return;
+    }
     if (this.pending.size >= this.o.maxPending) {
       const oldest = this.pending.keys().next().value;
       if (oldest !== undefined) this.pending.delete(oldest);
     }
-    this.pending.set(r.slug, { endMs: slot * 1000 + 300_000, evals: [{ pm: pModel, pk: pMarket }], lastT: r.t });
+    this.pending.set(r.slug, { endMs: slot * 1000 + 300_000, evals: [{ pm: pModel, pk: pMarket }], lastBucket: bucket });
   }
 
   /** Règle les rounds terminés (au plus `perCall` requêtes). Ne lève jamais. */

@@ -73,9 +73,11 @@ async function main() {
   if (!resolved.length) { console.error('Aucun round réglé : vérifier l\'accès à gamma-api.polymarket.com.'); process.exit(1); }
 
   // 2. Historique de prix du token Up (cache)
-  const hist = readJson<Record<string, PricePoint[]>>(HIST, {});
+  // null = l'API a répondu SANS historique (ne pas redemander) ; [] = ancien cache d'un
+  // échec réseau (à redemander une fois).
+  const hist = readJson<Record<string, PricePoint[] | null>>(HIST, {});
   // Absent, ou vide (anciennes versions mettaient en cache les échecs réseau sous forme de [])
-  const needHist = resolved.filter(w => !hist[w.slug]?.length);
+  const needHist = resolved.filter(w => hist[w.slug] !== null && !hist[w.slug]?.length);
   console.error(`Historiques de prix à télécharger : ${needHist.length}`);
   let shownRaw = false;
   let n = 0;
@@ -92,7 +94,7 @@ async function main() {
     });
     // Échec réseau (aucune réponse) : NE PAS mettre en cache, sinon le round est perdu pour
     // toujours (avant : `[]` en cache, jamais re-téléchargé).
-    if (answered) hist[w.slug] = pts;
+    if (answered) hist[w.slug] = pts.length ? pts : null;
     else failedHist++;
     if (++n % 500 === 0) { console.error(`  prix : ${n}/${needHist.length}`); writeFileSync(HIST, JSON.stringify(hist)); }
   });

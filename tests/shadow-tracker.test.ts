@@ -134,3 +134,19 @@ test('toutes les évaluations du round comptent (moyenne), chaque round pesant 1
   assert.ok(Math.abs(st.brierModel! - (0.16 + 0.01) / 2) < 1e-12, `${st.brierModel}`);
   assert.ok(Math.abs(st.brierMarket! - (0.25 + 0.09) / 2) < 1e-12, `${st.brierMarket}`);
 });
+
+test('grille fixe de 10 s : gigue tolérée, évaluations déclenchées par un saut du spot exclues', async () => {
+  let now = (SLOT + 100) * 1000;
+  const t = new ShadowTracker({
+    path: join(mkdtempSync(join(tmpdir(), 'shadow-')), 'fv-shadow.json'), now: () => now,
+    fetchOutcome: async () => ({ resolved: true, upWon: true }),
+  });
+  const slug = `btc-updown-5m-${SLOT}`;
+  // passages réguliers avec gigue (9,95 s d'écart) : tous gardés
+  for (let k = 0; k < 5; k++) t.observe({ ...rec(slug, 0.6, 0.51, 0.51), t: (SLOT + 40 + k * 9.95 + 0.5) * 1000 });
+  // saut du spot : exclu (sinon il sur-pondère les instants favorables au modèle)
+  t.observe({ ...rec(slug, 0.99, 0.51, 0.51), t: (SLOT + 95) * 1000, mv: true });
+  now = (SLOT + 400) * 1000;
+  await t.resolveDue();
+  assert.ok(Math.abs(t.stats().brierModel! - 0.16) < 1e-12, 'moyenne des 5 évaluations régulières à 0,6 seulement');
+});
