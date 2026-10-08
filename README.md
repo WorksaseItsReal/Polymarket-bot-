@@ -33,6 +33,7 @@ Sur le serveur, dans le dossier du bot :
 ```bash
 git fetch origin && git checkout feat/fair-value-strategy && git pull
 npm install
+npm run check                              # types + tests (sans réseau) : doit finir sans échec
 # .env : partir de .env.example (FV_*, TELEGRAM_*, DASHBOARD_*), garder DRY_RUN=true
 npx tsx scripts/telegram/check.ts          # doit afficher « ✅ … Message de test envoyé »
 pm2 restart polymarket-paperbot && pm2 logs polymarket-paperbot --lines 50
