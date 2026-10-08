@@ -48,6 +48,12 @@ export interface DecisionRecord {
   zs?: number;
   /** Loi du modèle si ce n'est pas la normale (FV_TAILS=t4). */
   tl?: 't4';
+  /** Fenêtre TWAP du modèle (s) ; absente = ancien modèle à règlement ponctuel (strike =
+   *  open du slot). L'analyse ne mélange pas les deux définitions. */
+  tw?: number;
+  /** Écart-type du bruit de la probabilité (prix à battre estimé, écart de flux) : l'edge
+   *  exigé est minEdge + FV_NOISE_EDGE_K · ns. Absent des anciens journaux (= 0). */
+  ns?: number;
   /** Évaluation déclenchée par un MOUVEMENT du spot (et non par le passage régulier) :
    *  gardée pour rejouer les paris, exclue des mesures « modèle vs carnet » et de la
    *  calibration (elle sur-représente les instants juste après un saut, où un carnet en

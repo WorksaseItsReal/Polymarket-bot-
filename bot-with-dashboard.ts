@@ -27,7 +27,7 @@ import type { BotState, BotConfig, LogLevel, DipArbSignal, SmartMoneySignal } fr
 import { addSession, createSessionFromState, type TradeRecord } from './src/dashboard/session-history.js';
 import { isSpotCoin, type SpotCoin } from './src/services/spot-price-service.js';
 import { computeStake, MAX_VARIANCE_PCT } from './src/services/stake-sizing.js';
-import { fairValueConfigFromEnv } from './src/services/fair-value.js';
+import { entryMinTauSec, fairValueConfigFromEnv } from './src/services/fair-value.js';
 import { getRoundMarketData } from './src/services/round-market-data.js';
 import { fetchRoundOutcome, ledgerStatsShared, readLedgerShared, type LedgerStats } from './src/services/paper-ledger.js';
 import { FairValueRunner, coinsFromEnv, type ScannedMarket } from './src/strategy/fair-value-runner.js';
@@ -1215,6 +1215,7 @@ function activateTelegram(client: TelegramClient, detail: string) {
       capital: CONFIG.capital.totalUsd, minEdge: FV_CFG.minEdge, minProb: FV_CFG.minProb, feeRate: FV_CFG.takerFeeRate,
       pollSec: FV_POLL_MS / 1000, coins: [...FV_COINS], stats: ledgerStats(), warning: capitalWarning() ?? undefined,
       zScale: FV_CFG.zScale, blendModel: FV_CFG.blendModel, blendMarket: FV_CFG.blendMarket, live: !CONFIG.dryRun,
+      noiseK: FV_CFG.noiseEdgeK,
       restart: crashStart && (crashStart.brutal || crashStart.afterError)
         ? { brutal: crashStart.brutal, recentCrashes: crashStart.recentCrashes } : undefined,
     }));
@@ -1292,7 +1293,8 @@ function perfGuard(): string | null {
 
 async function setupFairValueStrategy(sdk: PolymarketSDK) {
   log('INFO', `📐 Stratégie juste valeur : p_modèle ≥ ${FV_CFG.minProb} et edge ≥ ${(FV_CFG.minEdge * 100).toFixed(1)} pt après frais `
-    + `(taker ${FV_CFG.takerFeeRate}), τ ∈ [${FV_CFG.minTauSec}, ${FV_CFG.maxTauSec}] s, ask ∈ [${FV_CFG.minAsk}, ${FV_CFG.maxAsk}], `
+    + `(taker ${FV_CFG.takerFeeRate}) + ${FV_CFG.noiseEdgeK}·bruit du prix à battre, règlement TWAP ${FV_CFG.twapWindowSec} s, `
+    + `τ ∈ [${entryMinTauSec(FV_CFG)}, ${FV_CFG.maxTauSec}] s, ask ∈ [${FV_CFG.minAsk}, ${FV_CFG.maxAsk}], `
     + `loi ${FV_CFG.tails}, confiance ×${FV_CFG.zScale}, mélange modèle ${FV_CFG.blendModel} / carnet ${FV_CFG.blendMarket}, `
     + `sortie si bid net > p + ${FV_EXIT_EDGE}, scrutation ${FV_POLL_MS / 1000} s`);
   if (!CONFIG.dryRun) {
@@ -1310,6 +1312,8 @@ async function setupFairValueStrategy(sdk: PolymarketSDK) {
   // `mesure` : définition de la mesure (v2 = moyenne de toutes les évaluations du round).
   const modelKey = JSON.stringify({
     mesure: 2, z: FV_CFG.zScale, tails: FV_CFG.tails, noise: FV_CFG.strikeNoiseSec, basis: FV_CFG.basisBps, twap: FV_CFG.twapWindowSec,
+    // Méthode du strike (2 : moyenne de la minute précédant l'ouverture, règlement TWAP).
+    strike: FV_CFG.twapWindowSec > 0 ? 2 : 1,
   });
   const shadow = new ShadowTracker({
     path: polyDir() + '/fv-shadow.json', fetchOutcome: slug => fetchRoundOutcome(slug), modelKey,
@@ -1368,14 +1372,16 @@ async function setupFairValueStrategy(sdk: PolymarketSDK) {
     // Délai garanti : le client CLOB n'en a aucun, une réponse bloquée figeait la boucle.
     getBook: tokenId => withTimeout(sdk.markets.getTokenOrderbook(tokenId), 8000, 'carnet CLOB'),
     getRoundData: (coin, slot, now) => (isSpotCoin(coin)
-      ? getRoundMarketData(coin as SpotCoin, slot, now, () => stream?.price(coin) ?? null)
+      ? getRoundMarketData(coin as SpotCoin, slot, now, () => stream?.price(coin) ?? null, FV_CFG.twapWindowSec)
       : Promise.resolve(null)),
     fetchOutcome: slug => fetchRoundOutcome(slug),
     notify,
     log: (level, msg) => log(level, msg),
     timeZone: TG_TZ,
     onEvaluation: r => { journal?.record(r); shadow.observe(r); },
-    entryBlock: () => clockBlock() ?? perfGuard(),
+    // Arrêt en cours : plus aucune entrée (avant : un pari pouvait être pris — et annoncé
+    // sur Telegram APRÈS « Bot arrêté » — pendant les ≤ 5 s de vidage).
+    entryBlock: () => (shuttingDown ? 'arrêt du bot en cours' : null) ?? clockBlock() ?? perfGuard(),
     onRiskStop: reason => {
       const streak = /pertes consécutives/.test(reason);
       alertOnce(streak ? 'risk-streak' : 'risk-drawdown', streak

@@ -19,11 +19,14 @@
 import {
   binaryPayoff,
   decide,
+  entryMinTauSec,
+  blendNoiseFactor,
   blendWithMarket,
   bookMidUp,
   estimateFill,
   estimateSell,
   maxBuyPriceForEdge,
+  probNoiseSd,
   probUp,
   type BookLevel,
   type FairValueConfig,
@@ -351,11 +354,11 @@ export class FairValueRunner {
     const { cfg } = this.d;
     const now = this.d.now();
     const minShares = this.d.minSellShares ?? 0;
-    const candidates: Array<{ pos: LedgerTrade; floor: number; pHeld: number }> = [];
+    const candidates: Array<{ pos: LedgerTrade; floor: number; pHeld: number; noiseMargin: number }> = [];
     for (const pos of (this.trades() ?? []).filter(t => t.status === 'open')) {
       const tauSec = (pos.endMs - now) / 1000;
       // En fin de round le modèle n'est pas fiable : on garde jusqu'à la résolution.
-      if (tauSec < cfg.minTauSec || !pos.tokenId || !pos.slotSec) continue;
+      if (tauSec < entryMinTauSec(cfg) || !pos.tokenId || !pos.slotSec) continue;
       if (pos.shares < minShares) continue; // trop petit pour un ordre de vente réel
       try {
         const data = await this.d.getRoundData(pos.coin, pos.slotSec, now);
@@ -379,9 +382,12 @@ export class FairValueRunner {
         const pUsed = blendWithMarket(pUp, marketUp, cfg);
         if (pUsed === null) continue;
         const pHeld = pos.side === 'UP' ? pUsed : 1 - pUsed;
-        const floor = pHeld + this.d.exitEdge; // prix net minimal de l'ordre de vente
+        // Même prudence qu'à l'entrée : un bid au-dessus de notre valeur de moins que notre
+        // propre bruit (prix à battre estimé) n'est pas une occasion de revente.
+        const noiseMargin = Math.max(0, cfg.noiseEdgeK ?? 0) * probNoiseSd({ ...data!, tauSec }, cfg) * blendNoiseFactor(pUp, pUsed, cfg);
+        const floor = pHeld + this.d.exitEdge + noiseMargin; // prix net minimal de l'ordre de vente
         const sale = estimateSell(book.bids, pos.shares, cfg.takerFeeRate, floor);
-        if (sale.complete) candidates.push({ pos, floor, pHeld });
+        if (sale.complete) candidates.push({ pos, floor, pHeld, noiseMargin });
       } catch {
         /* carnet ou flux indisponible : on garde la position */
       }
@@ -390,7 +396,7 @@ export class FairValueRunner {
     const delay = this.d.fillDelayMs ?? 0;
     if (delay > 0) await (this.d.sleep ?? (ms => new Promise(r => setTimeout(r, ms))))(delay);
     const at = this.d.now();
-    for (const { pos, floor, pHeld } of candidates) {
+    for (const { pos, floor, pHeld, noiseMargin } of candidates) {
       try {
         // Carnet relu à l'arrivée de l'ordre : seuls les bids au-dessus du plancher comptent.
         const sale = estimateSell((await this.d.getBook(pos.tokenId as string)).bids, pos.shares, cfg.takerFeeRate, floor);
@@ -410,7 +416,7 @@ export class FairValueRunner {
           }
         });
         if (!saved || !closed) continue;
-        this.d.log('TRADE', `[SIMULATION] VENTE ${pos.coin} ${pos.side} @ VWAP $${exitPrice.toFixed(3)} (net frais ${netPerShare.toFixed(3)} ≥ p_modèle ${pHeld.toFixed(3)} + ${this.d.exitEdge}) `
+        this.d.log('TRADE', `[SIMULATION] VENTE ${pos.coin} ${pos.side} @ VWAP $${exitPrice.toFixed(3)} (net frais ${netPerShare.toFixed(3)} ≥ p_modèle ${pHeld.toFixed(3)} + ${this.d.exitEdge}${noiseMargin > 5e-4 ? ` + ${noiseMargin.toFixed(3)} bruit` : ''}) `
           + `round ${pos.slug} — PnL réalisé ${profit >= 0 ? '+' : ''}$${profit.toFixed(4)}`);
         this.d.notify(msgTradeClosed({ coin: pos.coin, side: pos.side, slotSec: pos.slotSec as number, outcome: 'sold', pnl: profit, stats: this.stats(), timeZone: this.d.timeZone }));
         this.d.onTradeClosed?.(closed);
@@ -444,7 +450,7 @@ export class FairValueRunner {
       const endMs = slot * 1000 + 300_000;
       const now = this.d.now();
       let tauSec = (endMs - now) / 1000;
-      if (tauSec < cfg.minTauSec || tauSec > cfg.maxTauSec) continue; // aucun appel réseau hors fenêtre
+      if (tauSec < entryMinTauSec(cfg) || tauSec > cfg.maxTauSec) continue; // aucun appel réseau hors fenêtre
       const coin = market.underlying;
       let rec: DecisionRecord | null = null; // évaluation journalisée (pari ou abstention)
       try {
@@ -458,7 +464,7 @@ export class FairValueRunner {
         // carnet a été lu qui compte.
         const nowBook = this.d.now();
         tauSec = (endMs - nowBook) / 1000;
-        if (tauSec < cfg.minTauSec || tauSec > cfg.maxTauSec) continue;
+        if (tauSec < entryMinTauSec(cfg) || tauSec > cfg.maxTauSec) continue;
         // Carnets lents à venir : le spot lu AVANT eux peut être dépassé (spot revenu,
         // carnet déjà réajusté → on achèterait contre un prix juste). On relit le spot, à
         // l'instant de la lecture des carnets — information disponible à la décision.
@@ -480,7 +486,9 @@ export class FairValueRunner {
         rec = {
           t: now, slug: market.slug, coin, tau: Math.round(tauSec * 10) / 10, spot: data.spot, strike: data.strike,
           sig: data.sigmaPerSqrtSec, pUp: decision.pUp, pRaw: decision.pRaw ?? null, zs: cfg.zScale,
-          ...(cfg.tails === 't4' ? { tl: 't4' as const } : {}), ...(coins ? { mv: true as const } : {}), upAsk: upBest?.price ?? null, downAsk: downBest?.price ?? null,
+          ...(decision.noiseSd !== undefined ? { ns: Math.round(decision.noiseSd * 1e4) / 1e4 } : {}),
+          ...(cfg.tails === 't4' ? { tl: 't4' as const } : {}), ...(cfg.twapWindowSec > 0 ? { tw: cfg.twapWindowSec } : {}),
+          ...(coins ? { mv: true as const } : {}), upAsk: upBest?.price ?? null, downAsk: downBest?.price ?? null,
           upAskSz: upBest?.size ?? null, downAskSz: downBest?.size ?? null,
           upBid: upBid?.price ?? null, downBid: downBid?.price ?? null, upBidSz: upBid?.size ?? null, downBidSz: downBid?.size ?? null,
           src: data.source, act: 'hold',
@@ -558,10 +566,17 @@ export class FairValueRunner {
         // que les asks sous la limite. On ne réévalue PAS le modèle après le délai : un vrai
         // ordre ne peut pas « voir » le mouvement du spot pendant son trajet (biais
         // d'anticipation qui flattait le papier).
-        const limit = Math.min(cfg.maxAsk, maxBuyPriceForEdge(q.prob, cfg.minEdge, cfg.takerFeeRate) ?? 0);
+        const required = decision.requiredEdge ?? cfg.minEdge;
+        const limit = Math.min(cfg.maxAsk, maxBuyPriceForEdge(q.prob, required, cfg.takerFeeRate) ?? 0);
         const delay = this.d.fillDelayMs ?? 0;
         if (delay > 0) {
           await (this.d.sleep ?? (ms => new Promise(r => setTimeout(r, ms))))(delay);
+          // Blocage apparu pendant le trajet de l'ordre (arrêt du bot, garde-fou) : on renonce.
+          const lateBlock = this.d.entryBlock?.() ?? null;
+          if (lateBlock) {
+            this.holdLog(market.conditionId, `   ↳ ${ctx} → PAS de mise : ${lateBlock}`);
+            continue;
+          }
         }
         // Exécution sur un carnet POSTÉRIEUR à l'information utilisée : relu après la latence,
         // et aussi sans latence si le spot a été relu (sinon on achèterait sur un carnet
@@ -578,8 +593,8 @@ export class FairValueRunner {
         }
         const entryCost = fill.avgCost; // coût exact par part, frais inclus niveau par niveau
         const edgeAtFill = q.prob - entryCost;
-        if (edgeAtFill < cfg.minEdge - 1e-9) {
-          this.holdLog(market.conditionId, `   ↳ ${ctx} → PAS de mise : edge au VWAP ${(edgeAtFill * 100).toFixed(1)} pt < ${(cfg.minEdge * 100).toFixed(1)} pt`);
+        if (edgeAtFill < required - 1e-9) {
+          this.holdLog(market.conditionId, `   ↳ ${ctx} → PAS de mise : edge au VWAP ${(edgeAtFill * 100).toFixed(1)} pt < ${(required * 100).toFixed(1)} pt`);
           continue;
         }
 

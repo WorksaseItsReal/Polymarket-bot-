@@ -99,6 +99,8 @@ export interface StartupInfo {
   zScale?: number;
   blendModel?: number;
   blendMarket?: number;
+  /** FV_NOISE_EDGE_K : marge en plus de minEdge selon l'incertitude du prix à battre. */
+  noiseK?: number;
   /** Relance après un arrêt anormal (sur erreur, ou brutal : kill -9, mémoire saturée). */
   restart?: { brutal: boolean; recentCrashes: number };
 }
@@ -127,7 +129,8 @@ export function msgStartup(i: StartupInfo): string {
       : '🤖 <b>Bot Polymarket démarré</b> — mode PAPIER (aucun ordre réel)',
     ...(i.restart ? [restartLine(i.restart)] : []),
     `Marchés : « Up or Down » 5 min · ${escapeHtml(i.coins.join(', '))}`,
-    `Règle : pari seulement si la probabilité calculée ≥ ${pct(i.minProb)} ET dépasse le prix payé (frais inclus) d'au moins ${(i.minEdge * 100).toFixed(0)} pts`,
+    `Règle : pari seulement si la probabilité calculée ≥ ${pct(i.minProb)} ET dépasse le prix payé (frais inclus) d'au moins ${(i.minEdge * 100).toFixed(0)} pts`
+      + (i.noiseK ? ', plus une marge quand le prix à battre (estimé) laisse un doute' : ''),
     `Capital papier : ${amount(i.capital)} · vérification toutes les ${i.pollSec} s`,
     ...(tuningLine(i) ? [tuningLine(i) as string] : []),
     i.stats.n || i.stats.open ? `Historique : ${balanceLine(i.stats)}` : 'Historique : aucun trade pour l\'instant',

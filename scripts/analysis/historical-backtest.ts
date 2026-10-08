@@ -14,7 +14,7 @@ import 'dotenv/config';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { fairValueConfigFromEnv } from '../../src/services/fair-value.js';
+import { entryMinTauSec, fairValueConfigFromEnv } from '../../src/services/fair-value.js';
 import { coinsFromEnv } from '../../src/strategy/fair-value-runner.js';
 import type { DiscoveryCoin } from '../../src/services/round-discovery.js';
 import {
@@ -148,7 +148,7 @@ async function main() {
   }
 
   // C. Calibration
-  const recs = toResolvedRecords(points, 0.005, cfg.zScale);
+  const recs = toResolvedRecords(points, 0.005, cfg.zScale, cfg);
   console.log('\n3) Calibration (modèle | marché)');
   const calM = calibration(recs, r => r.pUp);
   const calK = calibration(points.map(p => ({ ...recs[0], pUp: p.pMarket, upWon: p.upWon })), r => r.pUp);
@@ -160,7 +160,7 @@ async function main() {
   }
   const rounds = byRound(recs);
   const fit = fitZScale(rounds, 150, cfg.tails);
-  const blend = fitBlend(rounds, { minTau: cfg.minTauSec, maxTau: cfg.maxTauSec });
+  const blend = fitBlend(rounds, { minTau: entryMinTauSec(cfg), maxTau: cfg.maxTauSec });
   if (fit) {
     console.log(`   Calibration à un paramètre : FV_Z_SCALE optimal ${fit.m} (IC95 ${fit.lo}–${fit.hi})`);
     console.log(`   ${zScaleAdvice(fit, cfg.zScale, zScaleConflictsWithBlend(blendVerdict(blend, cfg), cfg))}`);
@@ -173,7 +173,7 @@ async function main() {
   console.log('   marché est alors SOUS-évalué. Confirmer sur le journal en direct (fv-report) avant de régler.');
 
   // D. Seuils (indicatif) — avec le mélange configuré, comme le bot
-  const params = { feeRate: cfg.takerFeeRate, minAsk: cfg.minAsk, maxAsk: cfg.maxAsk, minTau: cfg.minTauSec, maxTau: cfg.maxTauSec };
+  const params = { feeRate: cfg.takerFeeRate, minAsk: cfg.minAsk, maxAsk: cfg.maxAsk, minTau: entryMinTauSec(cfg), maxTau: cfg.maxTauSec, noiseK: cfg.noiseEdgeK };
   const decisionRounds = applyBlend(rounds, cfg.blendModel, cfg.blendMarket);
   const [h1, h2] = halves(decisionRounds);
   console.log('\n4) Seuils rejoués sur asks RECONSTITUÉS (prix + 0,5 ct, frais inclus) — INDICATIF');

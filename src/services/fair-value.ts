@@ -11,7 +11,8 @@
  *   faut un prédicteur indépendant du carnet.
  *
  * Le prédicteur retenu est le seul qui découle de la règle de résolution :
- *   « Up » ⟺ prix final ≥ prix d'ouverture (strike). Avec le spot S, le strike K,
+ *   « Up » ⟺ prix final ≥ prix d'ouverture (strike) — tous deux des moyennes Chainlink
+ *   sur 60 s depuis août 2026 (voir `twapWindowSec`). Avec le spot S, le strike K,
  *   le temps restant τ et la volatilité σ, P(Up) se calcule ; on n'achète un côté
  *   QUE si cette probabilité dépasse son coût réel (ask + frais taker) d'au moins
  *   `minEdge`. Le critère est l'ESPÉRANCE, jamais le win rate : un win rate élevé
@@ -36,23 +37,34 @@ export interface FairValueConfig {
    *  Barème officiel crypto : 0,07 (1,75 $ pour 100 parts à 0,50 $) ; makers jamais
    *  facturés (et 20 % de remise). */
   takerFeeRate: number;
-  /** Fenêtre de moyenne du prix de résolution (s). Les règles des marchés « Up or Down »
-   *  disent : prix Chainlink BTC/USD à la FIN vs au DÉBUT de la plage → résolution
-   *  ponctuelle, 0. (> 0 seulement si un marché résout sur un TWAP.) */
+  /** Fenêtre de moyenne (TWAP) du règlement, en s. Depuis le 7 août 2026, les marchés
+   *  « Up or Down » 5 min se règlent sur le flux Chainlink TWAP (30 s, puis 60 s depuis
+   *  mi-août 2026) : « Up » ⟺ TWAP à la fin ≥ prix à battre, et le prix à battre est LUI
+   *  AUSSI lu sur ce flux (changelog Polymarket). 0 = ancien règlement ponctuel. ≤ 60. */
   twapWindowSec: number;
-  /** Incertitude du strike, en « secondes de variance » : notre strike est l'open de la
-   *  bougie 1 min Binance/Coinbase du slot, pas le point Chainlink exact. */
+  /** Incertitude du strike, en « secondes de variance ». Avec TWAP, le strike est estimé
+   *  par (O+H+L+C)/4 de la bougie 1 min précédant l'ouverture : erreur ≈ 0,19·σ√60, soit
+   *  ≈ 2 s de variance (3 par prudence). Sans TWAP (open de la bougie du slot vs point
+   *  Chainlink), 10 était la valeur retenue. */
   strikeNoiseSec: number;
   /** Incertitude du strike + écart de flux (Binance vs Chainlink), en points de base. */
   basisBps: number;
   /** Edge minimal exigé, en probabilité, APRÈS frais et prix d'exécution réel. */
   minEdge: number;
+  /** Marge supplémentaire exigée, en écarts-types du bruit de NOTRE probabilité (prix à
+   *  battre seulement estimé, écart de flux) : edge requis = minEdge + k·σ_p. Le carnet
+   *  connaît le prix à battre exact (affiché par Polymarket) ; un désaccord de l'ordre de
+   *  notre bruit n'est pas un edge mais de la sélection adverse. Simulation (3 000 rounds,
+   *  règlement TWAP) : k = 0 → contre un carnet juste, 11 % des rounds joués à −11 %/$ ;
+   *  k = 1,5 → aucun, et le gain sur un carnet en retard passe de +18 % à +37 %/$. */
+  noiseEdgeK: number;
   /** Probabilité modèle minimale du côté acheté. Monte le win rate (on ne parie que
    *  sur le côté probable) et réduit la variance, au prix de quelques paris +EV sur
    *  l'outsider. Si le modèle est calibré, WR attendu ≥ minProb. */
   minProb: number;
   /** Pas d'entrée avec moins de τ secondes restantes : en toute fin de round, l'écart
-   *  Binance/Chainlink et notre latence REST dominent le signal. */
+   *  Binance/Chainlink et notre latence REST dominent le signal. Jamais moins que
+   *  `twapWindowSec` (voir `entryMinTauSec`). */
   minTauSec: number;
   /** Pas d'entrée avant que le marché ait digéré l'ouverture. */
   maxTauSec: number;
@@ -79,12 +91,13 @@ export interface FairValueConfig {
 
 export const DEFAULT_FAIR_VALUE_CONFIG: FairValueConfig = {
   takerFeeRate: 0.07,
-  twapWindowSec: 0,
-  strikeNoiseSec: 10,
+  twapWindowSec: 60,
+  strikeNoiseSec: 3,
   basisBps: 2,
   minEdge: 0.04,
+  noiseEdgeK: 1.5,
   minProb: 0.6,
-  minTauSec: 45,
+  minTauSec: 60,
   maxTauSec: 270,
   minAsk: 0.08,
   maxAsk: 0.92,
@@ -93,6 +106,15 @@ export const DEFAULT_FAIR_VALUE_CONFIG: FairValueConfig = {
   blendModel: 1,
   blendMarket: 0,
 };
+
+/**
+ * τ minimal pour entrer ou réévaluer une position. Pendant la fenêtre de moyenne finale
+ * (τ < W), une partie du TWAP de règlement est déjà acquise : le modèle (centré sur le
+ * spot) ne la connaît pas, sa probabilité y serait fausse → ni entrée ni sortie.
+ */
+export function entryMinTauSec(cfg: Pick<FairValueConfig, 'minTauSec' | 'twapWindowSec'>): number {
+  return Math.max(cfg.minTauSec, cfg.twapWindowSec);
+}
 
 /** Probabilité modèle bornée : jamais 0 ni 1 (un modèle n'est jamais certain). */
 export const PROB_FLOOR = 0.01;
@@ -233,7 +255,7 @@ export function probUp(input: ProbUpInput, cfg: FairValueConfig = DEFAULT_FAIR_V
   const basis = Math.max(0, cfg.basisBps) / 1e4;
   // Trois sources d'incertitude, indépendantes, qui s'additionnent en variance :
   //  1. le chemin restant jusqu'au prix de résolution (ponctuel, ou TWAP si configuré) ;
-  //  2. le strike : approché par l'OPEN de la bougie 1 min du slot, pas le point Chainlink ;
+  //  2. le strike : estimé depuis les bougies 1 min (round-market-data.ts), pas lu chez Chainlink ;
   //  3. l'écart de flux (Binance/Coinbase vs Chainlink), `basisBps`.
   const pathVarSec = twapVarianceSeconds(tauSec, cfg.twapWindowSec) + Math.max(0, cfg.strikeNoiseSec);
   const variance = sigmaPerSqrtSec * sigmaPerSqrtSec * pathVarSec + basis * basis;
@@ -241,6 +263,36 @@ export function probUp(input: ProbUpInput, cfg: FairValueConfig = DEFAULT_FAIR_V
   const z = (x / Math.sqrt(variance)) * (cfg.zScale > 0 ? cfg.zScale : 1);
   const p = cfg.tails === 't4' ? studentT4CdfStd(z) : normCdf(z);
   return Math.min(PROB_CEIL, Math.max(PROB_FLOOR, p));
+}
+
+/**
+ * Écart-type de P(Up) (modèle brut, après FV_Z_SCALE) dû à ce que nous ne connaissons
+ * qu'approximativement : le prix à battre (`strikeNoiseSec`) et l'écart de flux
+ * (`basisBps`). Linéarisation : σ_p = densité(z) · zScale · √(bruit / variance totale).
+ */
+export function probNoiseSd(input: ProbUpInput, cfg: FairValueConfig = DEFAULT_FAIR_VALUE_CONFIG): number {
+  const { spot, strike, sigmaPerSqrtSec: s, tauSec } = input;
+  if (!isPos(spot) || !isPos(strike) || !isPos(s) || !isPos(tauSec)) return 0;
+  const basis = Math.max(0, cfg.basisBps) / 1e4;
+  const noise = s * s * Math.max(0, cfg.strikeNoiseSec) + basis * basis;
+  const V = s * s * (twapVarianceSeconds(tauSec, cfg.twapWindowSec) + Math.max(0, cfg.strikeNoiseSec)) + basis * basis;
+  if (!(V > 0) || !(noise > 0)) return 0;
+  const zs = cfg.zScale > 0 ? cfg.zScale : 1;
+  const z = (Math.log(spot / strike) / Math.sqrt(V)) * zs;
+  const h = 1e-4;
+  const dens = cfg.tails === 't4'
+    ? (studentT4CdfStd(z + h) - studentT4CdfStd(z - h)) / (2 * h)
+    : Math.exp(-z * z / 2) / Math.sqrt(2 * Math.PI);
+  return dens * zs * Math.sqrt(noise / V);
+}
+
+/** Facteur du mélange modèle/carnet sur une petite variation de p_modèle (1 sans mélange). */
+export function blendNoiseFactor(pRaw: number, pUsed: number, cfg: FairValueConfig): number {
+  const a = cfg.blendModel ?? 1;
+  const b = cfg.blendMarket ?? 0;
+  if (a === 1 && b === 0) return 1;
+  const pr = Math.min(PROB_CEIL, Math.max(PROB_FLOOR, pRaw));
+  return (a * pUsed * (1 - pUsed)) / (pr * (1 - pr));
 }
 
 /**
@@ -401,6 +453,10 @@ export interface FairValueDecision {
   pRaw?: number | null;
   quotes: SideQuote[];
   best: SideQuote | null;
+  /** Écart-type de bruit de la probabilité utilisée (voir `probNoiseSd`). */
+  noiseSd?: number;
+  /** Edge exigé pour ce passage : minEdge + noiseEdgeK · noiseSd. */
+  requiredEdge?: number;
 }
 
 export interface DecisionInput extends ProbUpInput {
@@ -442,8 +498,11 @@ export function decide(input: DecisionInput, cfg: FairValueConfig = DEFAULT_FAIR
     ...extra,
   });
 
-  if (!(input.tauSec >= cfg.minTauSec)) {
-    return none(`τ=${Math.round(input.tauSec)} s < ${cfg.minTauSec} s (fin de round : latence et écart d'oracle dominent)`);
+  const minTau = entryMinTauSec(cfg);
+  if (!(input.tauSec >= minTau)) {
+    return none(cfg.twapWindowSec >= cfg.minTauSec
+      ? `τ=${Math.round(input.tauSec)} s < ${minTau} s (fenêtre de moyenne du règlement : la part déjà moyennée n'est pas modélisée)`
+      : `τ=${Math.round(input.tauSec)} s < ${minTau} s (fin de round : latence et écart d'oracle dominent)`);
   }
   if (!(input.tauSec <= cfg.maxTauSec)) {
     return none(`τ=${Math.round(input.tauSec)} s > ${cfg.maxTauSec} s (trop tôt dans le round)`);
@@ -454,6 +513,11 @@ export function decide(input: DecisionInput, cfg: FairValueConfig = DEFAULT_FAIR
   const pUp = blendWithMarket(pRaw, bookMidUp(input.upAsk, input.downAsk), cfg);
   if (pUp === null) return none('mélange modèle/marché configuré mais carnet incomplet', { pRaw });
 
+  const noiseSd = probNoiseSd(input, cfg) * blendNoiseFactor(pRaw, pUp, cfg);
+  const requiredEdge = cfg.minEdge + Math.max(0, cfg.noiseEdgeK ?? 0) * noiseSd;
+  const reqTxt = requiredEdge > cfg.minEdge + 5e-4
+    ? `${(requiredEdge * 100).toFixed(1)}pt (${(cfg.minEdge * 100).toFixed(1)} + ${((requiredEdge - cfg.minEdge) * 100).toFixed(1)} bruit du prix à battre)`
+    : `${(cfg.minEdge * 100).toFixed(1)}pt`;
   const quotes: SideQuote[] = [];
   const add = (side: Side, prob: number, ask: number | null) => {
     if (!isPos(ask) || ask >= 1) return;
@@ -462,7 +526,8 @@ export function decide(input: DecisionInput, cfg: FairValueConfig = DEFAULT_FAIR
   };
   add('UP', pUp, input.upAsk);
   add('DOWN', 1 - pUp, input.downAsk);
-  if (quotes.length === 0) return none('aucun ask exploitable', { pUp, pRaw });
+  const ctx = { pUp, pRaw, noiseSd, requiredEdge };
+  if (quotes.length === 0) return none('aucun ask exploitable', ctx);
 
   const inBounds = quotes.filter(q => q.ask >= cfg.minAsk && q.ask <= cfg.maxAsk);
   const eligible = inBounds.filter(q => q.prob >= cfg.minProb);
@@ -473,15 +538,15 @@ export function decide(input: DecisionInput, cfg: FairValueConfig = DEFAULT_FAIR
   const summary = quotes.map(fmt).join(' | ');
 
   if (!inBounds.length) {
-    return none(`asks hors bornes [${cfg.minAsk}, ${cfg.maxAsk}] (${summary})`, { pUp, pRaw, quotes, best });
+    return none(`asks hors bornes [${cfg.minAsk}, ${cfg.maxAsk}] (${summary})`, { ...ctx, quotes, best });
   }
   if (!eligible.length) {
-    return none(`aucun côté avec p_modèle ≥ ${cfg.minProb} (${summary})`, { pUp, pRaw, quotes, best });
+    return none(`aucun côté avec p_modèle ≥ ${cfg.minProb} (${summary})`, { ...ctx, quotes, best });
   }
-  if (!(best.edge >= cfg.minEdge)) {
-    return none(`edge ${(best.edge * 100).toFixed(1)}pt < ${(cfg.minEdge * 100).toFixed(1)}pt requis (${summary})`, { pUp, pRaw, quotes, best });
+  if (!(best.edge >= requiredEdge)) {
+    return none(`edge ${(best.edge * 100).toFixed(1)}pt < ${reqTxt} requis (${summary})`, { ...ctx, quotes, best });
   }
-  return { side: best.side, reason: `edge ${(best.edge * 100).toFixed(1)}pt ≥ ${(cfg.minEdge * 100).toFixed(1)}pt (${summary})`, pUp, pRaw, quotes, best };
+  return { side: best.side, reason: `edge ${(best.edge * 100).toFixed(1)}pt ≥ ${reqTxt} (${summary})`, ...ctx, quotes, best };
 }
 
 /**
@@ -498,10 +563,11 @@ export function fairValueConfigFromEnv(env: Record<string, string | undefined>):
   const d = DEFAULT_FAIR_VALUE_CONFIG;
   const cfg: FairValueConfig = {
     takerFeeRate: num('FV_TAKER_FEE_RATE', d.takerFeeRate, 0, 0.5),
-    twapWindowSec: num('FV_TWAP_WINDOW_SEC', d.twapWindowSec, 0, 300),
+    twapWindowSec: num('FV_TWAP_WINDOW_SEC', d.twapWindowSec, 0, 60),
     strikeNoiseSec: num('FV_STRIKE_NOISE_SEC', d.strikeNoiseSec, 0, 120),
     basisBps: num('FV_BASIS_BPS', d.basisBps, 0, 100),
     minEdge: num('FV_MIN_EDGE', d.minEdge, 0, 0.5),
+    noiseEdgeK: num('FV_NOISE_EDGE_K', d.noiseEdgeK, 0, 5),
     minProb: num('FV_MIN_PROB', d.minProb, 0, 0.99),
     minTauSec: num('FV_MIN_TAU_SEC', d.minTauSec, 0, 300),
     maxTauSec: num('FV_MAX_TAU_SEC', d.maxTauSec, 0, 300),

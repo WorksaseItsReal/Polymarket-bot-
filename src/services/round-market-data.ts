@@ -8,7 +8,8 @@
  * le modèle cherche à mesurer.
  *
  * Une requête `klines?interval=1m&limit=61` suffit :
- *   - strike = OPEN de la bougie qui commence au slot du round (même méthode que
+ *   - strike : voir `strikeFromCandles` (moyenne de la minute précédant l'ouverture depuis
+ *     le règlement TWAP d'août 2026 ; auparavant OPEN de la bougie du slot, même méthode que
  *     dip-arb-service / paperbot-recap.py) ;
  *   - spot   = CLOSE de la bougie en cours (dernier prix échangé) ;
  *   - σ      = vol réalisée des clôtures 1 min (max de la dernière heure et des
@@ -17,7 +18,7 @@
  * Aucune valeur par défaut : toute donnée absente, périmée ou incohérente → null.
  */
 
-import { realizedVolPerSqrtSec } from './fair-value.js';
+import { DEFAULT_FAIR_VALUE_CONFIG, realizedVolPerSqrtSec } from './fair-value.js';
 import type { SpotCoin } from './spot-price-service.js';
 import type { LivePrice } from './spot-stream.js';
 
@@ -25,6 +26,9 @@ export interface Candle {
   openTimeMs: number;
   open: number;
   close: number;
+  /** Plus haut / plus bas de la minute (absents ou incohérents : estimation (O+C)/2). */
+  high?: number;
+  low?: number;
 }
 
 export interface RoundMarketData {
@@ -77,7 +81,8 @@ export function parseBinance(data: unknown): Candle[] | null {
   const out: Candle[] = [];
   for (const k of data) {
     if (!Array.isArray(k)) continue;
-    const c = { openTimeMs: Number(k[0]), open: parseFloat(k[1] as string), close: parseFloat(k[4] as string) };
+    const c = { openTimeMs: Number(k[0]), open: parseFloat(k[1] as string), close: parseFloat(k[4] as string),
+      high: parseFloat(k[2] as string), low: parseFloat(k[3] as string) };
     if (Number.isFinite(c.openTimeMs) && c.open > 0 && c.close > 0) out.push(c);
   }
   return out.length ? out.sort((a, b) => a.openTimeMs - b.openTimeMs) : null;
@@ -89,7 +94,7 @@ function parseCoinbase(data: unknown): Candle[] | null {
   const out: Candle[] = [];
   for (const k of data) {
     if (!Array.isArray(k)) continue;
-    const c = { openTimeMs: Number(k[0]) * 1000, open: Number(k[3]), close: Number(k[4]) };
+    const c = { openTimeMs: Number(k[0]) * 1000, open: Number(k[3]), close: Number(k[4]), high: Number(k[2]), low: Number(k[1]) };
     if (Number.isFinite(c.openTimeMs) && c.open > 0 && c.close > 0) out.push(c);
   }
   return out.length ? out.sort((a, b) => a.openTimeMs - b.openTimeMs) : null;
@@ -110,6 +115,34 @@ async function fetchCandles(coin: SpotCoin): Promise<{ candles: Candle[]; source
 }
 
 /**
+ * Strike (« prix à battre ») estimé depuis les bougies 1 min.
+ *  - `twapWindowSec` = 0 (ancien règlement ponctuel) : open de la bougie du slot.
+ *  - W > 0 (règlement TWAP Chainlink depuis août 2026) : le prix à battre est la moyenne
+ *    des W secondes qui PRÉCÈDENT l'ouverture. Estimée par (O+H+L+C)/4 de la bougie
+ *    [T0 − 60 s, T0) — erreur ≈ 0,19·σ√60 contre 0,58·σ√60 pour l'open du slot (mouvement
+ *    brownien, simulation) — et ramenée vers la clôture pour W < 60. Sans plus haut/plus
+ *    bas cohérents : (O+C)/2 (erreur 0,29·σ√60).
+ * null si la bougie nécessaire manque (jamais d'approximation silencieuse).
+ */
+export function strikeFromCandles(
+  candleAt: (openTimeMs: number) => Candle | undefined,
+  slotSec: number,
+  twapWindowSec: number,
+): number | null {
+  const W = Math.min(60, Math.max(0, twapWindowSec));
+  if (W === 0) {
+    const c = candleAt(slotSec * 1000);
+    return c && c.open > 0 ? c.open : null;
+  }
+  const prev = candleAt(slotSec * 1000 - 60_000);
+  if (!prev || !(prev.open > 0) || !(prev.close > 0)) return null;
+  const { open: o, close: c, high: h, low: l } = prev;
+  const hlOk = typeof h === 'number' && typeof l === 'number' && h >= Math.max(o, c) && l <= Math.min(o, c) && l > 0;
+  const mean60 = hlOk ? (o + (h as number) + (l as number) + c) / 4 : (o + c) / 2;
+  return c + (mean60 - c) * (W / 60);
+}
+
+/**
  * Calcul pur à partir de bougies déjà chargées (exporté pour les tests).
  * `nowMs` et `slotSec` sont explicites : aucune horloge implicite.
  */
@@ -119,21 +152,25 @@ export function deriveRoundData(
   nowMs: number,
   source: string,
   maxCandleAgeMs = MAX_CANDLE_AGE_SPOT_MS,
+  twapWindowSec = DEFAULT_FAIR_VALUE_CONFIG.twapWindowSec,
 ): RoundMarketData | null {
   if (!candles.length || !(slotSec > 0)) return null;
   const last = candles[candles.length - 1];
   const candleAgeMs = nowMs - last.openTimeMs;
   // Bougie courante = minute en cours (0–60 s), petite tolérance pour une source lente.
   if (!(candleAgeMs >= 0 && candleAgeMs <= maxCandleAgeMs)) return null;
-  const startCandle = candles.find(c => c.openTimeMs === slotSec * 1000);
-  if (!startCandle) return null;
+  // La bougie du slot doit exister même avec TWAP : elle prouve que les données ont été
+  // lues APRÈS l'ouverture (bougie précédente close, donc définitive).
+  if (!candles.some(c => c.openTimeMs === slotSec * 1000)) return null;
+  const strike = strikeFromCandles(ms => candles.find(c => c.openTimeMs === ms), slotSec, twapWindowSec);
+  if (strike === null) return null;
   // Vol sur bougies CLOSES uniquement (la courante est partielle).
   const closed = candles.slice(0, -1).map(c => c.close);
   const volLong = realizedVolPerSqrtSec(closed, 60, 10);
   const volShort = realizedVolPerSqrtSec(closed.slice(-16), 60, 10);
   const sigma = Math.max(volLong ?? 0, volShort ?? 0);
   if (!(sigma > 0)) return null;
-  return { spot: last.close, strike: startCandle.open, sigmaPerSqrtSec: sigma, source, candleAgeMs };
+  return { spot: last.close, strike, sigmaPerSqrtSec: sigma, source, candleAgeMs };
 }
 
 const cache = new Map<SpotCoin, { ts: number; value: { candles: Candle[]; source: string } | null }>();
@@ -151,6 +188,7 @@ export async function getRoundMarketData(
   slotSec: number,
   nowMs = Date.now(),
   liveInput: LivePrice | null | (() => LivePrice | null) = null,
+  twapWindowSec = DEFAULT_FAIR_VALUE_CONFIG.twapWindowSec,
 ): Promise<RoundMarketData | null> {
   if (slotSec * 1000 > nowMs) return null; // round pas encore ouvert : strike inconnu
   // Un getter est relu APRÈS le chargement des bougies (qui peut prendre plusieurs
@@ -172,14 +210,14 @@ export async function getRoundMarketData(
   // Avec un spot temps réel, la bougie ne sert qu'au strike et à la vol : âge toléré plus long.
   const useLive = () => liveOk && !!loaded && loaded.source.startsWith('binance');
   const maxCandleAge = () => (useLive() ? MAX_CANDLE_AGE_MS : MAX_CANDLE_AGE_SPOT_MS);
-  let base = deriveRoundData(loaded.candles, slotSec, nowMs, loaded.source, maxCandleAge());
+  let base = deriveRoundData(loaded.candles, slotSec, nowMs, loaded.source, maxCandleAge(), twapWindowSec);
   if (!base && fromCache) {
     // Cache antérieur au début du round (bougie du strike absente) ou trop vieux : on relit.
     loaded = await fetchCandles(coin);
     cache.set(coin, { ts: nowMs, value: loaded });
     loadedAt = nowMs;
     if (!loaded) return null;
-    base = deriveRoundData(loaded.candles, slotSec, nowMs, loaded.source, maxCandleAge());
+    base = deriveRoundData(loaded.candles, slotSec, nowMs, loaded.source, maxCandleAge(), twapWindowSec);
   }
   if (!base) return null;
   live = readLive();
@@ -194,7 +232,7 @@ export async function getRoundMarketData(
       cache.set(coin, { ts: nowMs, value: fresh });
       loaded = fresh;
     }
-    return deriveRoundData(loaded.candles, slotSec, nowMs, loaded.source, MAX_CANDLE_AGE_SPOT_MS);
+    return deriveRoundData(loaded.candles, slotSec, nowMs, loaded.source, MAX_CANDLE_AGE_SPOT_MS, twapWindowSec);
   }
   if (liveOk && loaded.source.startsWith('binance')) {
     return { ...base, spot: (live as LivePrice).price, source: `${loaded.source}+ws` };

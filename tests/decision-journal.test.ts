@@ -17,7 +17,8 @@ const DAY = Date.parse('2026-10-07T00:00:00Z');
 function rec(over: Partial<DecisionRecord>): DecisionRecord {
   return {
     t: DAY + 3_600_000, slug: 'btc-updown-5m-1', coin: 'BTC', tau: 120, spot: 100, strike: 100, sig: 1e-4,
-    pUp: 0.5, upAsk: 0.51, downAsk: 0.51, upAskSz: 10, downAskSz: 10, src: 'test', act: 'hold', ...over,
+    // tw : évaluations du modèle en vigueur (règlement TWAP 60 s) ; le rapport ignore les autres
+    pUp: 0.5, upAsk: 0.51, downAsk: 0.51, upAskSz: 10, downAskSz: 10, src: 'test', act: 'hold', tw: 60, ...over,
   };
 }
 
@@ -241,6 +242,27 @@ test('journal : jours révolus compressés (.jsonl.gz, archive existante jamais 
   writeFileSync(join(poly, 'outcomes-cache.json'), JSON.stringify({ [`btc-updown-5m-${slot}`]: true }));
   const out = execFileSync('npx', ['tsx', 'scripts/analysis/fv-report.ts', '--days', '3'], { env: { ...process.env, HOME: home, DOTENV_CONFIG_PATH: '/dev/null' }, encoding: 'utf8', timeout: 120_000 });
   assert.match(out, /Journal : 3 évaluations, 1 rounds, 1 rounds réglés/);
+});
+
+test('rapport : les évaluations de l\'ancien modèle (règlement ponctuel, sans tw) sont écartées et signalées', async () => {
+  const { spawnSync } = await import('node:child_process');
+  const home = mkdtempSync(join(tmpdir(), 'report-tw-'));
+  const poly = join(home, '.polymarket');
+  mkdirSync(join(poly, 'journal'), { recursive: true });
+  const now = Date.now();
+  const slot = Math.floor(now / 1000 / 300) * 300 - 3600;
+  const lines = [
+    ...[0, 1].map(i => rec({ t: now - 3600_000 + i * 10_000, slug: `btc-updown-5m-${slot}`, pUp: 0.6, tw: undefined })),
+    ...[0, 1, 2].map(i => rec({ t: now - 3500_000 + i * 10_000, slug: `eth-updown-5m-${slot}`, coin: 'ETH', pUp: 0.6, ns: 0.05 })),
+  ].map(r => JSON.stringify(r));
+  writeFileSync(join(poly, 'journal', `decisions-${new Date(now).toISOString().slice(0, 10)}.jsonl`), lines.join('\n') + '\n');
+  writeFileSync(join(poly, 'outcomes-cache.json'), JSON.stringify({ [`btc-updown-5m-${slot}`]: true, [`eth-updown-5m-${slot}`]: true }));
+  const r = spawnSync('npx', ['tsx', 'scripts/analysis/fv-report.ts', '--days', '3'], { env: { ...process.env, HOME: home, DOTENV_CONFIG_PATH: '/dev/null' }, encoding: 'utf8', timeout: 120_000 });
+  assert.match(r.stdout, /Journal : 3 évaluations, 1 rounds/);
+  assert.match(r.stderr, /2 évaluations d'un autre modèle ignorées : fenêtre TWAP ≠ 60 s/);
+  // bruit enregistré → la marge FV_NOISE_EDGE_K est rejouée sur les vraies données
+  assert.match(r.stdout, /selon la marge de bruit FV_NOISE_EDGE_K/);
+  assert.match(r.stdout, /k = 1\.5 .*← réglage actuel/);
 });
 
 test('journal : une évaluation par tranche fixe de 10 s, passages réguliers et sauts du spot séparés', async () => {

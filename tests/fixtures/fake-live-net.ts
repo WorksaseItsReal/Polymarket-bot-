@@ -6,7 +6,9 @@
  *     de 5 min dure ~15 s ; départ 40 s après le début d'un créneau ;
  *   - spot : marche aléatoire seconde par seconde (σ ≈ 0,06 %/min) par crypto ;
  *   - Binance klines (fetch) : bougies 1 min cohérentes avec ce spot ;
- *   - Gamma events?slug= (fetch) : rounds <coin>-updown-5m-<slot>, réglés 10 s après la fin ;
+ *   - Gamma events?slug= (fetch) : rounds <coin>-updown-5m-<slot>, réglés 10 s après la fin,
+ *     comme les vrais depuis août 2026 : moyenne (TWAP) des 60 s finales ≥ moyenne des
+ *     60 s précédant l'ouverture ;
  *   - CLOB /book (axios, utilisé par le client Polymarket) : juste valeur d'un spot vu avec
  *     FAKE_BOOK_LAG_SEC (défaut 30) secondes de retard, ±1 ct, profondeur 200 parts ;
  *   - Telegram (fetch) : getMe/getChat/sendMessage ; messages écrits dans FAKE_TELEGRAM_LOG,
@@ -55,6 +57,13 @@ function spot(coin: string, tSec: number): number {
   return w.p[idx];
 }
 
+/** Moyenne du spot sur les 60 s qui se terminent à `tSec` (règlement TWAP Chainlink). */
+function twap60(coin: string, tSec: number): number {
+  let sum = 0;
+  for (let k = 0; k < 60; k++) sum += spot(coin, tSec - k);
+  return sum / 60;
+}
+
 const json = (x: unknown, status = 200) => new Response(JSON.stringify(x), {
   status, headers: { 'Content-Type': 'application/json', date: new RealDate(simNow()).toUTCString() },
 });
@@ -65,7 +74,7 @@ function gammaEvent(slug: string) {
   const coin = m[1];
   const slot = Number(m[2]);
   const closed = simNow() / 1000 > slot + 300 + 10;
-  const upWon = spot(coin, slot + 300) >= spot(coin, slot);
+  const upWon = twap60(coin, slot + 300) >= twap60(coin, slot);
   const ci = COINS.indexOf(coin);
   return {
     slug, title: `${coin} up or down`,
@@ -121,8 +130,12 @@ globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) =>
     const curMin = Math.floor(nowSec / 60) * 60;
     const rows = [];
     for (let m = curMin - 60 * 60; m <= curMin; m += 60) {
-      const close = spot(sym, Math.min(nowSec, m + 59));
-      rows.push([m * 1000, String(spot(sym, m - 1)), String(close), String(close), String(close), '1', m * 1000 + 59_999]);
+      const end = Math.min(nowSec, m + 59);
+      const open = spot(sym, m - 1);
+      let high = open;
+      let low = open;
+      for (let t = m; t <= end; t++) { const x = spot(sym, t); if (x > high) high = x; if (x < low) low = x; }
+      rows.push([m * 1000, String(open), String(high), String(low), String(spot(sym, end)), '1', m * 1000 + 59_999]);
     }
     return json(rows);
   }
@@ -138,9 +151,11 @@ axios.defaults.adapter = async config => {
     if (!m) return ok({ error: 'No orderbook exists for the requested token id' }, 404);
     const coin = COINS[Number(m[1])];
     const slot = Number(m[3]);
+    // Juste valeur (règlement TWAP 60 s) d'un spot vu avec LAG secondes de retard.
     const t = simNow() / 1000 - LAG;
     const tau = Math.max(1, slot + 300 - t);
-    const pUp = normCdf(Math.log(spot(coin, t) / spot(coin, slot)) / (SIG * Math.sqrt(tau)));
+    const varSec = tau >= 60 ? tau - 40 : (tau * tau * tau) / (3 * 3600);
+    const pUp = normCdf(Math.log(spot(coin, t) / twap60(coin, slot)) / (SIG * Math.sqrt(varSec)));
     const p = m[2] === '1' ? pUp : 1 - pUp;
     const tick = (x: number) => Math.min(0.99, Math.max(0.01, Math.round(x * 100) / 100));
     return ok({

@@ -147,7 +147,9 @@ test('données de round : le prix temps réel remplace la bougie si même source
     const live = await getRoundMarketData('BTC', slot, now, { price: 100.5, ageMs: 200, source: 'binance-ws' });
     assert.equal(live!.spot, 100.5);
     assert.equal(live!.source, 'binance+ws');
-    assert.equal(live!.strike, 100);
+    // strike : (O+H+L+C)/4 de la bougie précédant l'ouverture (O 100, H 101, L 99, C p)
+    const prev = klines.find(k => k[0] === slot * 1000 - 60_000)!;
+    assert.ok(Math.abs(live!.strike - (100 + 101 + 99 + Number(prev[4])) / 4) < 1e-12);
     // prix temps réel trop vieux → bougie
     const old = await getRoundMarketData('BTC', slot, now + 1000, { price: 100.5, ageMs: 9000, source: 'binance-ws' });
     assert.notEqual(old!.spot, 100.5);

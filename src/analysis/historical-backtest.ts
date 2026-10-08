@@ -4,8 +4,10 @@
  * Le journal des décisions répond à cette question en quelques jours. Ce module y répond
  * en une heure, sur des milliers de rounds passés :
  *   - prix Polymarket : historique `prices-history` du token « Up » (un point par minute) ;
- *   - modèle : même calcul que le bot (strike = ouverture de la bougie Binance 1 min du
- *     slot, spot = clôture de la bougie qui se termine à l'instant évalué, vol réalisée) ;
+ *   - modèle : même calcul que le bot (strike : `strikeFromCandles`, moyenne de la minute
+ *     précédant l'ouverture avec le règlement TWAP ; spot = clôture de la bougie qui se
+ *     termine à l'instant évalué, vol réalisée). Le script lit au plus 30 jours : tous
+ *     postérieurs au passage au TWAP 60 s (mi-août 2026) ;
  *   - issue réelle : résolution Gamma.
  * On compare aux mêmes instants (τ = 240, 180, 120, 60 s) les erreurs quadratiques (Brier)
  * du modèle et du marché, la calibration, plusieurs estimateurs de volatilité, et on
@@ -15,8 +17,8 @@
  * Fonctions PURES (aucune I/O).
  */
 
-import { probUp, realizedVolPerSqrtSec, type FairValueConfig } from '../services/fair-value.js';
-import type { Candle } from '../services/round-market-data.js';
+import { entryMinTauSec, probNoiseSd, probUp, realizedVolPerSqrtSec, type FairValueConfig } from '../services/fair-value.js';
+import { strikeFromCandles, type Candle } from '../services/round-market-data.js';
 import type { ResolvedRecord } from './fv-analysis.js';
 import { clusteredMeanT, slotKey } from './stats.js';
 
@@ -112,8 +114,9 @@ export function evaluateRound(
   taus: number[] = DEFAULT_TAUS,
 ): BacktestPoint[] {
   const byOpen = new Map(candles.map(c => [c.openTimeMs, c]));
-  const strikeCandle = byOpen.get(round.slotSec * 1000);
-  if (!strikeCandle) return [];
+  if (!byOpen.has(round.slotSec * 1000)) return [];
+  const strike = strikeFromCandles(ms => byOpen.get(ms), round.slotSec, cfg.twapWindowSec);
+  if (strike === null) return [];
   const sorted = [...candles].sort((a, b) => a.openTimeMs - b.openTimeMs);
   const out: BacktestPoint[] = [];
   const seen = new Set<number>();
@@ -129,6 +132,7 @@ export function evaluateRound(
     if (tSec <= round.slotSec || seen.has(tSec)) continue;
     seen.add(tSec);
     const tauM = round.slotSec + 300 - tSec;
+    if (tauM < entryMinTauSec(cfg)) continue; // fenêtre de moyenne finale : modèle non valable
     const spotCandle = byOpen.get((tSec - 60) * 1000); // se termine à tSec
     if (!spotCandle) continue;
     const pMarket = mk.p;
@@ -139,11 +143,11 @@ export function evaluateRound(
     for (const [name, f] of Object.entries(VOL_VARIANTS)) {
       const s = f(closes);
       if (name === LIVE_VARIANT && s) sig = s;
-      pModel[name] = s ? probUp({ spot: spotCandle.close, strike: strikeCandle.open, sigmaPerSqrtSec: s, tauSec: tauM }, cfg) : null;
+      pModel[name] = s ? probUp({ spot: spotCandle.close, strike, sigmaPerSqrtSec: s, tauSec: tauM }, cfg) : null;
     }
     if (pModel[LIVE_VARIANT] === null) continue;
     out.push({
-      slug: round.slug, coin: round.coin, slotSec: round.slotSec, tau: tauM, spot: spotCandle.close, strike: strikeCandle.open,
+      slug: round.slug, coin: round.coin, slotSec: round.slotSec, tau: tauM, spot: spotCandle.close, strike,
       sig, pMarket, pModel, upWon: round.upWon, lagSec: mk.t - tSec,
     });
   }
@@ -190,12 +194,14 @@ export function compareBrier(points: BacktestPoint[], variant = LIVE_VARIANT): B
  * seuils, FV_Z_SCALE). Les asks sont RECONSTITUÉS : prix + demi-écart, arrondis au tick
  * supérieur — approximation optimiste d'un carnet réel (profondeur ignorée).
  */
-export function toResolvedRecords(points: BacktestPoint[], halfSpread = 0.005, zScale = 1): ResolvedRecord[] {
+export function toResolvedRecords(points: BacktestPoint[], halfSpread = 0.005, zScale = 1, cfg?: FairValueConfig): ResolvedRecord[] {
   const tick = (x: number) => Math.min(0.99, Math.max(0.01, Math.ceil(x * 100 - 1e-9) / 100));
   return points.map(pt => ({
     t: (pt.slotSec + 300 - pt.tau) * 1000, slug: pt.slug, coin: pt.coin, tau: pt.tau, spot: pt.spot, strike: pt.strike,
     sig: pt.sig, pUp: pt.pModel[LIVE_VARIANT] ?? null, zs: zScale,
     upAsk: tick(pt.pMarket + halfSpread), downAsk: tick(1 - pt.pMarket + halfSpread),
     upAskSz: null, downAskSz: null, src: 'historique', act: 'hold' as const, upWon: pt.upWon,
+    // bruit du modèle (prix à battre estimé) : le rejeu exige le même edge que le bot
+    ...(cfg ? { ns: probNoiseSd({ spot: pt.spot, strike: pt.strike, sigmaPerSqrtSec: pt.sig, tauSec: pt.tau }, { ...cfg, zScale }) } : {}),
   }));
 }

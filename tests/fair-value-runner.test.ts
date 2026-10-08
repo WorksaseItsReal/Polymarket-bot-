@@ -499,6 +499,9 @@ test('minimum d\'ordre : alerte seulement si la cause est le capital, pas un pla
 });
 
 test('sortie avec mélange : le seuil de revente suit la même probabilité qu\'à l\'entrée', async () => {
+  // Ce test porte sur la formule du mélange à la sortie : règlement ponctuel et marge de
+  // bruit neutralisée (testée à part), pour garder des seuils lisibles.
+  const BASE = { ...DEFAULT_FAIR_VALUE_CONFIG, twapWindowSec: 0, strikeNoiseSec: 10, noiseEdgeK: 0 };
   const sell = async (cfg: typeof DEFAULT_FAIR_VALUE_CONFIG, books: Record<string, Book>) => {
     const env = setup();
     const r = env.runner();
@@ -515,15 +518,17 @@ test('sortie avec mélange : le seuil de revente suit la même probabilité qu\'
   };
   // Carnets miroirs : UP bid 0,70 / ask 0,90 ; DOWN ask 0,30 → prix du carnet pour UP = 0,80.
   const mirror = { UP: { asks: [{ price: 0.9, size: 1000 }], bids: [{ price: 0.7, size: 1000 }] }, DOWN: { asks: [{ price: 0.3, size: 1000 }], bids: [] } };
-  const raw = await sell(DEFAULT_FAIR_VALUE_CONFIG, mirror);
+  const raw = await sell(BASE, mirror);
   assert.equal(raw.status, 'sold', 'modèle seul : 0,70 > 0,50 + marge → revente');
+  assert.equal((await sell(DEFAULT_FAIR_VALUE_CONFIG, mirror)).status, 'open',
+    'réglage par défaut : 0,70 n\'excède pas 0,50 + 0,04 + marge de bruit (prix à battre estimé, à 50/50)');
   assert.ok(raw.reads.every(id => id === 'UP'), 'sans mélange : le carnet DOWN n\'est jamais lu');
-  const trusting = { ...DEFAULT_FAIR_VALUE_CONFIG, blendModel: 0.05, blendMarket: 1 };
+  const trusting = { ...BASE, blendModel: 0.05, blendMarket: 1 };
   assert.equal((await sell(trusting, mirror)).status, 'open', 'carnet jugé informé (≈ 0,80) : vendre à 0,70 serait brader');
   // Carnets NON miroirs (scénario de la revue) : spot sous le strike, mélange partiel.
   // Milieu bid/ask du token UP = 0,61 ; formule d'entrée = (ask UP 0,62 + 1 − ask DOWN 0,30)/2 = 0,66.
-  const partial = { ...DEFAULT_FAIR_VALUE_CONFIG, blendModel: 0.5, blendMarket: 1 };
-  const pRaw = probUp({ spot: 99.956, strike: 100, sigmaPerSqrtSec: SIGMA, tauSec: 100 })!;
+  const partial = { ...BASE, blendModel: 0.5, blendMarket: 1 };
+  const pRaw = probUp({ spot: 99.956, strike: 100, sigmaPerSqrtSec: SIGMA, tauSec: 100 }, BASE)!;
   const netBid = 0.6 - DEFAULT_FAIR_VALUE_CONFIG.takerFeeRate * 0.6 * 0.4;
   assert.ok(netBid > blendWithMarket(pRaw, 0.61, partial)! + 0.04, 'l\'ancienne formule aurait revendu');
   assert.ok(netBid < blendWithMarket(pRaw, 0.66, partial)! + 0.04, 'la formule d\'entrée dit : garder');
@@ -652,4 +657,21 @@ test('round jamais réglé : essais espacés après 1 h, une seule alerte après
   env.setNow(end + 9 * 3_600_000);
   await r2.tick();
   assert.equal(env.messages.filter(m => /non réglé 6 h/.test(m)).length, 1, 'pas de nouvelle alerte après redémarrage');
+});
+
+test('blocage apparu pendant le trajet de l\'ordre (arrêt du bot) : aucun pari pris ni annoncé', async () => {
+  let stopping = false;
+  const env = setup({
+    fillDelayMs: 1000,
+    sleep: async () => { stopping = true; }, // l'arrêt commence pendant la latence d'exécution
+    entryBlock: () => (stopping ? 'arrêt du bot en cours' : null),
+  });
+  await env.runner().tick();
+  assert.equal((loadLedger(env.ledgerPath) ?? []).length, 0, 'aucun pari enregistré');
+  assert.ok(!env.messages.some(m => /NOUVEAU PARI/.test(m)), 'aucun message de pari après « Bot arrêté »');
+  assert.ok(env.logs.some(l => /PAS de mise : arrêt du bot en cours/.test(l)));
+  // contrôle : sans arrêt, ce même passage parie
+  const ok = setup({ fillDelayMs: 1000, sleep: async () => undefined, entryBlock: () => null });
+  await ok.runner().tick();
+  assert.equal(loadLedger(ok.ledgerPath)!.length, 1);
 });

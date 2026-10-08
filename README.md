@@ -69,7 +69,9 @@ Puis :
 1. **Désactiver l'ancien recap Hermes** (`paperbot-recap-telegram`) : il décrit l'ancienne règle.
 2. Vérifier dans les logs : `Flux spot temps réel connecté`, `Telegram connecté`, puis des
    lignes `HOLD : edge … < 4.0pt` (le bot évalue, et s'abstient tant que le carnet est juste).
-3. Après 2–3 jours : `npx tsx scripts/analysis/fv-report.ts --days 3`. Si le modèle ne bat
+3. Après 2–3 jours : `npx tsx scripts/analysis/fv-report.ts --days 3` (les évaluations de
+   l'ancien modèle, d'avant le passage au règlement TWAP, sont ignorées ; « Modèle vs carnet »
+   repart de zéro à cette mise à jour). Si le modèle ne bat
    pas le carnet (Brier), la stratégie ne gagnera pas, quel que soit le réglage.
 4. Ne **jamais** passer en LIVE avant : rapport favorable sur les deux moitiés, ≥ 200 trades
    réglés avec t ≥ 2, et un capital permettant des mises ≥ 5 $ (minimum Polymarket).
@@ -78,12 +80,16 @@ Puis :
 
 ## 1. Ce que fait le bot
 
-- **Marchés** : les marchés binaires **« Up or Down 5 minutes »** de Polymarket (résolution
-  toutes les 5 min sur le prix crypto). Le bot lit le carnet d'ordres CLOB (côté `YES`/`NO`).
+- **Marchés** : les marchés binaires **« Up or Down 5 minutes »** de Polymarket. Depuis le
+  7 août 2026, ils se règlent sur la **moyenne Chainlink (TWAP) des 60 dernières secondes**
+  comparée au **prix à battre**, lui-même la moyenne des 60 s précédant l'ouverture (avant :
+  prix ponctuels). Le bot lit le carnet d'ordres CLOB (côté `YES`/`NO`).
 - **Décision** : 100 % **déterministe**, par **juste valeur** (`src/services/fair-value.ts`) :
-  P(Up) est calculée depuis le spot, le strike (ouverture du round), la volatilité réalisée et
+  P(Up) est calculée depuis le spot, le prix à battre (estimé), la volatilité réalisée et
   le temps restant ; le bot n'achète un côté que si cette probabilité dépasse son **coût réel**
-  (VWAP du carnet + frais taker) d'au moins `FV_MIN_EDGE`. Sinon → **HOLD** (aucune mise).
+  (VWAP du carnet + frais taker) d'au moins `FV_MIN_EDGE` **plus une marge égale à
+  `FV_NOISE_EDGE_K` fois son propre bruit** (le carnet connaît le prix à battre exact, nous
+  l'estimons). Sinon → **HOLD** (aucune mise).
   L'ancienne règle « favori dans [0,58 ; 0,65] » a été retirée : mesurée sans edge (§5).
 - **Mode** : **PAPER** (`DRY_RUN=true`). Aucune transaction ni aucun ordre ; chaque pari est
   simulé sur le vrai carnet (latence, frais, profondeur) et réglé sur le vrai résultat.
@@ -164,14 +170,15 @@ Variables (nom → rôle) :
 | Variable | Défaut | Rôle |
 |---|---|---|
 | `FV_MIN_EDGE` | `0.04` | Edge minimal exigé (probabilité modèle − coût réel par part), **après frais**. |
+| `FV_NOISE_EDGE_K` | `1.5` | Marge en plus, en écarts-types du bruit de notre probabilité (prix à battre estimé, écart Binance/Chainlink) : edge exigé = `FV_MIN_EDGE + k·σ`. Grande près de 50/50 et quand la vol est faible. En simulation (3 000 rounds) : k = 0 → contre un carnet juste, 11 % des rounds joués à −11 %/$ ; k = 1,5 → aucun pari, et sur un carnet en retard le gain par pari double. S'applique aussi aux reventes. |
 | `FV_MIN_PROB` | `0.60` | Probabilité modèle minimale du côté acheté : ne parie que sur le côté probable → **win rate attendu ≥ 60 %** (au prix de quelques paris +EV sur l'outsider). |
 | `FV_EXIT_EDGE` | = `FV_MIN_EDGE` | Vente anticipée si `bid − frais` dépasse `p_modèle` d'au moins cette marge. |
-| `FV_MIN_TAU_SEC` / `FV_MAX_TAU_SEC` | `45` / `270` | Fenêtre de temps restant où l'on peut entrer (en toute fin de round, latence et écart d'oracle dominent). |
+| `FV_MIN_TAU_SEC` / `FV_MAX_TAU_SEC` | `60` / `270` | Fenêtre de temps restant où l'on peut entrer ou revendre. Jamais dans la minute finale : une partie de la moyenne de règlement y est déjà acquise et le modèle ne la connaît pas. |
 | `FV_MIN_ASK` / `FV_MAX_ASK` | `0.08` / `0.92` | Bornes d'ask achetable (au-delà, gain minuscule et erreur de modèle dominante). |
 | `FV_TAKER_FEE_RATE` | `0.07` | Taux officiel `crypto_fees_v2` : frais = parts · taux · p · (1−p) (1,75 $ pour 100 parts à 0,50 $ ; makers non facturés). |
 | `FV_BASIS_BPS` | `2` | Écart de flux Binance/Coinbase vs Chainlink (bps), ajouté à l'incertitude. |
-| `FV_STRIKE_NOISE_SEC` | `10` | Incertitude du strike (open de bougie 1 min ≠ point Chainlink), en secondes de variance. |
-| `FV_TWAP_WINDOW_SEC` | `0` | Résolution ponctuelle (règle officielle : prix Chainlink à la fin vs au début). |
+| `FV_STRIKE_NOISE_SEC` | `3` | Incertitude du prix à battre estimé par `(O+H+L+C)/4` de la bougie 1 min précédant l'ouverture (erreur ≈ 2 s de variance, simulation), en secondes de variance. |
+| `FV_TWAP_WINDOW_SEC` | `60` | Fenêtre de moyenne du règlement (Chainlink TWAP 60 s depuis mi-août 2026). `0` = ancien règlement ponctuel : modèle faux aujourd'hui (le doctor le signale). |
 | `FV_Z_SCALE` | `1` | Calibration à un paramètre de la confiance du modèle (< 1 : moins confiant). **Ne le changer que sur la suggestion du rapport** (`fv-report.ts`, section 2b, avec intervalle de confiance). |
 | `FV_BLEND_MODEL` / `FV_BLEND_MARKET` | `1` / `0` | Mélange avec le carnet : `logit(p) = a·logit(p_modèle) + b·logit(p_carnet)`. `1 / 0` = modèle seul. **Ne le changer que si le rapport le valide hors échantillon** (section 1b). Si le carnet sait déjà tout, le mélange tend vers lui et le bot cesse de parier — c'est voulu. |
 | `FV_TAILS` | `normal` | Loi des rendements. `t4` est **plus** confiante pour \|z\| < 2 (pas plus prudente). |
@@ -334,17 +341,20 @@ En continu (évaluation sur mouvement du spot + passage de fond toutes les ~10 s
 
 1. **Marchés** : le round en cours de chaque coin est trouvé directement par son slug
    `<coin>-updown-5m-<slot>` (Gamma `events?slug=`), tokens Up/Down associés par libellé.
-2. **Données** : strike = ouverture de la bougie 1 min Binance du slot ; σ = max(vol réalisée
+2. **Données** : prix à battre = moyenne de la minute précédant l'ouverture, estimée par
+   `(O+H+L+C)/4` de la bougie 1 min Binance [T0 − 60 s, T0) (erreur 3× plus petite que
+   l'ouverture du slot, utilisée avant le règlement TWAP) ; σ = max(vol réalisée
    60 min, 15 min) ; spot = **flux WebSocket Binance temps réel** (repli : dernière bougie
    REST, puis binance.vision, puis Coinbase). Chaque mouvement ≥ `FV_MOVE_BPS` déclenche une
    évaluation immédiate du coin (au plus une toutes les 1,5 s). Flux absent ou figé → pas de
    mise. L'horloge du serveur est contrôlée contre les horodatages Binance (alerte si décalée).
-3. **Probabilité** : `P(Up) = Φ(ln(S/K) / √(σ²·(τ + bruit_strike) + basis²))` — résolution
-   ponctuelle Chainlink (« Up » si prix final ≥ prix d'ouverture). Optionnellement mélangée
-   au prix du carnet (`FV_BLEND_*`, désactivé par défaut, à régler seulement sur preuve).
+3. **Probabilité** : `P(Up) = Φ(ln(S/K) / √(σ²·(τ − 40 + bruit_strike) + basis²))` —
+   règlement TWAP 60 s (la moyenne finale varie moins qu'un prix ponctuel : `τ − W + W/3`
+   secondes de variance pour W = 60). Optionnellement mélangée au prix du carnet
+   (`FV_BLEND_*`, désactivé par défaut, à régler seulement sur preuve).
 4. **Coût réel** d'une part = ask + frais taker `0,07·p·(1−p)`. Edge = P(côté) − coût.
-   Entrée seulement si **P(côté) ≥ `FV_MIN_PROB` (0,60)**, edge ≥ `FV_MIN_EDGE`,
-   τ ∈ [45 ; 270] s et ask ∈ [0,08 ; 0,92].
+   Entrée seulement si **P(côté) ≥ `FV_MIN_PROB` (0,60)**, edge ≥ `FV_MIN_EDGE` +
+   `FV_NOISE_EDGE_K`·σ_bruit, τ ∈ [60 ; 270] s et ask ∈ [0,08 ; 0,92].
 5. **Mise** : `computeStake` (Kelly ×0,25, probabilité du modèle **shrinkée de moitié** vers le
    prix, plafonds durs 1 % du capital/trade, 10 % d'exposition, modérateurs drawdown et
    **série de pertes réelle** lus dans `fv-ledger.json`).
@@ -416,8 +426,10 @@ reventes seulement à partir de 5 parts, minimum Polymarket).
 **Limites honnêtes** : le modèle n'est **pas encore** validé sur données réelles. Le backtest
 historique n'a qu'un prix par minute (pas de carnet, peut-être un dernier prix échangé) : il
 peut écarter la stratégie, pas la prouver ; seule la mesure en direct (journal, ligne
-« Modèle vs carnet » du bilan Telegram) tranche. Le strike est approché (ouverture de la bougie 1 min
-Binance/Coinbase, pas le point Chainlink exact) ; la latence simulée d'1 s retire une partie des
+« Modèle vs carnet » du bilan Telegram) tranche. Le prix à battre est **estimé** (bougie
+Binance de la minute précédant l'ouverture), alors que Polymarket l'affiche exactement : le
+carnet en sait plus que nous sur ce point, d'où la marge `FV_NOISE_EDGE_K` (amélioration
+possible : lire le prix à battre exact, flux Chainlink TWAP de Polymarket) ; la latence simulée d'1 s retire une partie des
 prix fantômes, mais des bots co-localisés restent plus rapides : le papier peut encore
 **surestimer** les exécutions sur ces opportunités.
 

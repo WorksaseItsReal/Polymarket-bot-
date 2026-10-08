@@ -9,7 +9,7 @@
 
 import { existsSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import { fairValueConfigFromEnv, DEFAULT_FAIR_VALUE_CONFIG } from './fair-value.js';
+import { entryMinTauSec, fairValueConfigFromEnv, DEFAULT_FAIR_VALUE_CONFIG } from './fair-value.js';
 import { looksLikeBotToken, telegramConfigFromEnv } from './telegram.js';
 import { computeStats, readLedgerShared } from './paper-ledger.js';
 import { parseRoundTokens, roundSlug, slotStart } from './round-discovery.js';
@@ -40,7 +40,7 @@ const FV_ENV: Array<[string, keyof typeof DEFAULT_FAIR_VALUE_CONFIG]> = [
   ['FV_MIN_EDGE', 'minEdge'], ['FV_MIN_PROB', 'minProb'], ['FV_MIN_TAU_SEC', 'minTauSec'], ['FV_MAX_TAU_SEC', 'maxTauSec'],
   ['FV_MIN_ASK', 'minAsk'], ['FV_MAX_ASK', 'maxAsk'], ['FV_Z_SCALE', 'zScale'], ['FV_BLEND_MODEL', 'blendModel'],
   ['FV_BLEND_MARKET', 'blendMarket'], ['FV_TAKER_FEE_RATE', 'takerFeeRate'], ['FV_BASIS_BPS', 'basisBps'],
-  ['FV_STRIKE_NOISE_SEC', 'strikeNoiseSec'], ['FV_TWAP_WINDOW_SEC', 'twapWindowSec'],
+  ['FV_STRIKE_NOISE_SEC', 'strikeNoiseSec'], ['FV_TWAP_WINDOW_SEC', 'twapWindowSec'], ['FV_NOISE_EDGE_K', 'noiseEdgeK'],
 ];
 
 /**
@@ -112,9 +112,16 @@ export function configChecks(env: Env): Check[] {
     if (raw === undefined || raw.trim() === '') return false;
     return Number(raw) !== (cfg[f] as number);
   }).map(([k]) => `${k}=${env[k]}`)];
+  // Règlement TWAP 60 s depuis août 2026 : un modèle ponctuel est faux (strike et variance).
+  if (cfg.twapWindowSec !== 60) {
+    out.push(warn('Règlement', `FV_TWAP_WINDOW_SEC=${cfg.twapWindowSec} : Polymarket règle les rounds 5 min sur la moyenne Chainlink des 60 s (fin et prix à battre) depuis août 2026 — retirer ce réglage (défaut 60).`));
+  }
+  if ((cfg.noiseEdgeK ?? 0) === 0) {
+    out.push(warn('Marge de bruit', 'FV_NOISE_EDGE_K=0 : le bot parie aussi sur des écarts que son propre bruit (prix à battre estimé) explique — en simulation, perte d\'environ 11 % par pari contre un carnet juste.'));
+  }
   out.push(ignored.length
     ? warn('Réglages FV', `ignorés (hors bornes ou illisibles, valeur par défaut utilisée) : ${ignored.join(', ')}`)
-    : ok('Réglages FV', `edge ≥ ${cfg.minEdge}, p ≥ ${cfg.minProb}, τ ∈ [${cfg.minTauSec}, ${cfg.maxTauSec}] s, confiance ×${cfg.zScale}, mélange ${cfg.blendModel}/${cfg.blendMarket}`));
+    : ok('Réglages FV', `edge ≥ ${cfg.minEdge} + ${cfg.noiseEdgeK}·bruit, p ≥ ${cfg.minProb}, τ ∈ [${entryMinTauSec(cfg)}, ${cfg.maxTauSec}] s, TWAP ${cfg.twapWindowSec} s, confiance ×${cfg.zScale}, mélange ${cfg.blendModel}/${cfg.blendMarket}`));
   return out;
 }
 

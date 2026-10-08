@@ -37,7 +37,7 @@ async function withFetch<T>(impl: (url: string) => Promise<Response>, fn: () => 
   }
 }
 
-test('Binance indisponible → repli binance-vision ; strike = open du slot, spot = close courant', async () => {
+test('Binance indisponible → repli binance-vision ; strike = (O+H+L+C)/4 de la minute précédant l\'ouverture, spot = close courant', async () => {
   const urls: string[] = [];
   const klines = binanceKlines();
   const d = await withFetch(async (url) => {
@@ -48,8 +48,9 @@ test('Binance indisponible → repli binance-vision ; strike = open du slot, spo
   assert.ok(d, 'données attendues');
   assert.equal(d!.source, 'binance-vision');
   assert.ok(urls[0].includes('api.binance.com') && urls[1].includes('data-api.binance.vision'));
-  const slotRow = klines.find(k => (k as unknown[])[0] === SLOT * 1000) as unknown[];
-  assert.equal(d!.strike, parseFloat(slotRow[1] as string));
+  const prevRow = (klines.find(k => (k as unknown[])[0] === SLOT * 1000 - 60_000) as unknown[]).map(x => Number(x));
+  const ohlc4 = (prevRow[1] + prevRow[2] + prevRow[3] + prevRow[4]) / 4;
+  assert.ok(Math.abs(d!.strike - ohlc4) < 1e-9, `${d!.strike} ≠ ${ohlc4}`);
   assert.equal(d!.spot, parseFloat((klines[klines.length - 1] as unknown[])[4] as string));
   assert.ok(Math.abs(d!.sigmaPerSqrtSec - 0.0005 / Math.sqrt(60)) < 1e-9);
 });

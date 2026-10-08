@@ -41,14 +41,15 @@ function candlesAround(slot: number, priceAt: (m: number) => number) {
   return out;
 }
 
-test('evaluateRound : strike = ouverture du slot, spot = clôture à l\'instant évalué, τ corrects', () => {
+test('evaluateRound : strike = moyenne de la minute précédant l\'ouverture, spot = clôture à l\'instant évalué, τ corrects', () => {
   const price = (m: number) => 100 * Math.exp((m % 2 ? 1 : -1) * 0.0005 + (m >= 0 ? 0.0002 * (m + 1) : 0));
   const candles = candlesAround(SLOT, price);
   const hist = [0, 60, 120, 180, 240].map(k => ({ t: SLOT + k, p: 0.5 }));
   const pts = evaluateRound({ slug: 's', coin: 'BTC', slotSec: SLOT, upWon: true }, candles, hist, CFG);
   assert.deepEqual(pts.map(p => p.tau), [240, 180, 120, 60]);
   const at120 = pts.find(p => p.tau === 120)!;
-  assert.equal(at120.strike, price(-1), 'open de la bougie du slot');
+  // bougies sans plus haut/plus bas : (O+C)/2 de la bougie [slot−60, slot)
+  assert.ok(Math.abs(at120.strike - (price(-2) + price(-1)) / 2) < 1e-12, 'moyenne de la minute précédant l\'ouverture');
   assert.equal(at120.spot, price(2), 'clôture de la bougie [slot+120, slot+180)');
   assert.equal(at120.pMarket, 0.5);
   const expected = probUp({ spot: at120.spot, strike: at120.strike, sigmaPerSqrtSec: at120.sig, tauSec: 120 }, CFG)!;
@@ -156,6 +157,7 @@ test('prix marché en retard d\'une minute : le modèle n\'est PAS déclaré mei
   };
   const gauss = () => Math.sqrt(-2 * Math.log(rnd() + 1e-12)) * Math.cos(2 * Math.PI * rnd());
   const sigMin = 0.0006;
+  const LEGACY = { ...CFG, twapWindowSec: 0, strikeNoiseSec: 10 };
   const points: BacktestPoint[] = [];
   for (let k = 0; k < 400; k++) {
     const slot = SLOT + k * 300;
@@ -168,10 +170,12 @@ test('prix marché en retard d\'une minute : le modèle n\'est PAS déclaré mei
     const sigS = sigMin / Math.sqrt(60);
     const hist = [0, 120, 240].map(off => {
       const spot = at(off / 60 - 1); // spot à l'instant slot + off (clôture de la minute précédente)
-      return { t: slot + off, p: normCdf(Math.log(spot / strike) / (sigS * Math.sqrt(300 - off + CFG.strikeNoiseSec))) };
+      return { t: slot + off, p: normCdf(Math.log(spot / strike) / (sigS * Math.sqrt(300 - off + LEGACY.strikeNoiseSec))) };
     });
     const upWon = at(4) >= strike;
-    points.push(...evaluateRound({ slug: `btc-updown-5m-${slot}`, coin: 'BTC', slotSec: slot, upWon }, candles, hist, CFG));
+    // monde à règlement PONCTUEL (strike = at(−1)) : modèle réglé pareil, sinon un modèle
+    // faux rendrait ce contrôle trivialement vrai
+    points.push(...evaluateRound({ slug: `btc-updown-5m-${slot}`, coin: 'BTC', slotSec: slot, upWon }, candles, hist, LEGACY));
   }
   assert.ok(points.length > 0);
   assert.ok(points.every(p => (p.lagSec ?? 0) >= 0), 'le marché n\'est jamais plus ancien que le spot du modèle');
@@ -184,7 +188,8 @@ test('contrôle négatif de bout en bout : marché JUSTE → jamais « significa
   const out = execFileSync(process.execPath, [
     '--import', 'tsx', '--import', './tests/fixtures/fake-market-net.ts',
     'scripts/analysis/historical-backtest.ts', '--days', '1', '--coins', 'BTC,ETH',
-  ], { env: { ...process.env, HOME: home, DOTENV_CONFIG_PATH: '/dev/null', FAKE_MARKET_LAG_MIN: '0' }, encoding: 'utf8', timeout: 180_000, stdio: ['ignore', 'pipe', 'pipe'] });
+    // monde à la minute, règlement ponctuel : modèle ponctuel pour que le contrôle ait du sens
+  ], { env: { ...process.env, HOME: home, DOTENV_CONFIG_PATH: '/dev/null', FAKE_MARKET_LAG_MIN: '0', FV_TWAP_WINDOW_SEC: '0', FV_STRIKE_NOISE_SEC: '10' }, encoding: 'utf8', timeout: 180_000, stdio: ['ignore', 'pipe', 'pipe'] });
   assert.match(out, /Backtest historique : \d+ rounds/);
   assert.doesNotMatch(out, /SIGNIFICATIVEMENT meilleur que le marché/);
   assert.doesNotMatch(out, /essayer FV_BLEND_MODEL/);

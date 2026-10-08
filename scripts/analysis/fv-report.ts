@@ -17,7 +17,7 @@ import { dirname, join } from 'node:path';
 import { JOURNAL_FILE_RE, type DecisionRecord } from '../../src/services/decision-journal.js';
 import { gunzipSync } from 'node:zlib';
 import { fetchRoundOutcome } from '../../src/services/paper-ledger.js';
-import { fairValueConfigFromEnv } from '../../src/services/fair-value.js';
+import { entryMinTauSec, fairValueConfigFromEnv } from '../../src/services/fair-value.js';
 import {
   applyBlend, blendVerdict, zScaleConflictsWithBlend, bookStats, brier, byRound, calibration, compareModelBook, describeBlend, fitBlend,
   fitZScale, halves, marketProbUp, normalizeZScale, rawModelProb, replay, zScaleAdvice,
@@ -50,6 +50,7 @@ function slim(r: DecisionRecord): DecisionRecord {
     // GARDER mv (exclusion des mesures) et tl (loi du modèle) : sans eux, le filtre des
     // évaluations « saut du spot » et la conversion t4 étaient silencieusement inopérants.
     ...(r.side ? { side: r.side } : {}), ...(r.mv ? { mv: true as const } : {}), ...(r.tl ? { tl: r.tl } : {}),
+    ...(r.ns ? { ns: r.ns } : {}), // bruit du modèle : edge exigé du rejeu = celui du bot
   };
 }
 
@@ -61,6 +62,7 @@ function readJournal(): DecisionRecord[] {
   const since = Date.now() - DAYS * 86_400_000;
   const out: DecisionRecord[] = [];
   let bad = 0;
+  let otherModel = 0;
   for (const f of readdirSync(DIR).filter(f => JOURNAL_FILE_RE.test(f)).sort()) {
     // jours révolus compressés (.jsonl.gz) par le bot ; un fichier qui disparaît pendant la
     // lecture (compression en cours par le bot) est simplement ignoré
@@ -71,11 +73,19 @@ function readJournal(): DecisionRecord[] {
       if (!line.trim()) continue;
       try {
         const r = JSON.parse(line) as DecisionRecord;
-        if (typeof r.slug === 'string' && Number.isFinite(r.t) && r.t >= since) out.push(slim(r));
+        if (typeof r.slug !== 'string' || !Number.isFinite(r.t) || r.t < since) continue;
+        // Autre définition du modèle (règlement ponctuel vs TWAP, strike différent) : ses
+        // probabilités ne sont pas comparables à celles du modèle en vigueur.
+        if ((r.tw ?? 0) !== cfg.twapWindowSec) { otherModel++; continue; }
+        out.push(slim(r));
       } catch { bad++; }
     }
   }
   if (bad) console.error(`(${bad} lignes illisibles ignorées)`);
+  if (otherModel) {
+    console.error(`(${otherModel} évaluations d'un autre modèle ignorées : fenêtre TWAP ≠ ${cfg.twapWindowSec} s — `
+      + 'évaluations faites avant le passage au règlement TWAP, ou FV_TWAP_WINDOW_SEC différent)');
+  }
   return out;
 }
 
@@ -129,7 +139,7 @@ async function main() {
 
   // 1. Modèle vs marché : appariée (mêmes évaluations), chaque round pesant 1, modèle SEUL
   // (avant mélange), t groupé par créneau (les 5 cryptos d'un round sont corrélées).
-  const cmp = compareModelBook(measureRounds, { minTau: cfg.minTauSec, maxTau: cfg.maxTauSec });
+  const cmp = compareModelBook(measureRounds, { minTau: entryMinTauSec(cfg), maxTau: cfg.maxTauSec });
   const bm = { n: cmp.rounds, score: cmp.brierModel };
   const bk = { n: cmp.rounds, score: cmp.brierMarket };
   console.log('1) Le modèle prédit-il mieux que le carnet ? (Brier, plus bas = meilleur ; t ≤ −2 = modèle meilleur)');
@@ -148,8 +158,8 @@ async function main() {
 
   // 1b. Mélange modèle + carnet
   console.log('\n1b) Mélange modèle + carnet (le carnet contient-il une information que le modèle ignore ?)');
-  const params = { feeRate: cfg.takerFeeRate, minAsk: cfg.minAsk, maxAsk: cfg.maxAsk, minTau: cfg.minTauSec, maxTau: cfg.maxTauSec };
-  const blend = fitBlend(measureRounds, { minTau: cfg.minTauSec, maxTau: cfg.maxTauSec });
+  const params = { feeRate: cfg.takerFeeRate, minAsk: cfg.minAsk, maxAsk: cfg.maxAsk, minTau: entryMinTauSec(cfg), maxTau: cfg.maxTauSec, noiseK: cfg.noiseEdgeK };
+  const blend = fitBlend(measureRounds, { minTau: entryMinTauSec(cfg), maxTau: cfg.maxTauSec });
   for (const line of describeBlend(blend, cfg)) console.log(line);
   if (blend?.oos) {
     // mêmes rounds que la moitié de validation du mélange (aucun round vu à l'estimation)
@@ -204,9 +214,23 @@ async function main() {
     fmtRow(coin, decisionRounds.filter(l => l[0].coin === coin));
   }
   console.log('    … et par temps restant au moment de l\'évaluation (s)');
-  for (const [lo, hi] of [[45, 90], [90, 150], [150, 210], [210, 270]]) {
+  for (const [lo, hi] of [[60, 90], [90, 150], [150, 210], [210, 270]]) {
     const rs = decisionRounds.map(l => l.filter(r => r.tau >= lo && r.tau < hi)).filter(l => l.length);
     fmtRow(`τ ${lo}-${hi}`, rs);
+  }
+  // Marge de bruit (prix à battre estimé) : la seule façon de la régler est de la rejouer sur
+  // les vraies données. Si k = 0 gagne sur LES DEUX moitiés, la marge est trop prudente.
+  console.log(`    … et selon la marge de bruit FV_NOISE_EDGE_K (actuelle : ${cfg.noiseEdgeK})`);
+  if (!resolved.some(r => r.ns)) console.log('      (journal sans bruit enregistré : marge non rejouable)');
+  else {
+    for (const k of [0, 0.75, 1.5, 2.5]) {
+      const p2 = { ...params, noiseK: k };
+      const r = replay(decisionRounds, cfg.minEdge, cfg.minProb, p2);
+      const [a, b] = halves(decisionRounds);
+      const ra = replay(a, cfg.minEdge, cfg.minProb, p2);
+      const rb = replay(b, cfg.minEdge, cfg.minProb, p2);
+      console.log(`   ${`k = ${k}`.padEnd(12)} n=${String(r.n).padStart(5)}  WR ${pct(r.winRate).padStart(7)}  EV/$ ${num(r.evPerDollar, 4).padStart(8)}  t ${num(r.tStat, 1).padStart(5)}  | moitiés ${num(ra.evPerDollar, 3)} / ${num(rb.evPerDollar, 3)}${k === cfg.noiseEdgeK ? '  ← réglage actuel' : ''}`);
+    }
   }
 
   // 3c. Carnet : coût d'un aller-retour et profondeur

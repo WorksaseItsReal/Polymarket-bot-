@@ -5,8 +5,11 @@
  * Exécution : `npx tsx --test tests/runner-simulation.test.ts`
  *
  * Monde : spot en marche aléatoire seconde par seconde, cryptos d'un créneau corrélées ;
- * le carnet affiche la juste valeur d'un spot vu avec `lag` secondes de retard (+ 1 tick
- * de demi-spread, arrondi au tick), carnets Up/Down miroirs, profondeur limitée.
+ * règlement TWAP comme le vrai Polymarket depuis août 2026 (moyenne des 60 s finales ≥
+ * moyenne des 60 s précédant l'ouverture). Le carnet affiche la juste valeur EXACTE (vrai
+ * prix à battre) d'un spot vu avec `lag` secondes de retard (+ 1 tick de demi-spread,
+ * arrondi au tick), carnets Up/Down miroirs, profondeur limitée ; le bot, lui, estime le
+ * prix à battre depuis les bougies 1 min, comme en réel.
  *   - lag = 10 s : le bot doit gagner de l'argent de façon significative ;
  *   - lag = 0 (carnet juste) : il ne doit PAS afficher de gain significatif.
  * Et dans les deux cas : invariants comptables (un pari par round, PnL = somme du
@@ -21,6 +24,7 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DEFAULT_FAIR_VALUE_CONFIG as CFG, normCdf } from '../src/services/fair-value.ts';
+import { strikeFromCandles, type Candle } from '../src/services/round-market-data.ts';
 import { computeStats, loadLedger, readLedgerShared, type LedgerTrade } from '../src/services/paper-ledger.ts';
 import { FairValueRunner, type Book, type ScannedMarket } from '../src/strategy/fair-value-runner.ts';
 
@@ -62,9 +66,34 @@ function simulate(lag: number, slots: number, seed: number, modelSigmaFactor = 1
     conditionId: `0x${c}${slot}`, name: c, slug: `${c.toLowerCase()}-updown-5m-${slot}`, underlying: c,
     durationMinutes: 5, upTokenId: `${c}:${slot}:UP`, downTokenId: `${c}:${slot}:DOWN`,
   });
-  const fairUp = (c: string, slot: number, tSec: number) => {
-    const tau = Math.max(1, slot + 300 - tSec);
-    return normCdf(Math.log(spotAt(c, tSec) / spotAt(c, slot)) / (SIGMA * Math.sqrt(tau)));
+  // Règlement TWAP 60 s : moyenne des 60 secondes se terminant à `tEnd`.
+  const twapAt = (c: string, tEnd: number) => {
+    let sum = 0;
+    for (let k = 0; k < 60; k++) sum += spotAt(c, tEnd - k);
+    return sum / 60;
+  };
+  const fairUp = (c: string, slot: number, tSecRaw: number) => {
+    const tSec = Math.floor(tSecRaw);
+    const K = twapAt(c, slot);
+    const end = slot + 300;
+    const S = spotAt(c, tSec);
+    const tau = end - tSec;
+    if (tau >= 60) return normCdf(Math.log(S / K) / (SIGMA * Math.sqrt(tau - 40)));
+    // Fenêtre finale entamée : part déjà moyennée connue, reste aléatoire.
+    let realized = 0;
+    for (let u = end - 59; u <= tSec; u++) realized += spotAt(c, u);
+    const nF = Math.max(0, end - tSec);
+    const mean = (realized + nF * S) / 60;
+    const sd = (S * SIGMA * Math.sqrt((nF * nF * nF) / 3)) / 60;
+    return sd > 0 ? normCdf((mean - K) / sd) : (mean >= K ? 1 : 0);
+  };
+  // Bougie 1 min [m, m+60) telle que la verrait le bot (plus haut / plus bas inclus).
+  const candleAt = (c: string, openMs: number): Candle => {
+    const m = openMs / 1000;
+    let high = spotAt(c, m - 1);
+    let low = high;
+    for (let u = m; u <= m + 59; u++) { const x = spotAt(c, u); if (x > high) high = x; if (x < low) low = x; }
+    return { openTimeMs: openMs, open: spotAt(c, m - 1), close: spotAt(c, m + 59), high, low };
   };
   const book = (tokenId: string): Book => {
     const [c, slotS, side] = tokenId.split(':');
@@ -89,12 +118,15 @@ function simulate(lag: number, slots: number, seed: number, modelSigmaFactor = 1
     sleep: async ms => { now += ms; },
     getBook: async id => book(id),
     // modelSigmaFactor < 1 : volatilité sous-estimée → modèle SUR-confiant
-    getRoundData: async (coin, slot) => ({ spot: spotAt(coin, now / 1000), strike: spotAt(coin, slot), sigmaPerSqrtSec: SIGMA * modelSigmaFactor, source: 'sim', candleAgeMs: 0 }),
+    getRoundData: async (coin, slot) => ({
+      spot: spotAt(coin, now / 1000), strike: strikeFromCandles(ms => candleAt(coin, ms), slot, CFG.twapWindowSec) as number,
+      sigmaPerSqrtSec: SIGMA * modelSigmaFactor, source: 'sim', candleAgeMs: 0,
+    }),
     fetchOutcome: async slug => {
       const slot = Number(slug.split('-').pop());
       const c = slug.split('-')[0].toUpperCase();
       if (now / 1000 < slot + 300 + 15) return { resolved: false, reason: 'pas encore' };
-      return { resolved: true, upWon: spotAt(c, slot + 300) >= spotAt(c, slot) };
+      return { resolved: true, upWon: twapAt(c, slot + 300) >= twapAt(c, slot) };
     },
     notify: () => undefined, log: () => undefined, timeZone: 'UTC',
   });

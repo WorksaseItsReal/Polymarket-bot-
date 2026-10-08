@@ -3,9 +3,11 @@
  * Exécution : `npx tsx --test tests/strategy-simulation.test.ts`
  *
  * Monde simulé (graine fixe, reproductible) : le spot suit une marche aléatoire
- * gaussienne seconde par seconde ; un round 5 min résout « Up » si le prix final ≥ prix
- * d'ouverture (règle Polymarket). Le carnet affiche la juste valeur d'un spot vu avec
- * `lag` secondes de retard, + 1 tick de demi-spread, arrondie au tick de 0,01.
+ * gaussienne seconde par seconde ; un round 5 min résout « Up » si la moyenne (TWAP) des
+ * 60 s finales ≥ celle des 60 s précédant l'ouverture (règle Polymarket depuis août 2026).
+ * Le carnet affiche la juste valeur EXACTE (vrai prix à battre) d'un spot vu avec `lag`
+ * secondes de retard, + 1 tick de demi-spread, arrondie au tick de 0,01 ; le bot estime le
+ * prix à battre depuis la bougie 1 min précédant l'ouverture, comme en réel.
  *
  *  - CONTRÔLE NÉGATIF (lag = 0, carnet juste) : il n'existe AUCUN edge après frais. Le
  *    bot doit (quasiment) s'abstenir ; s'il parie, il ne doit pas « inventer » un gain.
@@ -24,7 +26,9 @@ import {
   decide,
   effectiveCostPerShare,
   normCdf,
+  twapVarianceSeconds,
 } from '../src/services/fair-value.ts';
+import { strikeFromCandles, type Candle } from '../src/services/round-market-data.ts';
 
 function mulberry32(seed: number) {
   let a = seed >>> 0;
@@ -44,23 +48,36 @@ function simulate(lag: number, rounds: number, seed: number) {
   const rnd = mulberry32(seed);
   const gauss = () => Math.sqrt(-2 * Math.log(rnd() + 1e-12)) * Math.cos(2 * Math.PI * rnd());
   const tick = (p: number) => Math.min(0.99, Math.max(0.01, Math.ceil(p * 100 - 1e-9) / 100));
-  const fair = (s: number, k: number, tau: number) => normCdf(Math.log(s / k) / (SIGMA * Math.sqrt(tau)));
+  // τ ≥ 60 s : TWAP final encore entièrement à venir → variance σ²·(τ − 40).
+  const fair = (s: number, k: number, tau: number) => normCdf(Math.log(s / k) / (SIGMA * Math.sqrt(tau - 40)));
 
   const pnls: number[] = [];
   const probs: number[] = [];
   let wins = 0;
   for (let r = 0; r < rounds; r++) {
+    // path[PRE + t] = spot à t (t ∈ [−PRE, 300]) : une minute avant l'ouverture pour le strike.
+    const PRE = 61;
     const path = [100];
-    for (let t = 1; t <= ROUND; t++) path.push(path[t - 1] * Math.exp(SIGMA * gauss()));
-    const strike = path[0];
-    const upWon = path[ROUND] >= strike;
+    for (let i = 1; i <= PRE + ROUND; i++) path.push(path[i - 1] * Math.exp(SIGMA * gauss()));
+    const at = (t: number) => path[PRE + t];
+    const twapEnd = (t: number) => { let sum = 0; for (let k = 0; k < 60; k++) sum += at(t - k); return sum / 60; };
+    const strike = twapEnd(0); // vrai prix à battre (connu du carnet)
+    const upWon = twapEnd(ROUND) >= strike;
+    const candle = (ms: number): Candle => {
+      const m = ms / 1000; // −60 : bougie [−60, 0)
+      let high = at(m - 1);
+      let low = high;
+      for (let u = m; u <= m + 59; u++) { high = Math.max(high, at(u)); low = Math.min(low, at(u)); }
+      return { openTimeMs: ms, open: at(m - 1), close: at(m + 59), high, low };
+    };
+    const strikeEst = strikeFromCandles(candle, 0, CFG.twapWindowSec) as number;
     // Le bot regarde toutes les 10 s, au plus une entrée par round.
     for (let t = ROUND - CFG.maxTauSec; t <= ROUND - CFG.minTauSec; t += 10) {
       const tau = ROUND - t;
       const seen = Math.max(0, t - lag);
-      const pMkt = fair(path[seen], strike, tau + (t - seen));
+      const pMkt = fair(at(seen), strike, tau + (t - seen));
       const d = decide({
-        spot: path[t], strike, sigmaPerSqrtSec: SIGMA, tauSec: tau,
+        spot: at(t), strike: strikeEst, sigmaPerSqrtSec: SIGMA, tauSec: tau,
         upAsk: tick(pMkt + 0.005), downAsk: tick(1 - pMkt + 0.005),
       });
       if (!d.side || !d.best) continue;
@@ -100,9 +117,10 @@ test('contrôle POSITIF : carnet en retard de 10 s → gain significatif, win ra
 test('FV_MIN_PROB : relever le seuil relève le win rate (au prix de moins de paris)', () => {
   const base = { spot: 100, strike: 100, sigmaPerSqrtSec: SIGMA, tauSec: 120 };
   // Outsider sous-coté : DOWN p≈0,45 coté 0,30 → +EV mais p < 0,6 → refusé par défaut.
-  const spot = 100 * Math.exp(0.125 * SIGMA * Math.sqrt(120 + CFG.strikeNoiseSec));
+  const spot = 100 * Math.exp(0.125 * SIGMA * Math.sqrt(twapVarianceSeconds(120, CFG.twapWindowSec) + CFG.strikeNoiseSec));
   const d = decide({ ...base, spot, upAsk: 0.62, downAsk: 0.3 });
   assert.equal(d.side, null, d.reason);
   assert.match(d.reason, /aucun côté avec p_modèle ≥ 0.6/);
-  assert.equal(decide({ ...base, spot, upAsk: 0.62, downAsk: 0.3 }, { ...CFG, minProb: 0 }).side, 'DOWN');
+  // (marge de bruit neutralisée : ce test ne porte que sur le filtre de probabilité)
+  assert.equal(decide({ ...base, spot, upAsk: 0.62, downAsk: 0.3 }, { ...CFG, minProb: 0, noiseEdgeK: 0 }).side, 'DOWN');
 });

@@ -149,7 +149,7 @@ test('config depuis env : valeurs invalides ignorées, bornes incohérentes reje
   assert.equal(fairValueConfigFromEnv({ FV_MIN_EDGE: '0.06' }).minEdge, 0.06);
 });
 
-test('deriveRoundData : strike = open du slot, spot = close courant, flux périmé → null', () => {
+test('deriveRoundData : strike = moyenne de la minute précédant l\'ouverture (TWAP), spot = close courant, flux périmé → null', () => {
   const slot = 1_790_000_100;
   const candles = [] as Array<{ openTimeMs: number; open: number; close: number }>;
   let px = 100;
@@ -160,7 +160,10 @@ test('deriveRoundData : strike = open du slot, spot = close courant, flux périm
   }
   const now = (slot + 2 * 60 + 30) * 1000;
   const d = deriveRoundData(candles, slot, now, 'test')!;
-  assert.equal(d.strike, candles.find(c => c.openTimeMs === slot * 1000)!.open);
+  const prev = candles.find(c => c.openTimeMs === slot * 1000 - 60_000)!;
+  close(d.strike, (prev.open + prev.close) / 2, 1e-12); // sans plus haut/plus bas : (O+C)/2
+  // Ancien règlement ponctuel (FV_TWAP_WINDOW_SEC=0) : open de la bougie du slot.
+  assert.equal(deriveRoundData(candles, slot, now, 'test', undefined, 0)!.strike, candles.find(c => c.openTimeMs === slot * 1000)!.open);
   assert.equal(d.spot, candles[candles.length - 1].close);
   close(d.sigmaPerSqrtSec, 0.0004 / Math.sqrt(60), 1e-9);
   assert.equal(deriveRoundData(candles, slot, now + 10 * 60_000, 'test'), null, 'flux figé');
@@ -429,4 +432,40 @@ test('journal couvrant un changement de FV_TAILS : chaque évaluation est conver
   const [[r]] = normalizeZScale([[rec]], 1, 'normal');
   close(r.pRaw!, probUp(base, { ...CFG, tails: 'normal', zScale: 1 })!, 1e-6);
   assert.equal(r.tl, undefined, 'converti en loi normale');
+});
+
+test('strikeFromCandles : (O+H+L+C)/4 de la bougie précédant l\'ouverture ; repli (O+C)/2 ; W < 60 ; bougie absente → null', async () => {
+  const { strikeFromCandles } = await import('../src/services/round-market-data.ts');
+  const slot = 1_790_000_100;
+  const prev = { openTimeMs: slot * 1000 - 60_000, open: 100, close: 102, high: 103, low: 99 };
+  const at = (ms: number) => (ms === prev.openTimeMs ? prev : ms === slot * 1000 ? { openTimeMs: ms, open: 102.5, close: 101 } : undefined);
+  close(strikeFromCandles(at, slot, 60)!, (100 + 103 + 99 + 102) / 4, 1e-12);
+  close(strikeFromCandles(at, slot, 30)!, 102 + ((100 + 103 + 99 + 102) / 4 - 102) / 2, 1e-12); // W = 30 s : ramené vers la clôture
+  assert.equal(strikeFromCandles(at, slot, 0), 102.5, 'règlement ponctuel : open du slot');
+  const incoherent = { ...prev, high: 101 }; // plus haut sous la clôture : donnée fausse
+  close(strikeFromCandles(ms => (ms === prev.openTimeMs ? incoherent : undefined), slot, 60)!, 101, 1e-12);
+  assert.equal(strikeFromCandles(() => undefined, slot, 60), null);
+});
+
+test('edge exigé : minEdge + k·σ_p (bruit du prix à battre), plus grand près de 50/50 et à faible vol', async () => {
+  const { probNoiseSd } = await import('../src/services/fair-value.ts');
+  const sig = 0.0006 / Math.sqrt(60);
+  const atMoney = probNoiseSd({ spot: 100, strike: 100, sigmaPerSqrtSec: sig, tauSec: 120 });
+  const far = probNoiseSd({ spot: 100.15, strike: 100, sigmaPerSqrtSec: sig, tauSec: 120 });
+  const highVol = probNoiseSd({ spot: 100, strike: 100, sigmaPerSqrtSec: 3 * sig, tauSec: 120 });
+  assert.ok(atMoney > far && far > 0, `${atMoney} > ${far}`);
+  assert.ok(highVol < atMoney, 'à vol plus forte, l\'écart de flux pèse moins');
+  assert.equal(probNoiseSd({ spot: 100, strike: 100, sigmaPerSqrtSec: sig, tauSec: 120 }, { ...CFG, strikeNoiseSec: 0, basisBps: 0 }), 0);
+  const input = { spot: 100.05, strike: 100, sigmaPerSqrtSec: sig, tauSec: 120, upAsk: 0.5, downAsk: 0.52 };
+  const d = decide(input);
+  close(d.requiredEdge!, CFG.minEdge + CFG.noiseEdgeK * d.noiseSd!, 1e-12);
+  assert.equal(decide(input, { ...CFG, noiseEdgeK: 0 }).requiredEdge, CFG.minEdge);
+  if (!d.side) assert.match(d.reason, /bruit du prix à battre/);
+});
+
+test('règlement TWAP : ni entrée ni réévaluation dans la dernière minute (part déjà moyennée inconnue)', () => {
+  const sig = 0.0006 / Math.sqrt(60);
+  const d = decide({ spot: 100.3, strike: 100, sigmaPerSqrtSec: sig, tauSec: 55, upAsk: 0.5, downAsk: 0.5 }, { ...CFG, minTauSec: 30 });
+  assert.equal(d.side, null);
+  assert.match(d.reason, /fenêtre de moyenne du règlement/);
 });

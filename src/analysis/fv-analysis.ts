@@ -105,6 +105,8 @@ export interface ScanParams {
   maxAsk: number;
   minTau?: number;
   maxTau?: number;
+  /** FV_NOISE_EDGE_K : edge exigé = minEdge + noiseK · ns (bruit enregistré par évaluation). */
+  noiseK?: number;
 }
 
 export interface ScanResult {
@@ -141,11 +143,12 @@ export function replay(rounds: ResolvedRecord[][], minEdge: number, minProb: num
       if (r.upAsk !== null) cands.push({ up: true, prob: r.pUp, ask: r.upAsk });
       if (r.downAsk !== null) cands.push({ up: false, prob: 1 - r.pUp, ask: r.downAsk });
       let best: { up: boolean; cost: number; edge: number } | null = null;
+      const required = minEdge + (p.noiseK ?? 0) * (r.ns ?? 0);
       for (const c of cands) {
         if (!(c.ask >= p.minAsk && c.ask <= p.maxAsk) || c.prob < minProb) continue;
         const cost = effectiveCostPerShare(c.ask, p.feeRate);
         const edge = c.prob - cost;
-        if (edge >= minEdge && (!best || edge > best.edge)) best = { up: c.up, cost, edge };
+        if (edge >= required && (!best || edge > best.edge)) best = { up: c.up, cost, edge };
       }
       if (!best) continue;
       const won = best.up === r.upWon;

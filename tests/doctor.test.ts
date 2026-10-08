@@ -124,3 +124,12 @@ test('Node.js : ≥ 20.6 requis (PM2 lance le bot par node --import tsx)', () =>
   assert.equal(runtimeChecks('18.19.0')[0].level, 'error');
   assert.equal(runtimeChecks()[0].level, 'ok', 'le Node qui fait tourner les tests');
 });
+
+test('réglages : ancien règlement ponctuel et marge de bruit désactivée signalés', () => {
+  assert.equal(configChecks({}).some(c => c.label === 'Règlement' || c.label === 'Marge de bruit'), false, 'défauts : rien à signaler');
+  const legacy = configChecks({ FV_TWAP_WINDOW_SEC: '0' }).find(c => c.label === 'Règlement')!;
+  assert.equal(legacy.level, 'warn');
+  assert.match(legacy.detail, /moyenne Chainlink des 60 s/);
+  assert.equal(configChecks({ FV_NOISE_EDGE_K: '0' }).find(c => c.label === 'Marge de bruit')!.level, 'warn');
+  assert.match(configChecks({ FV_NOISE_EDGE_K: '9' }).find(c => c.label === 'Réglages FV')!.detail, /FV_NOISE_EDGE_K=9/, 'hors bornes [0, 5]');
+});
