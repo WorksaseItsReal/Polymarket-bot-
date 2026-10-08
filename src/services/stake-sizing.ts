@@ -350,7 +350,7 @@ export function computeStake(input: StakeSizingInput): StakeSizingResult {
   }
 
   const caps: Array<[string, number]> = [
-    [`borne de variance ${pct(MAX_VARIANCE_PCT)} (edge nulle, RISK.md §5.1)`, capVariance],
+    [`plafond ${pct(MAX_VARIANCE_PCT)} du capital par trade (borne de variance, RISK.md §5.1)`, capVariance],
     [`plafond par trade ${pct(MAX_TRADE_PCT)}`, capTrade],
     [`limite quotidienne ${pct(DAILY_LOSS_PCT)} / ${MIN_LOSSES_TO_DAILY_LIMIT} pertes`, capDaily],
     [`exposition simultanée ${pct(MAX_EXPOSURE_PCT)} restante`, capExposure],

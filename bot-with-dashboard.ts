@@ -542,8 +542,11 @@ function simulateTrade(profit: number, strategy: string, description: string) {
   // desormais separement : la projection ne touche plus la comptabilite.
   state.paper.estimatedPnl = (state.paper.estimatedPnl ?? 0) + profit;
 
-  // Log as a special SIMULATION event
-  log('TRADE', `[SIMULATION] ${description} | Gain espéré (non réalisé): $${profit.toFixed(2)}`);
+  // Montant gagné SI le pari passe (pas une espérance : p × gain − (1 − p) × perte). La
+  // stratégie juste valeur l'écrit déjà dans sa description (« gain … si UP / perte … »).
+  log('TRADE', strategy === 'fairValue'
+    ? `[SIMULATION] ${description}`
+    : `[SIMULATION] ${description} | gain si gagné (non réalisé) : $${profit.toFixed(2)}`);
   // Compté comme trade, mais SANS credit de PnL : le realise vient du resolveur.
   recordTrade(profit, strategy, false);
 }

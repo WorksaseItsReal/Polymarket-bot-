@@ -133,6 +133,8 @@ export interface RunnerDeps {
 export const LOSS_STREAK_WINDOW_MS = 6 * 3_600_000;
 
 const SLUG_RE = /^(btc|eth|sol|xrp|doge)-updown-5m-(\d{9,})$/;
+/** Prix lisible dans les logs : 7 chiffres significatifs (BTC 62034.57, DOGE 0.1234568), pas 14 décimales. */
+const px = (x: number): string => (Number.isFinite(x) ? String(Number(x.toPrecision(7))) : String(x));
 
 /** Meilleur niveau d'un côté du carnet (prix le plus bas pour les asks, le plus haut pour les bids). */
 export function bestLevel(levels: BookLevel[], side: 'ask' | 'bid'): BookLevel | null {
@@ -483,7 +485,7 @@ export class FairValueRunner {
           upBid: upBid?.price ?? null, downBid: downBid?.price ?? null, upBidSz: upBid?.size ?? null, downBidSz: downBid?.size ?? null,
           src: data.source, act: 'hold',
         };
-        const ctx = `${coin} spot ${data.spot} vs strike ${data.strike} (${data.source}), `
+        const ctx = `${coin} spot ${px(data.spot)} vs strike ${px(data.strike)} (${data.source}), `
           + `σ1m ${(data.sigmaPerSqrtSec * Math.sqrt(60) * 100).toFixed(3)} %, τ ${Math.round(tauSec)} s`;
         if (!decision.side || !decision.best) {
           this.holdLog(market.conditionId, `   ↳ ${ctx} → HOLD : ${decision.reason}`);
