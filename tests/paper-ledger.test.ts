@@ -26,6 +26,15 @@ function trade(over: Partial<LedgerTrade>): LedgerTrade {
   };
 }
 
+test('parseGammaEvent : prix à battre / final de eventMetadata (objet ou JSON), ignorés s\'ils sont absents ou absurdes', () => {
+  const ev = (meta: unknown) => [{ slug: SLUG, eventMetadata: meta, markets: [{ closed: true, outcomes: '["Up","Down"]', outcomePrices: '["1","0"]' }] }];
+  assert.deepEqual(parseGammaEvent(ev({ priceToBeat: 62034.5, finalPrice: '62051.27' }), SLUG), { resolved: true, upWon: true, priceToBeat: 62034.5, finalPrice: 62051.27 });
+  assert.deepEqual(parseGammaEvent(ev('{"priceToBeat":"0.1234"}'), SLUG), { resolved: true, upWon: true, priceToBeat: 0.1234 });
+  for (const junk of [undefined, null, 'pas du json', { priceToBeat: -1 }, { priceToBeat: 'abc' }, { finalPrice: 0 }]) {
+    assert.deepEqual(parseGammaEvent(ev(junk), SLUG), { resolved: true, upWon: true });
+  }
+});
+
 test('parseGammaEvent : seul un marché CLÔTURÉ avec un prix final 1/0 est un résultat', () => {
   const ev = (closed: boolean, prices: string, outcomes = '["Up","Down"]', slug = SLUG) =>
     [{ slug, markets: [{ closed, outcomes, outcomePrices: prices }] }];

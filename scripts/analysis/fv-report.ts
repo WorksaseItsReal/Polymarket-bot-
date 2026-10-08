@@ -21,7 +21,7 @@ import { entryMinTauSec, fairValueConfigFromEnv } from '../../src/services/fair-
 import {
   applyBlend, blendVerdict, zScaleConflictsWithBlend, bookStats, brier, byRound, calibration, compareModelBook, describeBlend, fitBlend,
   fitZScale, halves, marketProbUp, normalizeZScale, rawModelProb, replay, zScaleAdvice,
-  thresholdGrid, type ResolvedRecord,
+  strikeVsOfficial, thresholdGrid, type ResolvedRecord,
 } from '../../src/analysis/fv-analysis.js';
 
 function arg(name: string): string | undefined {
@@ -33,6 +33,8 @@ const POLY = join(process.env.HOME || homedir(), '.polymarket');
 const DIR = arg('dir') ?? join(POLY, 'journal');
 const DAYS = Number(arg('days') ?? '30');
 const CACHE = join(POLY, 'outcomes-cache.json');
+/** Prix à battre / final publiés par Polymarket (eventMetadata), lus avec le résultat. */
+const PRICES_CACHE = join(POLY, 'round-prices-cache.json');
 const cfg = fairValueConfigFromEnv(process.env);
 
 const pct = (x: number | null, d = 1) => (x === null ? '—' : `${(x * 100).toFixed(d)} %`);
@@ -45,7 +47,8 @@ const intern = (x: string) => strings.get(x) ?? (strings.set(x, x), x);
 /** Seuls les champs utiles à l'analyse : un journal de 30 jours ≈ 1 million de lignes. */
 function slim(r: DecisionRecord): DecisionRecord {
   return {
-    t: r.t, slug: intern(r.slug), coin: intern(r.coin), tau: r.tau, spot: 0, strike: 0, sig: 0, pUp: r.pUp, pRaw: r.pRaw, zs: r.zs,
+    // strike et sig gardés : comparaison avec le prix à battre publié par Polymarket (section 0)
+    t: r.t, slug: intern(r.slug), coin: intern(r.coin), tau: r.tau, spot: 0, strike: r.strike, sig: r.sig, pUp: r.pUp, pRaw: r.pRaw, zs: r.zs,
     upAsk: r.upAsk, downAsk: r.downAsk, upAskSz: r.upAskSz, downAskSz: null, upBid: r.upBid, src: '', act: r.act === 'buy' ? 'buy' : 'hold',
     // GARDER mv (exclusion des mesures) et tl (loi du modèle) : sans eux, le filtre des
     // évaluations « saut du spot » et la conversion t4 étaient silencieusement inopérants.
@@ -89,22 +92,28 @@ function readJournal(): DecisionRecord[] {
   return out;
 }
 
-async function resolveAll(slugs: string[]): Promise<Map<string, boolean>> {
-  const cache: Record<string, boolean> = existsSync(CACHE) ? (() => { try { return JSON.parse(readFileSync(CACHE, 'utf8')); } catch { return {}; } })() : {};
+async function resolveAll(slugs: string[]): Promise<{ outcomes: Map<string, boolean>; prices: Record<string, [number | null, number | null]> }> {
+  const readJson = <T>(f: string, d: T): T => (existsSync(f) ? (() => { try { return JSON.parse(readFileSync(f, 'utf8')) as T; } catch { return d; } })() : d);
+  const cache = readJson<Record<string, boolean>>(CACHE, {});
+  const prices = readJson<Record<string, [number | null, number | null]>>(PRICES_CACHE, {});
   const todo = slugs.filter(s => !(s in cache) && Number(s.split('-').pop()) * 1000 + 360_000 < Date.now());
   let done = 0;
   const worker = async () => {
     while (todo.length) {
       const slug = todo.shift() as string;
       const o = await fetchRoundOutcome(slug);
-      if (o.resolved) cache[slug] = o.upWon;
+      if (o.resolved) {
+        cache[slug] = o.upWon;
+        if (o.priceToBeat || o.finalPrice) prices[slug] = [o.priceToBeat ?? null, o.finalPrice ?? null];
+      }
       if (++done % 50 === 0) process.stderr.write(`  rounds réglés : ${done}\n`);
     }
   };
   await Promise.all(Array.from({ length: 4 }, worker));
   mkdirSync(dirname(CACHE), { recursive: true });
   writeFileSync(CACHE, JSON.stringify(cache));
-  return new Map(Object.entries(cache));
+  writeFileSync(PRICES_CACHE, JSON.stringify(prices));
+  return { outcomes: new Map(Object.entries(cache)), prices };
 }
 
 async function main() {
@@ -113,7 +122,7 @@ async function main() {
     console.error(`(journal volumineux : ${records.length} évaluations — en cas de manque de mémoire, réduire --days`
       + ' ou lancer avec NODE_OPTIONS=--max-old-space-size=2048)');
   }
-  const outcomes = await resolveAll([...new Set(records.map(r => r.slug))]);
+  const { outcomes, prices } = await resolveAll([...new Set(records.map(r => r.slug))]);
   // Issue ajoutée EN PLACE (objets fraîchement lus, propres à ce script) : pas de copie.
   const resolved: ResolvedRecord[] = [];
   for (const r of records) {
@@ -136,6 +145,27 @@ async function main() {
   const evals = measureRounds.flat();
   console.log(`\n=== Journal : ${records.length} évaluations, ${new Set(records.map(r => r.slug)).size} rounds, ${rounds.length} rounds réglés ===\n`);
   if (!rounds.length) return;
+
+  // 0. Notre prix à battre (estimé) vs celui de Polymarket, s'il est publié dans Gamma.
+  const checks = rounds.flatMap(l => {
+    const r = l[0];
+    const p = prices[r.slug];
+    return p && p[0] ? [{ coin: r.coin, slotSec: Number(r.slug.split('-').pop()), est: r.strike, sig: r.sig, ptb: p[0], final: p[1] ?? undefined, upWon: r.upWon }] : [];
+  });
+  if (!checks.length) {
+    console.log('0) Prix à battre : Polymarket ne le publie pas dans Gamma (eventMetadata.priceToBeat) pour ces rounds — comparaison impossible.\n');
+  } else {
+    const sc = strikeVsOfficial(checks, cfg.strikeNoiseSec);
+    console.log(`0) Prix à battre : notre estimation (bougie de la minute précédant l'ouverture) vs Polymarket (${checks.length} rounds)`);
+    for (const c of sc.coins) {
+      console.log(`   ${c.coin.padEnd(5)} n=${String(c.n).padStart(5)}  écart moyen ${num(c.meanBps, 1).padStart(6)} bps  dispersion ${num(c.sdBps, 1).padStart(5)} bps`
+        + `  | corrigé d'un écart glissant (1 h) ${num(c.sdResidBps, 1).padStart(5)} bps  | bruit supposé ${num(c.assumedBps, 1)} bps`);
+    }
+    if (sc.consistency.n) {
+      console.log(`   cohérence « prix final ≥ prix à battre ⇔ Up » : ${pct(sc.consistency.agree / sc.consistency.n)} (n=${sc.consistency.n}) — sous 99 %, ces champs ne signifient pas ce qu'on croit`);
+    }
+    console.log('   Dispersion corrigée nettement sous la dispersion brute → lire le prix officiel améliorerait le modèle (et réduirait la marge de bruit).\n');
+  }
 
   // 1. Modèle vs marché : appariée (mêmes évaluations), chaque round pesant 1, modèle SEUL
   // (avant mélange), t groupé par créneau (les 5 cryptos d'un round sont corrélées).

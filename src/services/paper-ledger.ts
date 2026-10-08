@@ -273,13 +273,42 @@ export function recentLossStreak(trades: readonly LedgerTrade[], nowMs: number, 
 // Résolution Gamma
 // ---------------------------------------------------------------------------
 
-export type RoundOutcome = { resolved: true; upWon: boolean } | { resolved: false; reason: string };
+export type RoundOutcome =
+  | {
+      resolved: true;
+      upWon: boolean;
+      /** Prix à battre et prix final publiés par Polymarket (`eventMetadata`), s'ils le sont.
+       *  Servent à MESURER l'erreur de notre estimation du prix à battre (fv-report). */
+      priceToBeat?: number;
+      finalPrice?: number;
+    }
+  | { resolved: false; reason: string };
+
+/** `eventMetadata` de Gamma (objet ou chaîne JSON) : prix à battre / final s'ils sont publiés. */
+function roundPrices(ev: { eventMetadata?: unknown }): { priceToBeat?: number; finalPrice?: number } {
+  let meta: unknown = ev.eventMetadata;
+  if (typeof meta === 'string') {
+    try { meta = JSON.parse(meta); } catch { return {}; }
+  }
+  if (!meta || typeof meta !== 'object') return {};
+  const num = (v: unknown) => {
+    const x = typeof v === 'string' ? Number(v) : v;
+    return typeof x === 'number' && Number.isFinite(x) && x > 0 ? x : undefined;
+  };
+  const m = meta as { priceToBeat?: unknown; finalPrice?: unknown };
+  const out: { priceToBeat?: number; finalPrice?: number } = {};
+  const ptb = num(m.priceToBeat);
+  const fin = num(m.finalPrice);
+  if (ptb !== undefined) out.priceToBeat = ptb;
+  if (fin !== undefined) out.finalPrice = fin;
+  return out;
+}
 
 /** Interprète la réponse de `GET /events?slug=<slug>`. Pure. */
 export function parseGammaEvent(data: unknown, slug: string): RoundOutcome {
   const events = Array.isArray(data) ? data : [];
   const ev = events.find(e => e && typeof e === 'object' && (e as { slug?: unknown }).slug === slug) as
-    | { markets?: unknown }
+    | { markets?: unknown; eventMetadata?: unknown }
     | undefined;
   if (!ev) return { resolved: false, reason: 'événement absent de la réponse (ou slug différent)' };
   const markets = Array.isArray(ev.markets) ? ev.markets : [];
@@ -303,8 +332,8 @@ export function parseGammaEvent(data: unknown, slug: string): RoundOutcome {
   if (upIdx < 0 || downIdx < 0 || prices.length < 2) return { resolved: false, reason: 'outcomes/prix illisibles' };
   const up = prices[upIdx];
   const down = prices[downIdx];
-  if (up >= 0.99 && down <= 0.01) return { resolved: true, upWon: true };
-  if (down >= 0.99 && up <= 0.01) return { resolved: true, upWon: false };
+  if (up >= 0.99 && down <= 0.01) return { resolved: true, upWon: true, ...roundPrices(ev) };
+  if (down >= 0.99 && up <= 0.01) return { resolved: true, upWon: false, ...roundPrices(ev) };
   return { resolved: false, reason: `prix de sortie non définitifs (Up ${up}, Down ${down})` };
 }
 

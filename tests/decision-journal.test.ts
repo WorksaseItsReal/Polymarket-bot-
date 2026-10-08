@@ -9,7 +9,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DecisionJournal, journalFileName, type DecisionRecord } from '../src/services/decision-journal.ts';
-import { brier, byRound, calibration, halves, marketProbUp, replay, type ResolvedRecord } from '../src/analysis/fv-analysis.ts';
+import { brier, byRound, calibration, halves, marketProbUp, replay, strikeVsOfficial, type ResolvedRecord } from '../src/analysis/fv-analysis.ts';
 import { DEFAULT_FAIR_VALUE_CONFIG, normCdf } from '../src/services/fair-value.ts';
 
 const DAY = Date.parse('2026-10-07T00:00:00Z');
@@ -263,6 +263,7 @@ test('rapport : les évaluations de l\'ancien modèle (règlement ponctuel, sans
   // bruit enregistré → la marge FV_NOISE_EDGE_K est rejouée sur les vraies données
   assert.match(r.stdout, /selon la marge de bruit FV_NOISE_EDGE_K/);
   assert.match(r.stdout, /k = 1\.5 .*← réglage actuel/);
+  assert.match(r.stdout, /0\) Prix à battre : Polymarket ne le publie pas/, 'sans prix publié : dit clairement');
 });
 
 test('journal : une évaluation par tranche fixe de 10 s, passages réguliers et sauts du spot séparés', async () => {
@@ -331,4 +332,50 @@ test('journal : archive numérotée identique déjà présente → pas de nouvel
   await j.flush();
   assert.equal(existsSync(join(dir, day)), false);
   assert.equal(existsSync(join(dir, 'decisions-2026-10-03.2.jsonl.gz')), false, 'pas de 3e archive');
+});
+
+test('prix à battre : notre estimation vs Polymarket — décalage, dispersion, correction glissante, cohérence', () => {
+  // Décalage constant de +3 bps (Binance vs Chainlink) + bruit ±1 bps alterné ; vrais prix ≈ 100.
+  const rounds = Array.from({ length: 40 }, (_, i) => {
+    const ptb = 100 * Math.exp(0.001 * Math.sin(i));
+    const est = ptb * Math.exp((3 + (i % 2 ? 1 : -1)) / 1e4);
+    const final = ptb * (i % 3 ? 1.0005 : 0.9995);
+    return { coin: 'BTC', slotSec: 1_790_000_100 + i * 300, est, sig: 1e-4, ptb, final, upWon: final >= ptb };
+  });
+  const r = strikeVsOfficial(rounds, 3);
+  const c = r.coins[0];
+  assert.equal(c.n, 40);
+  assert.ok(Math.abs(c.meanBps - 3) < 0.05, `décalage ${c.meanBps}`);
+  assert.ok(Math.abs(c.sdBps - 1) < 0.05, `dispersion ${c.sdBps}`);
+  assert.ok(c.sdResidBps !== null && c.sdResidBps < 1.2, 'le décalage constant disparaît après correction glissante');
+  assert.ok(Math.abs(c.assumedBps - 1e4 * 1e-4 * Math.sqrt(3)) < 1e-9);
+  assert.deepEqual(r.consistency, { n: 40, agree: 40 });
+  // champs incohérents (prix final inversé) : la cohérence le montre
+  const bad = strikeVsOfficial(rounds.map(x => ({ ...x, upWon: !x.upWon })), 3);
+  assert.equal(bad.consistency.agree, 0);
+});
+
+test('rapport : avec les prix publiés par Polymarket, la section 0 compare notre prix à battre', async () => {
+  const { spawnSync } = await import('node:child_process');
+  const home = mkdtempSync(join(tmpdir(), 'report-ptb-'));
+  const poly = join(home, '.polymarket');
+  mkdirSync(join(poly, 'journal'), { recursive: true });
+  const now = Date.now();
+  const base = Math.floor(now / 1000 / 300) * 300 - 7200;
+  const lines: string[] = [];
+  const outcomes: Record<string, boolean> = {};
+  const prices: Record<string, [number, number]> = {};
+  for (let k = 0; k < 8; k++) {
+    const slug = `btc-updown-5m-${base + k * 300}`;
+    lines.push(JSON.stringify(rec({ t: (base + k * 300 + 100) * 1000, slug, strike: 100.02, sig: 1e-4, pUp: 0.55 })));
+    outcomes[slug] = k % 2 === 0;
+    prices[slug] = [100, k % 2 === 0 ? 100.1 : 99.9];
+  }
+  writeFileSync(join(poly, 'journal', `decisions-${new Date(now).toISOString().slice(0, 10)}.jsonl`), lines.join('\n') + '\n');
+  writeFileSync(join(poly, 'outcomes-cache.json'), JSON.stringify(outcomes));
+  writeFileSync(join(poly, 'round-prices-cache.json'), JSON.stringify(prices));
+  const r = spawnSync('npx', ['tsx', 'scripts/analysis/fv-report.ts', '--days', '3'], { env: { ...process.env, HOME: home, DOTENV_CONFIG_PATH: '/dev/null' }, encoding: 'utf8', timeout: 120_000 });
+  assert.match(r.stdout, /0\) Prix à battre : notre estimation .* vs Polymarket \(8 rounds\)/);
+  assert.match(r.stdout, /BTC +n= +8 +écart moyen +2\.0 bps/);
+  assert.match(r.stdout, /cohérence « prix final ≥ prix à battre ⇔ Up » : 100/);
 });

@@ -618,3 +618,62 @@ export function zScaleAdvice(fit: ZScaleFit, current: number, blendConflict: boo
   }
   return `→ le modèle est ${fit.m < current ? 'SUR-confiant' : 'SOUS-confiant'} : essayer FV_Z_SCALE=${suggested} (actuel ${current}), puis re-mesurer.`;
 }
+
+export interface StrikeCheckRound {
+  coin: string;
+  slotSec: number;
+  /** Notre prix à battre (estimé depuis les bougies). */
+  est: number;
+  /** σ par √s au moment de l'évaluation. */
+  sig: number;
+  /** Prix à battre / prix final publiés par Polymarket. */
+  ptb: number;
+  final?: number;
+  upWon: boolean;
+}
+
+export interface StrikeCheckCoin {
+  coin: string;
+  n: number;
+  /** Écart moyen ln(estimation / officiel), en points de base (décalage Binance/Chainlink). */
+  meanBps: number;
+  /** Dispersion de l'écart (bps). */
+  sdBps: number;
+  /** Dispersion après retrait d'un écart moyen glissant (12 rounds précédents ≈ 1 h), bps :
+   *  ce qu'on gagnerait en lisant le prix officiel corrigé du décalage. null si < 5 points. */
+  sdResidBps: number | null;
+  /** Bruit de strike supposé par le modèle, en bps (σ·√strikeNoiseSec, médiane). */
+  assumedBps: number;
+}
+
+/**
+ * Notre prix à battre comparé à celui de Polymarket. Sert à décider sur preuve s'il faut
+ * lire le prix officiel (et à vérifier que `strikeNoiseSec` / `basisBps` sont réalistes).
+ * `consistency` : part des rounds où « prix final ≥ prix à battre » ⇔ Up — vérifie que les
+ * champs publiés signifient bien ce qu'on croit (attendu : 100 %).
+ */
+export function strikeVsOfficial(rounds: StrikeCheckRound[], strikeNoiseSec: number): { coins: StrikeCheckCoin[]; consistency: { n: number; agree: number } } {
+  const byCoin = new Map<string, StrikeCheckRound[]>();
+  for (const r of rounds) {
+    if (!(r.est > 0 && r.ptb > 0)) continue;
+    (byCoin.get(r.coin) ?? byCoin.set(r.coin, []).get(r.coin)!).push(r);
+  }
+  const coins: StrikeCheckCoin[] = [];
+  for (const [coin, list] of [...byCoin.entries()].sort()) {
+    list.sort((a, b) => a.slotSec - b.slotSec);
+    const d = list.map(r => 1e4 * Math.log(r.est / r.ptb));
+    const mean = d.reduce((a, b) => a + b, 0) / d.length;
+    const sd = Math.sqrt(d.reduce((a, b) => a + (b - mean) ** 2, 0) / Math.max(1, d.length - 1));
+    const resid: number[] = [];
+    for (let i = 3; i < d.length; i++) {
+      const prev = d.slice(Math.max(0, i - 12), i);
+      resid.push(d[i] - prev.reduce((a, b) => a + b, 0) / prev.length);
+    }
+    const sdResid = resid.length >= 5 ? Math.sqrt(resid.reduce((a, b) => a + b * b, 0) / resid.length) : null;
+    const assumed = list.map(r => 1e4 * r.sig * Math.sqrt(Math.max(0, strikeNoiseSec))).sort((a, b) => a - b);
+    coins.push({ coin, n: list.length, meanBps: mean, sdBps: sd, sdResidBps: sdResid, assumedBps: assumed[Math.floor(assumed.length / 2)] ?? 0 });
+  }
+  const withFinal = rounds.filter(r => r.ptb > 0 && (r.final ?? 0) > 0);
+  const agree = withFinal.filter(r => ((r.final as number) >= r.ptb) === r.upWon).length;
+  return { coins, consistency: { n: withFinal.length, agree } };
+}
