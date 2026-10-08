@@ -87,3 +87,49 @@ test('bot complet sur faux réseau : évalue, journalise, parie et règle, dashb
     assert.equal(tradesMsgs.filter(m => /GAGNÉ|PERDU|REVENDU/.test(m.text)).length, closed, 'un message par pari réglé');
   }
 });
+
+test('clé mal saisie jamais affichée ; kill -9 détecté et signalé au lancement suivant', { timeout: 90_000 }, async () => {
+  const home = mkdtempSync(join(tmpdir(), 'bot-e2e-crash-'));
+  const tgLog = join(home, 'telegram.jsonl');
+  // 63 caractères : la faute de frappe que ethers recopiait dans les logs et le dashboard.
+  const typoKey = '4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f36231';
+  const run = async (stop: 'SIGKILL' | 'SIGINT') => {
+    const port = 30_000 + Math.floor(Math.random() * 20_000);
+    const child = spawn(process.execPath, ['--import', 'tsx', '--import', './tests/fixtures/fake-live-net.ts', 'bot-with-dashboard.ts'], {
+      env: {
+        ...process.env, HOME: home, DOTENV_CONFIG_PATH: '/dev/null', DRY_RUN: 'true', PAPER_CAPITAL: '1000', FV_POLL_SEC: '5', FV_SPOT_STREAM: 'false',
+        TELEGRAM_BOT_TOKEN: '123456789:' + 'A'.repeat(35), TELEGRAM_CHAT_ID: '42', FAKE_TELEGRAM_LOG: tgLog,
+        DASHBOARD_PORT: String(port), POLYMARKET_PRIVATE_KEY: typoKey, FAKE_TIME_SPEED: '20',
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let out = '';
+    child.stdout.on('data', d => { out += d; });
+    child.stderr.on('data', d => { out += d; });
+    const exited = new Promise<number | null>(r => child.on('exit', code => r(code)));
+    let logs = '';
+    try {
+      for (let i = 0; i < 60 && !/Bot \+ Dashboard running/.test(out); i++) await sleep(500);
+      assert.match(out, /Bot \+ Dashboard running/, out.slice(-2000));
+      logs = await (await fetch(`http://127.0.0.1:${port}/api/logs`)).text();
+    } finally {
+      child.kill(stop);
+    }
+    await Promise.race([exited, sleep(12_000)]);
+    return { out, logs };
+  };
+
+  const first = await run('SIGKILL');
+  const second = await run('SIGINT');
+  for (const { out, logs } of [first, second]) {
+    assert.ok(!out.includes(typoKey.slice(0, 30)) && !logs.includes(typoKey.slice(0, 30)), 'clé absente de la console et du dashboard');
+    assert.match(out, /Mode papier : pas de clé de wallet valide/);
+  }
+  assert.match(second.out, /terminé brutalement/);
+  const tg = readFileSync(tgLog, 'utf8').split('\n').filter(Boolean).map(l => JSON.parse(l) as { text: string });
+  const starts = tg.filter(m => /Bot Polymarket démarré/.test(m.text));
+  assert.equal(starts.length, 2);
+  assert.doesNotMatch(starts[0].text, /Relancé/);
+  assert.match(starts[1].text, /↻ Relancé après un arrêt brutal/);
+  assert.ok(!tg.some(m => m.text.includes(typoKey.slice(0, 30))));
+});

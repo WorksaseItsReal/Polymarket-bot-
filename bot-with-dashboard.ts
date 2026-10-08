@@ -12,6 +12,7 @@ import 'dotenv/config';
 import axios from 'axios';
 import { ethers } from 'ethers';
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { format } from 'node:util';
 import {
   PolymarketSDK,
   ArbitrageService,
@@ -39,6 +40,8 @@ import { PersistentGuard, evaluateGuard } from './src/strategy/performance-guard
 import { ShadowTracker } from './src/strategy/shadow-tracker.js';
 import { TelegramClient, telegramConfigFromEnv } from './src/services/telegram.js';
 import { goLiveLine, isValidTimeZone, msgAlert, msgStartup, msgSummary, shadowLine } from './src/services/telegram-messages.js';
+import { maskPolyHeaders, secretRedactor } from './src/services/redact.js';
+import { noteStart, noteStop, type StartReport } from './src/services/crash-guard.js';
 
 // ============================================================================
 // CONFIGURATION (same as bot-config.ts)
@@ -49,6 +52,31 @@ const DRY_RUN = isDryRunMode();
 // Le client CLOB (@polymarket/clob-client) appelle axios SANS délai : une réponse qui ne
 // vient jamais bloquait la requête pendant des minutes. Délai par défaut pour tout axios.
 axios.defaults.timeout = Number(process.env.HTTP_TIMEOUT_MS ?? '') || 10_000;
+
+// Secrets masqués dans TOUT ce qui sort (console/PM2 — bibliothèques comprises — et
+// dashboard) : ethers recopie une clé privée mal saisie dans ses erreurs, ses erreurs RPC
+// citent l'URL (clé d'API), clob-client imprime les en-têtes POLY_* des requêtes en échec.
+// Détails : src/services/redact.ts.
+const redact = secretRedactor();
+for (const m of ['log', 'info', 'warn', 'error', 'debug'] as const) {
+  const orig = console[m].bind(console);
+  console[m] = (...args: unknown[]) => orig(redact(format(...args)));
+}
+axios.interceptors.response.use(undefined, (err) => {
+  try { maskPolyHeaders(err?.config?.headers); maskPolyHeaders(err?.response?.config?.headers); } catch { /* jamais bloquant */ }
+  return Promise.reject(err);
+});
+
+/** Clé privée nettoyée si elle a la bonne forme et est utilisable, sinon undefined. */
+function validPrivateKey(k: string | undefined): string | undefined {
+  const t = k?.trim();
+  if (!t || !/^(0x)?[0-9a-fA-F]{64}$/.test(t)) return undefined;
+  try { new ethers.Wallet(t); return t; } catch { return undefined; } // ex. clé nulle
+}
+/** Clé du wallet pour le mode RÉEL uniquement (en papier, la vraie clé ne sert jamais). */
+function liveWalletKey(): string | undefined {
+  return DRY_RUN ? undefined : validPrivateKey(process.env.POLYMARKET_PRIVATE_KEY);
+}
 /** Le process a-t-il été DÉMARRÉ en live ? Le dashboard ne peut jamais passer en LIVE sinon. */
 const STARTED_LIVE = !DRY_RUN;
 /**
@@ -262,8 +290,12 @@ function log(level: LogLevel, message: string, data?: unknown) {
   console.log(`[${timestamp}] ${icons[level] || '•'} ${message}`);
   if (data) console.log(JSON.stringify(data, null, 2));
 
-  // Dashboard output (WebSocket)
-  dashboardEmitter.log(level, message, data);
+  // Dashboard output (WebSocket) — la console est déjà masquée, pas ce canal.
+  let safeData = data;
+  if (data !== undefined) {
+    try { safeData = JSON.parse(redact(JSON.stringify(data))); } catch { /* non sérialisable : tel quel */ }
+  }
+  dashboardEmitter.log(level, redact(message), safeData);
 }
 
 function updateDashboard() {
@@ -424,6 +456,10 @@ function logLearning(e: { roundId?: string; market?: string; side: string; price
 function polyDir(): string {
   return (process.env.HOME || '/root') + '/.polymarket';
 }
+
+/** Suivi des arrêts anormaux entre lancements (espacement des alertes de plantage). */
+const runStatePath = () => polyDir() + '/run-state.json';
+let crashStart: StartReport | null = null;
 
 /**
  * history.json : [] s'il est absent, null s'il existe mais est illisible/tronqué.
@@ -639,7 +675,7 @@ async function setupArbitrage(_sdk: PolymarketSDK) {
 
   // Create standalone ArbitrageService (not using SDK wrapper)
   arbService = new ArbitrageService({
-    privateKey: CONFIG.dryRun ? undefined : process.env.POLYMARKET_PRIVATE_KEY,
+    privateKey: CONFIG.dryRun ? undefined : liveWalletKey(),
     profitThreshold: CONFIG.arbitrage.profitThreshold,
     minTradeSize: CONFIG.arbitrage.minTradeSize,
     maxTradeSize: CONFIG.arbitrage.maxTradeSize,
@@ -1049,18 +1085,21 @@ async function setupSwap() {
   log('SWAP', 'Setting up Wallet & Balance Monitor...');
 
   try {
-    // Papier SANS clé : soldes simulés (capital + PnL réalisé), aucun wallet nécessaire.
-    // Avant : retour immédiat → le dashboard affichait 0 $ partout en papier.
-    if (CONFIG.dryRun && !process.env.POLYMARKET_PRIVATE_KEY) {
+    // Papier : soldes simulés (capital + PnL réalisé), aucun wallet créé, clé présente ou
+    // non (updateBalances() ne lit jamais le wallet en papier). Avant : la clé BRUTE de
+    // l'environnement était passée à ethers, qui la recopie dans son erreur si elle est
+    // mal saisie → clé quasi complète dans les logs et sur le dashboard.
+    if (CONFIG.dryRun) {
       await updateBalances();
       setInterval(updateBalances, 30000);
       return;
     }
-    if (!process.env.POLYMARKET_PRIVATE_KEY) return;
+    const key = liveWalletKey();
+    if (!key) return;
 
     // Create SwapService with signer
     const provider = new ethers.providers.JsonRpcProvider(process.env.POLYGON_RPC_URL || 'https://polygon.drpc.org');
-    const signer = new ethers.Wallet(process.env.POLYMARKET_PRIVATE_KEY, provider);
+    const signer = new ethers.Wallet(key, provider);
     swapService = new SwapService(signer);
 
     // Initial fetch
@@ -1091,10 +1130,11 @@ async function setupOnchain() {
   log('CHAIN', 'Checking on-chain approvals...');
 
   try {
-    if (!process.env.POLYMARKET_PRIVATE_KEY) return;
+    const key = liveWalletKey();
+    if (!key) return;
 
     const onchain = new OnchainService({
-      privateKey: process.env.POLYMARKET_PRIVATE_KEY,
+      privateKey: key,
       rpcUrl: process.env.POLYGON_RPC_URL || 'https://polygon.drpc.org',
     });
 
@@ -1164,11 +1204,18 @@ async function setupTelegram() {
 function activateTelegram(client: TelegramClient, detail: string) {
   telegram = client;
   log('INFO', `📨 Telegram ${detail}`);
-  notify(msgStartup({
-    capital: CONFIG.capital.totalUsd, minEdge: FV_CFG.minEdge, minProb: FV_CFG.minProb, feeRate: FV_CFG.takerFeeRate,
-    pollSec: FV_POLL_MS / 1000, coins: [...FV_COINS], stats: ledgerStats(), warning: capitalWarning() ?? undefined,
-    zScale: FV_CFG.zScale, blendModel: FV_CFG.blendModel, blendMarket: FV_CFG.blendMarket, live: !CONFIG.dryRun,
-  }));
+  // Boucle de plantage déjà signalée : pas de message de démarrage à chaque relance PM2.
+  if (crashStart && !crashStart.announce) {
+    log('WARN', `Message de démarrage Telegram non envoyé : ${crashStart.recentCrashes} arrêts anormaux dans l'heure, alertes espacées.`);
+  } else {
+    notify(msgStartup({
+      capital: CONFIG.capital.totalUsd, minEdge: FV_CFG.minEdge, minProb: FV_CFG.minProb, feeRate: FV_CFG.takerFeeRate,
+      pollSec: FV_POLL_MS / 1000, coins: [...FV_COINS], stats: ledgerStats(), warning: capitalWarning() ?? undefined,
+      zScale: FV_CFG.zScale, blendModel: FV_CFG.blendModel, blendMarket: FV_CFG.blendMarket, live: !CONFIG.dryRun,
+      restart: crashStart && (crashStart.brutal || crashStart.afterError)
+        ? { brutal: crashStart.brutal, recentCrashes: crashStart.recentCrashes } : undefined,
+    }));
+  }
 
   // Bilan périodique, seulement s'il s'est passé quelque chose depuis le précédent.
   const everyMin = Math.min(24 * 60, Math.max(15, Number(process.env.TELEGRAM_SUMMARY_MIN ?? '') || 60));
@@ -1614,7 +1661,6 @@ async function setupPortfolioManager(sdk: PolymarketSDK) {
 
 // === PROCESS : erreurs non gérées et arrêt propre ===
 let shuttingDown = false;
-/** Arrêt propre : coupe le flux spot, vide la file Telegram et le journal (≤ 5 s). */
 /**
  * Bilan de la session pour la page « Historique » du dashboard (avant : jamais enregistré,
  * page toujours vide). PnL = trades réglés PENDANT la session, pas le cumul du registre.
@@ -1636,6 +1682,7 @@ function recordSessionHistory(): void {
   }
 }
 
+/** Arrêt propre : coupe le flux spot, vide la file Telegram et le journal (≤ 5 s). */
 async function shutdown(reason: string, code: number): Promise<void> {
   if (shuttingDown) return;
   shuttingDown = true;
@@ -1646,7 +1693,18 @@ async function shutdown(reason: string, code: number): Promise<void> {
     try { await sdkRef?.dipArb.stop(); } catch { /* déjà arrêté */ }
     try { sdkRef?.stop(); } catch { /* déjà arrêté */ }
   })();
-  notify(code ? msgAlert(`bot arrêté sur erreur (${reason}) — PM2 va le relancer`) : `🛑 Bot arrêté (${reason})`);
+  // Avant le marqueur `running` posé (démarrage), rien à suivre ; ensuite, l'arrêt l'enlève.
+  const stop = crashStart ? noteStop(runStatePath(), code !== 0) : { alert: true, recentCrashes: 0, nextGapMs: 0 };
+  if (!code) {
+    notify(`🛑 Bot arrêté (${reason})`);
+  } else if (stop.alert) {
+    const loop = stop.recentCrashes > 1
+      ? ` · ${stop.recentCrashes} arrêts sur erreur dans la dernière heure : prochaine alerte au plus tôt dans ${Math.round(stop.nextGapMs / 60_000)} min`
+      : '';
+    notify(msgAlert(`bot arrêté sur erreur (${reason}) — PM2 va le relancer${loop}`));
+  } else {
+    log('WARN', `Alerte Telegram d'arrêt non envoyée (${stop.recentCrashes} arrêts sur erreur dans l'heure, déjà signalés).`);
+  }
   recordSessionHistory();
   await Promise.race([
     Promise.all([telegram?.flush(), decisionJournal?.flush(), stopServices]),
@@ -1687,23 +1745,26 @@ async function main() {
   const dashExposed = dashHost === '0.0.0.0' && !!process.env.DASHBOARD_TOKEN;
   console.log(`\n🌐 Dashboard: http://${dashExposed ? '<ip-du-serveur>' : dashHost === '0.0.0.0' ? '127.0.0.1' : dashHost}:${dashPort}\n`);
 
-  // En papier, une clé absente ou factice (placeholder de .env.example) ne doit pas
-  // empêcher le démarrage : clé éphémère sans fonds, et AUCUNE dérivation de clé API
-  // Polymarket (rien n'est signé ni enregistré chez eux). En réel, clé valide obligatoire.
-  const validKey = (k: string | undefined): k is string => {
-    if (!k || !/^(0x)?[0-9a-fA-F]{64}$/.test(k)) return false;
-    try { new ethers.Wallet(k); return true; } catch { return false; } // ex. clé nulle
-  };
-  let sdkPrivateKey = process.env.POLYMARKET_PRIVATE_KEY?.trim();
-  const ephemeralKey = !validKey(sdkPrivateKey);
-  if (ephemeralKey) {
-    if (!CONFIG.dryRun) {
-      log('ERROR', 'POLYMARKET_PRIVATE_KEY absente ou invalide (64 caractères hexadécimaux attendus)');
-      process.exit(1);
-    }
-    sdkPrivateKey = ethers.Wallet.createRandom().privateKey;
-    log('INFO', 'Mode papier : pas de clé de wallet valide — clé éphémère sans fonds, aucune clé API créée (DRY_RUN : aucun ordre).');
+  // En papier, le SDK reçoit TOUJOURS une clé éphémère sans fonds : la vraie clé ne signe
+  // rien (avant : activer DipArb, même depuis le dashboard, dérivait une clé API
+  // Polymarket par signature de la VRAIE clé). En réel, clé valide obligatoire.
+  const realKey = validPrivateKey(process.env.POLYMARKET_PRIVATE_KEY);
+  if (!realKey && !CONFIG.dryRun) {
+    log('ERROR', 'POLYMARKET_PRIVATE_KEY absente ou invalide (64 caractères hexadécimaux attendus)');
+    process.exit(1);
   }
+  const ephemeralKey = CONFIG.dryRun;
+  const sdkPrivateKey = ephemeralKey ? ethers.Wallet.createRandom().privateKey : realKey as string;
+  // Adresse publique de la vraie clé (calcul local, aucune signature) : affichée seulement.
+  const realAddress = realKey ? new ethers.Wallet(realKey).address : undefined;
+  if (ephemeralKey) {
+    log('INFO', realKey
+      ? `Mode papier : wallet ${realAddress} détecté mais sa clé n'est PAS utilisée (clé éphémère sans fonds pour le SDK, aucune signature, DRY_RUN : aucun ordre).`
+      : 'Mode papier : pas de clé de wallet valide — clé éphémère sans fonds, aucune clé API créée (DRY_RUN : aucun ordre).');
+  }
+  crashStart = noteStart(runStatePath());
+  if (crashStart.brutal) log('WARN', 'Le lancement précédent s\'est terminé brutalement sans passer par l\'arrêt (mémoire saturée, kill -9, coupure ?) — voir paperbot.error.log.');
+  if (crashStart.otherInstance) log('WARN', `Un autre bot semble tourner avec le même dossier ${polyDir()} : deux bots écriraient le même registre.`);
 
   // Send config to dashboard
   const dashboardConfig: BotConfig = {
@@ -1765,7 +1826,7 @@ async function main() {
   try {
     if (!needWs) {
       log('INFO', 'Papier : WebSocket Polymarket non connecté (inutile sans DipArb / SmartMoney).');
-    } else if (ephemeralKey || CONFIG.dryRun) {
+    } else if (ephemeralKey) {
       sdk.connect(); // WebSocket public seulement : pas de dérivation de clé API en papier
       await sdk.waitForConnection(15_000);
     } else {
@@ -1780,10 +1841,11 @@ async function main() {
       + 'sans effet sur la stratégie papier, on continue (le WebSocket se reconnecte seul).');
   }
 
-  log('INFO', `Wallet: ${sdk.tradingService.getAddress()}${ephemeralKey ? ' (éphémère, sans fonds)' : ''}`);
-  if (!ephemeralKey) {
+  log('INFO', `Wallet${ephemeralKey ? ' du SDK' : ''} : ${sdk.tradingService.getAddress()}${ephemeralKey ? ' (éphémère, sans fonds)' : ''}`);
+  // Dashboard : adresse du vrai wallet (en papier : affichage seul, sa clé ne sert pas).
+  if (realAddress) {
     const cfgNow = dashboardEmitter.getConfig();
-    if (cfgNow) dashboardEmitter.updateConfig({ ...cfgNow, walletAddress: sdk.tradingService.getAddress() });
+    if (cfgNow) dashboardEmitter.updateConfig({ ...cfgNow, walletAddress: realAddress });
   }
 
   // Handle Dashboard Commands (enregistré APRÈS la création du SDK : avant, une bascule
@@ -2073,7 +2135,7 @@ async function main() {
       try {
         // Create CTFClient instance for on-chain redemption
         const ctfClient = new CTFClient({
-          privateKey: process.env.POLYMARKET_PRIVATE_KEY!,
+          privateKey: liveWalletKey()!,
         });
 
         // 1. Fetch market details to get Token IDs (required for Polymarket CLOB redemption)

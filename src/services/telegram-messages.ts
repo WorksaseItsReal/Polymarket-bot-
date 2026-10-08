@@ -99,6 +99,15 @@ export interface StartupInfo {
   zScale?: number;
   blendModel?: number;
   blendMarket?: number;
+  /** Relance après un arrêt anormal (sur erreur, ou brutal : kill -9, mémoire saturée). */
+  restart?: { brutal: boolean; recentCrashes: number };
+}
+
+function restartLine(r: NonNullable<StartupInfo['restart']>): string {
+  const n = r.recentCrashes > 1 ? ` — ${r.recentCrashes} arrêts anormaux dans la dernière heure` : '';
+  return r.brutal
+    ? `↻ Relancé après un arrêt brutal non journalisé (mémoire saturée, kill -9 ou coupure ?)${n}`
+    : `↻ Relancé après un arrêt sur erreur${n}`;
 }
 
 function tuningLine(i: StartupInfo): string | null {
@@ -116,6 +125,7 @@ export function msgStartup(i: StartupInfo): string {
     i.live
       ? '🤖 <b>Bot Polymarket démarré</b> — ⚠️ mode RÉEL (DRY_RUN=false) : la stratégie juste valeur n\'envoie aucun ordre, mais les autres stratégies activées le peuvent'
       : '🤖 <b>Bot Polymarket démarré</b> — mode PAPIER (aucun ordre réel)',
+    ...(i.restart ? [restartLine(i.restart)] : []),
     `Marchés : « Up or Down » 5 min · ${escapeHtml(i.coins.join(', '))}`,
     `Règle : pari seulement si la probabilité calculée ≥ ${pct(i.minProb)} ET dépasse le prix payé (frais inclus) d'au moins ${(i.minEdge * 100).toFixed(0)} pts`,
     `Capital papier : ${amount(i.capital)} · vérification toutes les ${i.pollSec} s`,

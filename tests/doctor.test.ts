@@ -33,6 +33,12 @@ test('fichiers : registre illisible et arrêt de sécurité actif = erreurs', ()
   mkdirSync(join(poly, 'journal'));
   writeFileSync(join(poly, 'journal', 'decisions-2026-10-07.jsonl'), 'x'.repeat(2000));
   assert.match(fileChecks(poly, poly).find(c => c.label === 'Journal des décisions')!.detail, /1 fichier/);
+  assert.equal(fileChecks(poly, poly).find(c => c.label === 'Plantages')!.level, 'ok');
+  const now = 1_790_000_000_000;
+  writeFileSync(join(poly, 'run-state.json'), JSON.stringify({ crashes: [now - 25 * 3_600_000, now - 3 * 3_600_000, now - 12 * 60_000], lastAlertAt: 0, alertGapMs: 0 }));
+  const crash = fileChecks(poly, poly, now).find(c => c.label === 'Plantages')!;
+  assert.equal(crash.level, 'warn');
+  assert.match(crash.detail, /^2 arrêt\(s\) anormal\(aux\) en 24 h, dernier il y a 12 min/);
 });
 
 test('réseau : Gamma + carnet OK, Binance bloqué (451) avec repli, horloge décalée détectée', async () => {

@@ -107,7 +107,8 @@ défini dans [`ecosystem.config.cjs`](ecosystem.config.cjs) :
 | `script` | `bot-with-dashboard.ts` |
 | `cwd` | `/root/clawd/Polymarket-bot` |
 | `interpreter` | `node_modules/.bin/tsx` (exécution TypeScript directe, sans build) |
-| `autorestart` | `true`, `max_restarts: 20`, `restart_delay: 5000` |
+| `autorestart` | `true`, `exp_backoff_restart_delay: 100` (relance après 0,1 s, puis ×1,5 à chaque plantage, plafond 15 s ; remis à zéro après 30 s sans plantage) |
+| `kill_timeout` | `7000` (le bot a jusqu'à 5 s pour vider le journal et Telegram avant d'être tué) |
 | `out_file` / `error_file` | `paperbot.log` / `paperbot.error.log` |
 
 Commandes utiles (lecture seule) :
@@ -149,7 +150,7 @@ Variables (nom → rôle) :
 
 | Variable | Rôle |
 |---|---|
-| `POLYMARKET_PRIVATE_KEY` | Clé du wallet Polymarket (Polygon). **Facultative en DRY_RUN** (absente ou factice → clé éphémère sans fonds, lecture seule) ; obligatoire et valide en réel. Valeur : `[REDACTED]`. |
+| `POLYMARKET_PRIVATE_KEY` | Clé du wallet Polymarket (Polygon). **Inutile en DRY_RUN** : même valide, elle ne signe rien (le SDK reçoit une clé éphémère sans fonds ; seule l'adresse du wallet est affichée) ; obligatoire et valide en réel. Sa valeur (et celle des jetons Telegram/dashboard et de la clé d'API d'une URL RPC) est masquée dans tous les logs, console et dashboard. Valeur : `[REDACTED]`. |
 | `POLYGON_RPC_URL` | Endpoint RPC Polygon. Valeur : `[REDACTED]`. |
 | `OPENCODE_GO_API_KEY` | Clé du provider LLM (opencode-go/zen). Valeur : `[REDACTED]`. |
 
@@ -212,6 +213,7 @@ Tout vit dans **`~/.polymarket/`** (`/root/.polymarket/`) :
 | `session-history.json` | Bilan de chaque session (page « History » du dashboard), écrit à l'arrêt. | Affichage |
 | `fv-shadow.json` | Agrégats « modèle vs carnet » (bilan Telegram). | Mesure continue |
 | `fv-guard.json` | Présent = **arrêt de sécurité actif** (perte significative). Le supprimer pour reprendre. | Garde-fou |
+| `run-state.json` | Arrêts anormaux récents (sur erreur ou brutaux) pour espacer les alertes Telegram en cas de plantage en boucle. Peut être supprimé sans risque. | Suivi |
 | `outcomes-cache.json` | Résultats des rounds déjà réglés (cache du rapport). | Cache |
 | `history.json` | Fenêtre glissante des décisions/mises récentes (avec `roundId`, `side`, `price`, `realized`, `stake`…). Les HOLD ne sont **plus** écrits. | **Fenêtre** (300 max), pas un historique complet |
 | `cumulative.json` | Registre PnL des scripts externes Hermes (ancienne chaîne). Contient `pnl`, `resolved` (par clé), `total_trades`, `wins`, `losses`, `audit_ledger`. | **Autorité** |

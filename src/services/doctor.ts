@@ -13,6 +13,7 @@ import { fairValueConfigFromEnv, DEFAULT_FAIR_VALUE_CONFIG } from './fair-value.
 import { looksLikeBotToken, telegramConfigFromEnv } from './telegram.js';
 import { computeStats, readLedgerShared } from './paper-ledger.js';
 import { parseRoundTokens, roundSlug, slotStart } from './round-discovery.js';
+import { crashSummary } from './crash-guard.js';
 
 export type Level = 'ok' | 'warn' | 'error';
 export interface Check {
@@ -130,7 +131,7 @@ function botSettingsCheck(env: Env, minEdge: number): Check {
   return notes.length ? warn('Réglages du bot', notes.join(' ; ')) : ok('Réglages du bot', 'valeurs reconnues');
 }
 
-export function fileChecks(polyDir: string, repoDir: string): Check[] {
+export function fileChecks(polyDir: string, repoDir: string, nowMs = Date.now()): Check[] {
   const out: Check[] = [];
   const ledgerPath = join(polyDir, 'fv-ledger.json');
   const trades = readLedgerShared(ledgerPath);
@@ -143,6 +144,10 @@ export function fileChecks(polyDir: string, repoDir: string): Check[] {
   out.push(existsSync(guard)
     ? err('Arrêt de sécurité', `${guard} présent : nouvelles entrées BLOQUÉES (perte significative constatée). Analyser, puis supprimer ce fichier et redémarrer.`)
     : ok('Arrêt de sécurité', 'aucun'));
+  const crashes = crashSummary(join(polyDir, 'run-state.json'), nowMs);
+  out.push(crashes.last24h
+    ? warn('Plantages', `${crashes.last24h} arrêt(s) anormal(aux) en 24 h, dernier il y a ${Math.round((nowMs - (crashes.lastAt as number)) / 60_000)} min : voir paperbot.error.log`)
+    : ok('Plantages', 'aucun arrêt anormal en 24 h'));
   out.push(existsSync(join(repoDir, 'dashboard', 'dist', 'index.html'))
     ? ok('Interface du dashboard', 'construite')
     : warn('Interface du dashboard', 'non construite : (cd dashboard && npm install && npm run build)'));
