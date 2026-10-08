@@ -87,8 +87,10 @@ globalThis.fetch = (async (input: string | URL | Request) => {
     const history = [0, 60, 120, 180, 240].map(k => {
       const t = slot + k;
       const tau = slot + 300 - t;
-      const lagged = price(coin, (t - 60) / 60 - 1); // spot d'une minute avant
-      const p = normCdf(Math.log(lagged / strike) / (sigS * Math.sqrt(tau + 60)));
+      // FAKE_MARKET_LAG_MIN=0 : marché JUSTE (contrôle négatif) ; défaut 1 : spot d'une minute avant
+      const lagMin = Number(process.env.FAKE_MARKET_LAG_MIN ?? '1');
+      const lagged = price(coin, (t - 60 * lagMin) / 60 - 1);
+      const p = normCdf(Math.log(lagged / strike) / (sigS * Math.sqrt(tau + 60 * lagMin)));
       return { t, p: Math.round(p * 1000) / 1000 };
     });
     return json({ history });

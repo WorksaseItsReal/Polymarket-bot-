@@ -145,3 +145,72 @@ test('analyse : statistiques de carnet par coin (écart, miroir, profondeur) ; a
   assert.equal(btc.mirrorShare, 0.5, 'bid 0,50 = 1 − ask Down 0,50 ; bid 0,48 non');
   assert.equal(btc.medianAskSize, 20);
 });
+
+/** Monde simulé à carnet JUSTE ; le modèle a une volatilité fausse (× volFactor). */
+function negativeControlReport(volFactor: number, seed: number): string {
+  const home = mkdtempSync(join(tmpdir(), 'report-neg-'));
+  const poly = join(home, '.polymarket');
+  mkdirSync(join(poly, 'journal'), { recursive: true });
+  let a = seed;
+  const rnd = () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+  const gauss = () => Math.sqrt(-2 * Math.log(rnd() + 1e-12)) * Math.cos(2 * Math.PI * rnd());
+  const sig = 0.0006 / Math.sqrt(60);
+  const lines: string[] = [];
+  const cache: Record<string, boolean> = {};
+  const now = Date.now();
+  const coins = ['btc', 'eth', 'sol', 'xrp', 'doge'];
+  for (let k = 0; k < 150; k++) {
+    const slot = Math.floor(now / 1000 / 300) * 300 - 3600 * 24 + k * 300;
+    // les 5 cryptos d'un créneau sont corrélées (facteur commun), comme en vrai
+    const common: number[] = [0];
+    for (let t = 1; t <= 300; t++) common.push(gauss());
+    for (const coin of coins) {
+      const slug = `${coin}-updown-5m-${slot}`;
+      const path = [100];
+      for (let t = 1; t <= 300; t++) path.push(path[t - 1] * Math.exp(sig * (0.8 * common[t] + 0.6 * gauss())));
+      cache[slug] = path[300] >= 100;
+      for (let t = 40; t <= 250; t += 10) {
+        const tau = 300 - t;
+        const pMkt = normCdf(Math.log(path[t] / 100) / (sig * Math.sqrt(tau)));
+        const pUp = normCdf(Math.log(path[t] / 100) / (volFactor * sig * Math.sqrt(tau + DEFAULT_FAIR_VALUE_CONFIG.strikeNoiseSec)));
+        const tick = (x: number) => Math.min(0.99, Math.max(0.01, Math.ceil(x * 100) / 100));
+        lines.push(JSON.stringify(rec({ t: (slot + t) * 1000, slug, coin: coin.toUpperCase(), tau, spot: path[t], sig, pUp, upAsk: tick(pMkt + 0.005), downAsk: tick(1 - pMkt + 0.005) })));
+      }
+    }
+  }
+  writeFileSync(join(poly, 'journal', journalFileName(now)), lines.join('\n') + '\n');
+  writeFileSync(join(poly, 'outcomes-cache.json'), JSON.stringify(cache));
+  const out = execFileSync('npx', ['tsx', 'scripts/analysis/fv-report.ts', '--days', '3'], {
+    env: { ...process.env, HOME: home }, encoding: 'utf8', timeout: 120_000,
+  });
+  if (process.env.SHOW_REPORT) console.log(out);
+  return out;
+}
+
+test('contrôle négatif : carnet JUSTE, modèle SOUS-confiant → jamais d\'edge annoncé', () => {
+  const out = negativeControlReport(1.4, 2024);
+  assert.match(out, /750 rounds réglés/);
+  assert.doesNotMatch(out, /le modèle bat SIGNIFICATIVEMENT le carnet/);
+  assert.doesNotMatch(out, /essayer FV_BLEND_MODEL/, 'aucun mélange « validé » quand le carnet sait tout');
+});
+
+test('contrôle négatif : carnet JUSTE, modèle SUR-confiant (voit de l\'edge partout) → le rejeu montre la perte', () => {
+  const out = negativeControlReport(0.6, 7);
+  assert.doesNotMatch(out, /le modèle bat SIGNIFICATIVEMENT le carnet/);
+  assert.doesNotMatch(out, /essayer FV_BLEND_MODEL/);
+  // Ligne du réglage actuel dans la grille : EV/$ ≤ 0 ou t < 2 (jamais un gain « significatif »).
+  const row = out.split('\n').find(l => /← réglage actuel/.test(l));
+  assert.ok(row, 'le réglage actuel parie (le modèle sur-confiant voit des edges)');
+  const m = /(-?\d+\.\d{4})\s+(-?\d+\.\d)\s+\|/.exec(row!);
+  assert.ok(m, row);
+  const ev = Number(m![1]);
+  const t = Number(m![2]);
+  assert.ok(!(ev > 0 && t >= 2), `gain « significatif » dans un monde sans edge : ${row}`);
+  assert.ok(ev < 0, `perte attendue (spread + frais contre un carnet juste) : ${row}`);
+});

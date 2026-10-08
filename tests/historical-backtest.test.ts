@@ -178,3 +178,15 @@ test('prix marché en retard d\'une minute : le modèle n\'est PAS déclaré mei
   const c = compareBrier(points);
   assert.ok(c.tDiff === null || c.tDiff > -2, `marché parfait déclaré battu : t = ${c.tDiff}`);
 });
+
+test('contrôle négatif de bout en bout : marché JUSTE → jamais « significativement meilleur »', () => {
+  const home = mkdtempSync(join(tmpdir(), 'hist-neg-'));
+  const out = execFileSync(process.execPath, [
+    '--import', 'tsx', '--import', './tests/fixtures/fake-market-net.ts',
+    'scripts/analysis/historical-backtest.ts', '--days', '1', '--coins', 'BTC,ETH',
+  ], { env: { ...process.env, HOME: home, FAKE_MARKET_LAG_MIN: '0' }, encoding: 'utf8', timeout: 180_000, stdio: ['ignore', 'pipe', 'pipe'] });
+  assert.match(out, /Backtest historique : \d+ rounds/);
+  assert.doesNotMatch(out, /SIGNIFICATIVEMENT meilleur que le marché/);
+  assert.doesNotMatch(out, /essayer FV_BLEND_MODEL/);
+  if (process.env.SHOW_REPORT) console.log(out);
+});
