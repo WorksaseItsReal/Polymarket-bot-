@@ -99,6 +99,10 @@ async function resolveAll(slugs: string[]): Promise<Map<string, boolean>> {
 
 async function main() {
   const records = readJournal();
+  if (records.length > 600_000) {
+    console.error(`(journal volumineux : ${records.length} évaluations — en cas de manque de mémoire, réduire --days`
+      + ' ou lancer avec NODE_OPTIONS=--max-old-space-size=2048)');
+  }
   const outcomes = await resolveAll([...new Set(records.map(r => r.slug))]);
   // Issue ajoutée EN PLACE (objets fraîchement lus, propres à ce script) : pas de copie.
   const resolved: ResolvedRecord[] = [];

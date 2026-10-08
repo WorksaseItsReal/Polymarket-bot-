@@ -1364,12 +1364,13 @@ async function setupFairValueStrategy(sdk: PolymarketSDK) {
   const tick = (coins?: readonly string[]) => (CONFIG.dryRun && state.paper ? runner.tick(coins) : Promise.resolve(true));
   await tick();
   // Passage régulier refusé parce qu'un passage « saut du spot » tient le verrou : nouvel
-  // essai toutes les 0,5 s (au plus 8), sinon tout le passage de 10 s était perdu — pour
-  // les paris comme pour la mesure — précisément quand le marché bouge.
+  // essai toutes les 0,5 s pendant au plus 1,5 s, sinon tout le passage de 10 s était perdu —
+  // pour les paris comme pour la mesure — précisément quand le marché bouge. (Au-delà, le
+  // passage suivant tomberait à moins de 8 s et serait écarté du journal.)
   const regularTick = async () => {
-    for (let attempt = 0; attempt < 8; attempt++) {
+    for (let attempt = 0; attempt < 4; attempt++) {
       if (await tick()) return;
-      await new Promise(r => setTimeout(r, 500));
+      if (attempt < 3) await new Promise(r => setTimeout(r, 500));
     }
   };
   setInterval(() => { void regularTick(); }, FV_POLL_MS);

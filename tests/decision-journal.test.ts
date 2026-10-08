@@ -296,3 +296,17 @@ test('rapport : les évaluations « saut du spot » (mv) sont exclues des mesure
   const calib = out.split('2) Calibration')[1].split('2b)')[0];
   assert.doesNotMatch(calib, /0\.9-1\.0/, 'aucune évaluation mv (p = 0,95) dans la calibration');
 });
+
+test('journal : archive numérotée identique déjà présente → pas de nouvelle copie', async () => {
+  const { gzipSync } = await import('node:zlib');
+  const dir = mkdtempSync(join(tmpdir(), 'journal-'));
+  const day = 'decisions-2026-10-03.jsonl';
+  writeFileSync(join(dir, day), '{"a":1}\n');
+  writeFileSync(join(dir, day + '.gz'), gzipSync('{"autre":1}\n'));
+  writeFileSync(join(dir, 'decisions-2026-10-03.1.jsonl.gz'), gzipSync('{"a":1}\n')); // arrêt avant unlink
+  const j = new DecisionJournal({ dir });
+  j.record(rec({}));
+  await j.flush();
+  assert.equal(existsSync(join(dir, day)), false);
+  assert.equal(existsSync(join(dir, 'decisions-2026-10-03.2.jsonl.gz')), false, 'pas de 3e archive');
+});

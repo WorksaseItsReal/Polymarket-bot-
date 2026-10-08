@@ -87,6 +87,8 @@ function migrateLegacyHistory(): void {
     if (!existsSync(historyFile()) && existsSync(legacyHistoryFile)) {
       mkdirSync(dataDir(), { recursive: true });
       copyFileSync(legacyHistoryFile, historyFile());
+      // marqué comme repris : jamais recopié (ex. après une remise à zéro volontaire)
+      renameSync(legacyHistoryFile, `${legacyHistoryFile}.migre`);
       console.log(`[SessionHistory] historique repris depuis ${legacyHistoryFile}`);
     }
   } catch { /* best effort : l'historique n'est qu'un affichage */ }

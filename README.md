@@ -48,9 +48,9 @@ Sur le serveur, dans le dossier du bot :
 git fetch origin && git checkout feat/fair-value-strategy && git pull
 npm install
 npm run check                              # types + tests (sans réseau) : doit finir sans échec
+(cd dashboard && npm install && npm run build)   # interface web du dashboard (à refaire après chaque mise à jour)
 npm run doctor                             # diagnostic : capital, .env, registre, réseau, horloge, Telegram (❌ = à corriger)
 # (facultatif) npm run demo → le vrai bot sur un marché SIMULÉ, hors ligne, dashboard sur :3002 (résultats fictifs)
-(cd dashboard && npm install && npm run build)   # interface web du dashboard (à refaire après chaque mise à jour)
 # .env : partir de .env.example (FV_*, TELEGRAM_*, DASHBOARD_*), garder DRY_RUN=true
 npx tsx scripts/telegram/check.ts          # doit afficher « ✅ … Message de test envoyé »
 pm2 delete polymarket-paperbot; pm2 start ecosystem.config.cjs && pm2 logs polymarket-paperbot --lines 50

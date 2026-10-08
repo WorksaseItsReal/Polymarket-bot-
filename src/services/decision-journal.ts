@@ -108,8 +108,11 @@ export class DecisionJournal {
     // passage à 9,98 s du précédent (gigue réseau) ou une évaluation mv intercalée faisait
     // perdre ~1 passage régulier sur 3, surtout juste après un saut. (Des tranches fixes
     // perdent aussi : 30 s et 39,97 s tombent dans la même.)
+    // Évaluations « saut du spot » : au plus une toutes les 3 intervalles (30 s) — utiles
+    // pour rejouer les paris, mais sans doubler la taille du journal (et la mémoire du rapport).
     const key = r.mv ? `${r.slug}|mv` : r.slug;
-    if (r.act !== 'buy' && r.t - (this.last.get(key) ?? -Infinity) < 0.8 * this.minIntervalMs) return false;
+    const gap = r.mv ? 3 * this.minIntervalMs : 0.8 * this.minIntervalMs;
+    if (r.act !== 'buy' && r.t - (this.last.get(key) ?? -Infinity) < gap) return false;
     this.last.set(key, r.t);
     if (this.last.size > 500) {
       // rounds terminés depuis plus de 15 min : oubliés
@@ -157,7 +160,8 @@ export class DecisionJournal {
   private async cleanup(todayMs: number): Promise<void> {
     if (!Number.isFinite(todayMs)) return;
     try {
-      for (const f of await readdir(this.dir)) {
+      const files = await readdir(this.dir);
+      for (const f of files) {
         // Reste d'une compression interrompue (arrêt brutal) : jamais relu, supprimé.
         if (/^decisions-.*\.jsonl\.gz\.tmp$/.test(f)) {
           await unlink(join(this.dir, f)).catch(() => undefined);
@@ -179,12 +183,16 @@ export class DecisionJournal {
           // l'archive existe déjà avec ce contenu → supprimer l'original, ne PAS recréer une
           // 2e archive identique (le rapport lirait chaque ligne deux fois).
           const gz = `${src}.gz`;
-          if (existsSync(gz)) {
-            const prev = await readFile(gz).then(b => gunzipAsync(b)).catch(() => null);
-            if (prev && prev.equals(content)) {
-              await unlink(src);
-              continue;
-            }
+          // toutes les archives de ce jour (`D.jsonl.gz`, `D.1.jsonl.gz`…), pas seulement la 1re
+          const sameDay = files.filter(x => x.startsWith(`decisions-${m[1]}`) && x.endsWith('.jsonl.gz'));
+          let duplicate = false;
+          for (const a of sameDay) {
+            const prev = await readFile(join(this.dir, a)).then(b => gunzipAsync(b)).catch(() => null);
+            if (prev && prev.equals(content)) { duplicate = true; break; }
+          }
+          if (duplicate) {
+            await unlink(src);
+            continue;
           }
           let dst = gz;
           for (let k = 1; existsSync(dst); k++) dst = join(this.dir, `decisions-${m[1]}.${k}.jsonl.gz`);

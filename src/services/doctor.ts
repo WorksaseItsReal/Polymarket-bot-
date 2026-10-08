@@ -182,9 +182,14 @@ export async function networkChecks(
     const local = (binance.sentAt + binance.receivedAt) / 2;
     const slack = (binance.receivedAt - binance.sentAt) / 2 + 500;
     const skew = Math.abs(server - local) <= slack ? 0 : server - local - Math.sign(server - local) * slack;
+    const central = server - local; // estimation centrale (le bot alerte au-delà de 2 s)
+    if (Math.abs(skew) <= 3000 && Math.abs(central) > 2000) {
+      out.push(warn('Horloge', `décalage probable d'environ ${(central / 1000).toFixed(1)} s (incertitude ±${(slack / 1000).toFixed(1)} s) : vérifier NTP (timedatectl)`));
+      return out;
+    }
     out.push(Math.abs(skew) > 3000
       ? err('Horloge', `décalée d'environ ${(skew / 1000).toFixed(0)} s : le temps restant des rounds est faux → activer NTP (timedatectl set-ntp true)`)
-      : ok('Horloge', 'à l\'heure (±1 s)'));
+      : ok('Horloge', `à l'heure (écart estimé ${(central / 1000).toFixed(1)} s, incertitude ±${(slack / 1000).toFixed(1)} s)`));
   }
   return out;
 }
