@@ -106,7 +106,7 @@ défini dans [`ecosystem.config.cjs`](ecosystem.config.cjs) :
 | `name` | `polymarket-paperbot` |
 | `script` | `bot-with-dashboard.ts` |
 | `cwd` | `/root/clawd/Polymarket-bot` |
-| `interpreter` | `node_modules/.bin/tsx` (exécution TypeScript directe, sans build) |
+| `interpreter` | `node --import tsx` (TypeScript exécuté directement, sans build, dans un seul process : un arrêt PM2 laisse au bot le temps de s'arrêter proprement) |
 | `autorestart` | `true`, `exp_backoff_restart_delay: 100` (relance après 0,1 s, puis ×1,5 à chaque plantage, plafond 15 s ; remis à zéro après 30 s sans plantage) |
 | `kill_timeout` | `7000` (le bot a jusqu'à 5 s pour vider le journal et Telegram avant d'être tué) |
 | `out_file` / `error_file` | `paperbot.log` / `paperbot.error.log` |

@@ -27,8 +27,8 @@ interface CrashState {
   crashes: number[];
   lastAlertAt: number;
   alertGapMs: number;
-  /** Dernier arrêt passé par le gestionnaire d'arrêt. */
-  lastStop?: { at: number; abnormal: boolean };
+  /** Dernier arrêt passé par le gestionnaire d'arrêt (`silenced` : son alerte a été tue). */
+  lastStop?: { at: number; abnormal: boolean; silenced?: boolean };
 }
 
 export interface StartReport {
@@ -61,7 +61,8 @@ function load(file: string): CrashState {
         crashes: Array.isArray(s?.crashes) ? s.crashes.filter((t: unknown) => Number.isFinite(t)) : [],
         lastAlertAt: Number.isFinite(s?.lastAlertAt) ? s.lastAlertAt : 0,
         alertGapMs: Number.isFinite(s?.alertGapMs) ? s.alertGapMs : 0,
-        lastStop: s?.lastStop && Number.isFinite(s.lastStop.at) ? { at: s.lastStop.at, abnormal: s.lastStop.abnormal === true } : undefined,
+        lastStop: s?.lastStop && Number.isFinite(s.lastStop.at)
+          ? { at: s.lastStop.at, abnormal: s.lastStop.abnormal === true, silenced: s.lastStop.silenced === true } : undefined,
       };
     }
   } catch { /* fichier illisible : on repart de zéro, ce n'est qu'un suivi d'alertes */ }
@@ -78,27 +79,34 @@ function save(file: string, s: CrashState): void {
 }
 
 /**
- * Le PID est-il un bot en cours ? Sous Linux, on lit sa ligne de commande : après un
- * redémarrage de la machine, un process sans rapport peut avoir repris le PID de l'ancien
- * bot (sinon : « autre instance » à tort, et plus aucun arrêt brutal détecté). Ailleurs :
- * simple test d'existence.
+ * Le PID est-il un bot en cours ? Sous Linux, on lit sa ligne de commande et son
+ * environnement : après un redémarrage de la machine, un process sans rapport peut avoir
+ * repris le PID de l'ancien bot (sinon : « autre instance » à tort, et plus aucun arrêt
+ * brutal détecté). Sous PM2 (`node --import tsx`), la ligne de commande est celle du
+ * lanceur de PM2 : le script est dans la variable `pm_exec_path`. Ailleurs : existence.
  */
 export function isBotProcess(pid: number): boolean {
   try {
-    return readFileSync(`/proc/${pid}/cmdline`, 'utf8').includes('bot-with-dashboard');
+    if (readFileSync(`/proc/${pid}/cmdline`, 'utf8').includes('bot-with-dashboard')) return true;
+    try { return /(^|\0)pm_exec_path=[^\0]*bot-with-dashboard/.test(readFileSync(`/proc/${pid}/environ`, 'utf8')); } catch { return false; }
   } catch {
     if (existsSync('/proc/self')) return false; // Linux : pas de /proc/<pid> = process mort
   }
   try { process.kill(pid, 0); return true; } catch (err) { return (err as NodeJS.ErrnoException)?.code === 'EPERM'; }
 }
 
-/** Enregistre un arrêt anormal et décide s'il faut le signaler (espacement exponentiel). */
-function registerCrash(s: CrashState, now: number): boolean {
+/**
+ * Enregistre un arrêt anormal et décide s'il faut le signaler (espacement exponentiel).
+ * `canNotify` faux (Telegram pas encore connecté) : l'arrêt est compté mais PAS considéré
+ * comme signalé — sinon un incident pouvait passer entièrement sous silence.
+ */
+function registerCrash(s: CrashState, now: number, canNotify = true): boolean {
   s.crashes = s.crashes.filter(t => now - t < 24 * HOUR && t <= now);
   // Aucun arrêt dans l'heure précédente : situation stable, l'espacement repart de zéro.
   if (!s.crashes.some(t => now - t < HOUR)) s.alertGapMs = 0;
   s.crashes.push(now);
   if (s.crashes.length > 500) s.crashes.splice(0, s.crashes.length - 500);
+  if (!canNotify) return false;
   const alert = now - s.lastAlertAt >= s.alertGapMs;
   if (alert) {
     s.lastAlertAt = now;
@@ -114,14 +122,18 @@ export function noteStart(file: string, now = Date.now(), pid = process.pid, isR
   const s = load(file);
   let brutal = false;
   let otherInstance = false;
-  if (s.running && s.running.pid !== pid) {
-    if (isRunning(s.running.pid)) otherInstance = true;
+  if (s.running) {
+    // noteStart n'est appelé qu'une fois par process : un marqueur à NOTRE pid vient d'un
+    // process mort qui avait le même (PID réattribués à l'identique après un redémarrage
+    // de conteneur, ou reboot + resurrect).
+    if (s.running.pid !== pid && isRunning(s.running.pid)) otherInstance = true;
     else brutal = true;
   }
-  if (brutal) registerCrash(s, now);
-  const last = s.crashes.length ? Math.max(...s.crashes) : 0;
-  // Démarrage annoncé sauf si l'arrêt qui le précède (moins d'une heure) a été tu.
-  const announce = !last || now - last >= HOUR || s.lastAlertAt >= last;
+  // Démarrage annoncé sauf si l'arrêt qui le précède a été tu (boucle de plantage déjà
+  // signalée). Un arrêt brutal n'a pu être signalé que par ce message : il suit l'espacement.
+  // (Avant : décidé sur le dernier PLANTAGE de l'heure → un `pm2 restart` volontaire après
+  // une boucle restait sans message de démarrage, le bot paraissait arrêté.)
+  const announce = brutal ? registerCrash(s, now) : !s.lastStop?.silenced;
   if (!otherInstance) s.running = { pid, startedAt: now };
   save(file, s);
   const afterError = !brutal && !otherInstance && s.lastStop?.abnormal === true;
@@ -129,11 +141,11 @@ export function noteStart(file: string, now = Date.now(), pid = process.pid, isR
 }
 
 /** À appeler à l'arrêt : retire le marqueur ; sur erreur, décide si l'alerte part. */
-export function noteStop(file: string, abnormal: boolean, now = Date.now(), pid = process.pid): StopReport {
+export function noteStop(file: string, abnormal: boolean, now = Date.now(), pid = process.pid, canNotify = true): StopReport {
   const s = load(file);
   if (s.running?.pid === pid) s.running = undefined;
-  const alert = abnormal ? registerCrash(s, now) : false;
-  s.lastStop = { at: now, abnormal };
+  const alert = abnormal ? registerCrash(s, now, canNotify) : false;
+  s.lastStop = { at: now, abnormal, silenced: abnormal && canNotify && !alert };
   save(file, s);
   return { alert, recentCrashes: recent(s, now), nextGapMs: s.alertGapMs };
 }

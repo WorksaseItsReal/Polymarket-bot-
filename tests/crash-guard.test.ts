@@ -37,6 +37,39 @@ test('boucle de plantage toutes les 2 min : alertes à 0, 10, 30, 70 min… et d
   assert.equal(noteStart(f, 7 * 60 * MIN, DEAD_PID).afterError, true, 'lancement qui suit un arrêt sur erreur');
 });
 
+test('redémarrage volontaire après une boucle de plantage : le démarrage est annoncé', () => {
+  const f = file();
+  noteStart(f, 0, DEAD_PID - 1);
+  assert.equal(noteStop(f, true, MIN, DEAD_PID - 1).alert, true);
+  noteStart(f, 2 * MIN, DEAD_PID - 2);
+  assert.equal(noteStop(f, true, 3 * MIN, DEAD_PID - 2).alert, false, 'boucle : 2e alerte tue');
+  assert.equal(noteStart(f, 4 * MIN, DEAD_PID - 3).announce, false, 'relance PM2 après une alerte tue : silence');
+  noteStop(f, false, 5 * MIN, DEAD_PID - 3); // pm2 restart volontaire
+  const st = noteStart(f, 6 * MIN, DEAD_PID - 4);
+  assert.equal(st.announce, true, 'sinon le bot paraît arrêté (dernier message : « Bot arrêté »)');
+  assert.equal(st.afterError, false);
+});
+
+test('Telegram pas encore connecté : l\'arrêt n\'est pas compté comme signalé', () => {
+  const f = file();
+  noteStart(f, 0, DEAD_PID - 1);
+  const r = noteStop(f, true, MIN, DEAD_PID - 1, false);
+  assert.equal(r.alert, false);
+  assert.equal(r.recentCrashes, 1);
+  const st = noteStart(f, 2 * MIN, DEAD_PID - 2);
+  assert.equal(st.announce, true, 'le démarrage porte l\'information');
+  assert.equal(st.afterError, true);
+  assert.equal(noteStop(f, true, 3 * MIN, DEAD_PID - 2).alert, true, 'espacement non consommé par l\'arrêt non signalé');
+});
+
+test('marqueur à notre propre PID (PID réattribué après redémarrage) : arrêt brutal', () => {
+  const f = file();
+  noteStart(f, 0, 29, () => false);
+  const st = noteStart(f, 5 * MIN, 29, () => true);
+  assert.equal(st.brutal, true);
+  assert.equal(st.otherInstance, false);
+});
+
 test('l\'espacement repart de zéro après une heure sans arrêt', () => {
   const f = file();
   assert.equal(noteStop(f, true, 0).alert, true);

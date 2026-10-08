@@ -1697,7 +1697,9 @@ async function shutdown(reason: string, code: number): Promise<void> {
     try { sdkRef?.stop(); } catch { /* déjà arrêté */ }
   })();
   // Avant le marqueur `running` posé (démarrage), rien à suivre ; ensuite, l'arrêt l'enlève.
-  const stop = crashStart ? noteStop(runStatePath(), code !== 0) : { alert: true, recentCrashes: 0, nextGapMs: 0 };
+  // Telegram pas (encore) connecté : arrêt compté mais pas « signalé » (le démarrage suivant le dira).
+  const stop = crashStart ? noteStop(runStatePath(), code !== 0, Date.now(), process.pid, telegram !== null)
+    : { alert: true, recentCrashes: 0, nextGapMs: 0 };
   if (!code) {
     notify(`🛑 Bot arrêté (${reason})`);
   } else if (stop.alert) {
@@ -1705,7 +1707,7 @@ async function shutdown(reason: string, code: number): Promise<void> {
       ? ` · ${stop.recentCrashes} arrêts sur erreur dans la dernière heure : prochaine alerte au plus tôt dans ${Math.round(stop.nextGapMs / 60_000)} min`
       : '';
     notify(msgAlert(`bot arrêté sur erreur (${reason}) — PM2 va le relancer${loop}`));
-  } else {
+  } else if (telegram) {
     log('WARN', `Alerte Telegram d'arrêt non envoyée (${stop.recentCrashes} arrêts sur erreur dans l'heure, déjà signalés).`);
   }
   recordSessionHistory();

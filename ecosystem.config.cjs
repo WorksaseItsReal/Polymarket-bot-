@@ -3,8 +3,14 @@ module.exports = {
     name: 'polymarket-paperbot',
     script: 'bot-with-dashboard.ts',
     cwd: '/root/clawd/Polymarket-bot',
-    interpreter: '/root/clawd/Polymarket-bot/node_modules/.bin/tsx',
-    interpreter_args: '',
+    // node + chargeur tsx dans LE MÊME process. Avant : le binaire `tsx` comme interpréteur
+    // lançait le bot dans un process enfant ; à l'arrêt (pm2 stop/restart), tsx relaie
+    // SIGINT puis tue l'enfant en SIGKILL s'il n'a pas répondu en ~60 ms — boucle
+    // d'événements occupée à cet instant → arrêt propre jamais exécuté (journal et
+    // message d'arrêt perdus, faux « arrêt brutal » au lancement suivant). Vérifié sous
+    // PM2 5.4.3. Nécessite Node ≥ 20.6 (`npm run check` utilise déjà `--import tsx`).
+    interpreter: 'node',
+    interpreter_args: '--import tsx',
     force: true,
     autorestart: true,
     // Relance après 0,1 s, puis ×1,5 à chaque plantage (plafond PM2 : 15 s), remis à zéro
