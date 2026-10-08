@@ -375,7 +375,9 @@ export function describeBlend(fit: BlendFit | null, current: { blendModel: numbe
       out.push(isCurrent
         ? '   → mélange validé hors échantillon, et c\'est déjà le réglage actuel.'
         : `   → mélange validé hors échantillon : essayer FV_BLEND_MODEL=${fit.a} FV_BLEND_MARKET=${fit.b}`
-          + ` (actuel ${current.blendModel} / ${current.blendMarket}), puis re-mesurer.`);
+          + ` (actuel ${current.blendModel} / ${current.blendMarket}), puis re-mesurer.`
+          + '\n     Un seul réglage à la fois : ce mélange corrige déjà la confiance du modèle (ne pas changer'
+          + ' FV_Z_SCALE en même temps, les deux corrections s\'additionneraient).');
     }
   } else {
     out.push('   → pas d\'amélioration significative hors échantillon (t ≥ −2) : garder le réglage actuel'

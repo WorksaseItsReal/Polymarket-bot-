@@ -236,6 +236,10 @@ test('messages de résultat, bilan, démarrage et alerte', () => {
   noJunk(start);
   assert.match(start, /mode PAPIER/);
   assert.match(start, /aucun trade pour l'instant/);
+  assert.doesNotMatch(start, /Calibration/, 'modèle brut : rien à signaler');
+  const tuned = msgStartup({ capital: 50, minEdge: 0.04, minProb: 0.6, feeRate: 0.07, pollSec: 10, coins: ['BTC'], stats: stats([]), zScale: 0.9, blendModel: 0.8, blendMarket: 0.3 });
+  noJunk(tuned);
+  assert.match(tuned, /Calibration : confiance du modèle ×0,9 · mélange modèle 0,8 \/ carnet 0,3/);
   assert.equal(msgAlert('a < b'), '⚠️ <b>ALERTE</b> — a &lt; b');
 });
 

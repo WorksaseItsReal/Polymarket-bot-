@@ -1148,6 +1148,7 @@ function activateTelegram(client: TelegramClient, detail: string) {
   notify(msgStartup({
     capital: CONFIG.capital.totalUsd, minEdge: FV_CFG.minEdge, minProb: FV_CFG.minProb, feeRate: FV_CFG.takerFeeRate,
     pollSec: FV_POLL_MS / 1000, coins: [...FV_COINS], stats: ledgerStats(), warning: capitalWarning() ?? undefined,
+    zScale: FV_CFG.zScale, blendModel: FV_CFG.blendModel, blendMarket: FV_CFG.blendMarket,
   }));
 
   // Bilan périodique, seulement s'il s'est passé quelque chose depuis le précédent.

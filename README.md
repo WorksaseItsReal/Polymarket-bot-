@@ -377,8 +377,10 @@ le mouvement du spot pendant son trajet (le réévaluer trierait les trades a po
 flatterait le papier). Même logique pour les reventes (prix plancher net fixé à la décision ;
 reventes seulement à partir de 5 parts, minimum Polymarket).
 
-**Limites honnêtes** : le modèle n'a **pas** été validé sur historique (aucune donnée
-spot+carnet horodatée n'existe) ; le strike est approché (ouverture de la bougie 1 min
+**Limites honnêtes** : le modèle n'est **pas encore** validé sur données réelles. Le backtest
+historique n'a qu'un prix par minute (pas de carnet, peut-être un dernier prix échangé) : il
+peut écarter la stratégie, pas la prouver ; seule la mesure en direct (journal, ligne
+« Modèle vs carnet » du bilan Telegram) tranche. Le strike est approché (ouverture de la bougie 1 min
 Binance/Coinbase, pas le point Chainlink exact) ; la latence simulée d'1 s retire une partie des
 prix fantômes, mais des bots co-localisés restent plus rapides : le papier peut encore
 **surestimer** les exécutions sur ces opportunités.

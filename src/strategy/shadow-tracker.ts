@@ -14,7 +14,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from '
 import { dirname } from 'node:path';
 import type { DecisionRecord } from '../services/decision-journal.js';
 import type { RoundOutcome } from '../services/paper-ledger.js';
-import { marketProbUp } from '../analysis/fv-analysis.js';
+import { marketProbUp, rawModelProb } from '../analysis/fv-analysis.js';
 
 export interface ShadowAggregate {
   n: number;
@@ -83,7 +83,10 @@ export class ShadowTracker {
 
   /** Retient la première évaluation exploitable de chaque round. */
   observe(r: DecisionRecord): void {
-    if (this.pending.has(r.slug) || r.pUp === null) return;
+    // Modèle SEUL : avec un mélange actif, pUp contient déjà le carnet et la comparaison
+    // « modèle vs carnet » serait truquée.
+    const pModel = rawModelProb(r);
+    if (this.pending.has(r.slug) || pModel === null) return;
     const pMarket = marketProbUp(r);
     if (pMarket === null) return;
     const slot = Number(r.slug.split('-').pop());
@@ -92,7 +95,7 @@ export class ShadowTracker {
       const oldest = this.pending.keys().next().value;
       if (oldest !== undefined) this.pending.delete(oldest);
     }
-    this.pending.set(r.slug, { endMs: slot * 1000 + 300_000, pModel: r.pUp, pMarket });
+    this.pending.set(r.slug, { endMs: slot * 1000 + 300_000, pModel, pMarket });
   }
 
   /** Règle les rounds terminés (au plus `perCall` requêtes). Ne lève jamais. */

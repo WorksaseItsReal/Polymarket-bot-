@@ -88,6 +88,20 @@ export interface StartupInfo {
   stats: LedgerStats;
   /** Avertissement de configuration à afficher en tête (ex. capital trop petit). */
   warning?: string;
+  /** Réglages de calibration (affichés seulement s'ils diffèrent du modèle brut). */
+  zScale?: number;
+  blendModel?: number;
+  blendMarket?: number;
+}
+
+function tuningLine(i: StartupInfo): string | null {
+  const parts: string[] = [];
+  const f = (x: number) => String(x).replace('.', ',');
+  if (i.zScale !== undefined && i.zScale !== 1) parts.push(`confiance du modèle ×${f(i.zScale)}`);
+  if ((i.blendModel ?? 1) !== 1 || (i.blendMarket ?? 0) !== 0) {
+    parts.push(`mélange modèle ${f(i.blendModel ?? 1)} / carnet ${f(i.blendMarket ?? 0)}`);
+  }
+  return parts.length ? `Calibration : ${parts.join(' · ')}` : null;
 }
 
 export function msgStartup(i: StartupInfo): string {
@@ -96,6 +110,7 @@ export function msgStartup(i: StartupInfo): string {
     `Marchés : « Up or Down » 5 min · ${escapeHtml(i.coins.join(', '))}`,
     `Règle : pari seulement si la probabilité calculée ≥ ${pct(i.minProb)} ET dépasse le prix payé (frais inclus) d'au moins ${(i.minEdge * 100).toFixed(0)} pts`,
     `Capital papier : ${amount(i.capital)} · vérification toutes les ${i.pollSec} s`,
+    ...(tuningLine(i) ? [tuningLine(i) as string] : []),
     i.stats.n || i.stats.open ? `Historique : ${balanceLine(i.stats)}` : 'Historique : aucun trade pour l\'instant',
     ...(i.warning ? [`⚠️ ${escapeHtml(i.warning)}`] : []),
   ].join('\n');

@@ -67,3 +67,15 @@ test('round jamais réglé abandonné après 1 h ; nombre de rounds en attente b
   await t.resolveDue();
   assert.equal(t.pendingCount(), 0);
 });
+
+test('mélange actif : la comparaison porte sur le modèle SEUL (pRaw), pas sur la probabilité mélangée', async () => {
+  const now = (SLOT + 400) * 1000;
+  const t = new ShadowTracker({
+    path: join(mkdtempSync(join(tmpdir(), 'shadow-')), 'fv-shadow.json'), now: () => now,
+    fetchOutcome: async () => ({ resolved: true, upWon: true }),
+  });
+  // pUp mélangée = 0,6 (≈ carnet), modèle seul = 0,9
+  t.observe({ ...rec(`btc-updown-5m-${SLOT}`, 0.6, 0.61, 0.41), pRaw: 0.9 });
+  await t.resolveDue();
+  assert.ok(Math.abs(t.stats().brierModel! - 0.01) < 1e-12, 'Brier de 0,9, pas de 0,6');
+});
