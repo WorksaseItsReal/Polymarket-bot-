@@ -29,9 +29,11 @@ Sur le serveur, dans le dossier du bot :
 git fetch origin && git checkout feat/fair-value-strategy && git pull
 npm install
 npm run check                              # types + tests (sans réseau) : doit finir sans échec
+(cd dashboard && npm install && npm run build)   # interface web du dashboard (à refaire après chaque mise à jour)
 # .env : partir de .env.example (FV_*, TELEGRAM_*, DASHBOARD_*), garder DRY_RUN=true
 npx tsx scripts/telegram/check.ts          # doit afficher « ✅ … Message de test envoyé »
-pm2 restart polymarket-paperbot && pm2 logs polymarket-paperbot --lines 50
+pm2 delete polymarket-paperbot; pm2 start ecosystem.config.cjs && pm2 logs polymarket-paperbot --lines 50
+# (delete + start : un simple restart ne relit pas ecosystem.config.cjs, ex. kill_timeout)
 ```
 
 Recommandé une fois pour toutes (les logs PM2 grossissent sans fin sinon) :
@@ -41,6 +43,8 @@ pm2 install pm2-logrotate && pm2 set pm2-logrotate:max_size 50M && pm2 set pm2-l
 ```
 
 Puis :
+0. **Vérifier le `.env`** : `PAPER_CAPITAL=250` (sous ~100 $, aucune mise n'atteint le minimum
+   Polymarket de 1 $ → aucun pari) et `DIPARB_ENABLED=false` (l'ancien `.env.example` l'activait).
 1. **Désactiver l'ancien recap Hermes** (`paperbot-recap-telegram`) : il décrit l'ancienne règle.
 2. Vérifier dans les logs : `Flux spot temps réel connecté`, `Telegram connecté`, puis des
    lignes `HOLD : edge … < 4.0pt` (le bot évalue, et s'abstient tant que le carnet est juste).
