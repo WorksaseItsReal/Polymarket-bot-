@@ -156,6 +156,7 @@ export class FairValueRunner {
   private readonly d: RunnerDeps;
   private readonly traded = new Set<string>();
   private readonly lastHoldLog = new Map<string, number>();
+  private readonly unresolvedAlerted = new Set<string>();
   private readonly unresolvedWarned = new Set<string>();
   /** Dernière tentative de règlement par trade (Gamma interrogé au plus toutes les 10 s). */
   private readonly lastResolveTry = new Map<string, number>();
@@ -277,8 +278,9 @@ export class FairValueRunner {
     // du tick de fond, pour ne pas sauter un passage sur une gigue de minuterie).
     for (const [id, at] of this.lastResolveTry) if (now - at > 3 * 3_600_000) this.lastResolveTry.delete(id);
     const all = this.trades() ?? [];
+    // Rounds encore non réglés 1 h après leur fin : nouvel essai toutes les 5 min (pas 8 s).
     const open = all.filter(t => t.status === 'open' && now > t.endMs + 15_000
-      && now - (this.lastResolveTry.get(t.id) ?? -Infinity) >= 8_000);
+      && now - (this.lastResolveTry.get(t.id) ?? -Infinity) >= (now > t.endMs + 3_600_000 ? 300_000 : 8_000));
     // Reventes : simple relevé pour la calibration → peu prioritaire (2 par passage, une
     // fois par minute au plus) pour ne pas allonger le passage quand Gamma est lent.
     const sold = all.filter(t => t.status === 'sold' && t.outcomeUpWon === undefined && now > t.endMs + 15_000
@@ -299,6 +301,13 @@ export class FairValueRunner {
         if (t.status === 'open' && now > t.endMs + 30 * 60_000 && !this.unresolvedWarned.has(t.id)) {
           this.unresolvedWarned.add(t.id);
           this.d.log('WARN', `Round ${t.slug} toujours non réglé 30 min après la fin (${outcome.reason}) — nouvel essai en continu`);
+        }
+        // Toujours rien après 6 h : la position bloque une place (10 au plus) et de
+        // l'exposition ; sans alerte, des rounds jamais réglés finiraient par arrêter les
+        // paris sans bruit. Une alerte par trade.
+        if (t.status === 'open' && now > t.endMs + 6 * 3_600_000 && !this.unresolvedAlerted.has(t.id)) {
+          this.unresolvedAlerted.add(t.id);
+          this.d.notify(msgAlert(`round ${t.slug} toujours non réglé 6 h après la fin (${outcome.reason}) : la position reste comptée comme ouverte. Vérifier le marché sur Polymarket.`));
         }
         continue;
       }

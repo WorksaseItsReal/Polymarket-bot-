@@ -626,3 +626,25 @@ test('pause de risque longue : une ligne de journal toutes les 10 min, pas une p
   }
   assert.equal(env.logs.filter(l => /entrées bloquées \(pause de risque\)/.test(l)).length, 1);
 });
+
+test('round jamais réglé : essais espacés après 1 h, une seule alerte après 6 h (la position bloque une place)', async () => {
+  let calls = 0;
+  const env = setup({ fetchOutcome: async () => { calls++; return { resolved: false, reason: 'marché introuvable' }; } });
+  const r = env.runner();
+  await r.tick();
+  assert.equal(loadLedger(env.ledgerPath)!.length, 1);
+  const end = (SLOT + 300) * 1000;
+  // 2 h après la fin, un passage toutes les 10 s pendant 10 min : ~2 essais, pas 60
+  calls = 0;
+  for (let k = 0; k < 60; k++) {
+    env.setNow(end + 2 * 3_600_000 + k * 10_000);
+    await r.tick();
+  }
+  assert.ok(calls <= 3, `${calls} essais en 10 min`);
+  assert.ok(!env.messages.some(m => /non réglé 6 h/.test(m)), 'pas encore d\'alerte à 2 h');
+  env.setNow(end + 7 * 3_600_000);
+  await r.tick();
+  env.setNow(end + 8 * 3_600_000);
+  await r.tick();
+  assert.equal(env.messages.filter(m => /non réglé 6 h/.test(m)).length, 1, 'une seule alerte');
+});
