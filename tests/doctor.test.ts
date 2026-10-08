@@ -22,6 +22,24 @@ test('configuration : capital trop petit, anciennes stratégies, réglages ignor
   assert.ok(good.every(c => c.level === 'ok'), summarize(good).text);
 });
 
+test('clé du wallet : forme vérifiée sans jamais la citer', () => {
+  const key = '4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318';
+  const check = (k: string | undefined, extra: Record<string, string> = {}) => configChecks({ POLYMARKET_PRIVATE_KEY: k, ...extra }).find(c => c.label === 'Clé du wallet')!;
+  assert.equal(check(undefined).level, 'ok');
+  assert.equal(check('your_private_key_here').level, 'ok');
+  assert.match(check('0x' + key).detail, /bonne forme ; en papier elle ne signe rien/);
+  assert.match(check(` 0x${key} `).detail, /espaces autour ignorés/);
+  const typo = check(key.slice(0, 20) + 'O' + key.slice(21));
+  assert.equal(typo.level, 'warn');
+  assert.match(typo.detail, /1 caractère\(s\) non hexadécimal/);
+  assert.match(check(key.slice(1)).detail, /63 caractères au lieu de 64 — sans effet en papier/);
+  assert.equal(check(key.slice(1), { DRY_RUN: 'false' }).level, 'error');
+  assert.equal(check(undefined, { DRY_RUN: 'false' }).level, 'error');
+  for (const k of [key, key.slice(1), key.slice(0, 20) + 'O' + key.slice(21)]) {
+    assert.ok(configChecks({ POLYMARKET_PRIVATE_KEY: k }).every(c => !c.detail.includes(k.slice(0, 12))), 'jamais citée');
+  }
+});
+
 test('fichiers : registre illisible et arrêt de sécurité actif = erreurs', () => {
   const poly = mkdtempSync(join(tmpdir(), 'doctor-'));
   writeFileSync(join(poly, 'fv-ledger.json'), '{tronqué');

@@ -43,6 +43,31 @@ const FV_ENV: Array<[string, keyof typeof DEFAULT_FAIR_VALUE_CONFIG]> = [
   ['FV_STRIKE_NOISE_SEC', 'strikeNoiseSec'], ['FV_TWAP_WINDOW_SEC', 'twapWindowSec'],
 ];
 
+/**
+ * Forme de POLYMARKET_PRIVATE_KEY, décrite SANS jamais la citer. En papier elle ne sert à
+ * rien (clé éphémère) ; une faute de frappe passerait sinon inaperçue jusqu'au réel.
+ */
+function walletKeyCheck(raw: string | undefined, paper: boolean): Check {
+  const label = 'Clé du wallet';
+  const v = raw ?? '';
+  if (!v.trim() || /^(your_|0x\.\.\.|xxx)/i.test(v.trim())) {
+    return paper ? ok(label, 'absente : normal en papier (obligatoire en réel)') : err(label, 'absente : obligatoire en réel');
+  }
+  const t = v.trim();
+  const hex = t.replace(/^0x/i, '');
+  const problems: string[] = [];
+  if (t !== v) problems.push('espaces avant/après (à retirer)');
+  const bad = hex.replace(/[0-9a-fA-F]/g, '').length;
+  if (bad) problems.push(`${bad} caractère(s) non hexadécimal(aux) (ex. « O » au lieu de « 0 »)`);
+  if (hex.length !== 64) problems.push(`${hex.length} caractères au lieu de 64`);
+  if (!problems.length || (problems.length === 1 && t !== v)) {
+    const note = t !== v ? ' (espaces autour ignorés)' : '';
+    return ok(label, paper ? `présente, bonne forme${note} ; en papier elle ne signe rien (clé éphémère)` : `présente, bonne forme${note}`);
+  }
+  const msg = `mal formée : ${problems.join(', ')}`;
+  return paper ? warn(label, `${msg} — sans effet en papier, bloquante en réel`) : err(label, msg);
+}
+
 export function configChecks(env: Env): Check[] {
   const out: Check[] = [];
   const paper = (env.DRY_RUN ?? '').trim().toLowerCase() !== 'false';
@@ -59,6 +84,8 @@ export function configChecks(env: Env): Check[] {
     : minOrder > 0 && maxStake < 2 * minOrder
       ? warn('Capital', `${capital} $ : mise max ${maxStake.toFixed(2)} $, à peine au-dessus du minimum ${minOrder} $ — 250 $ recommandé.`)
       : ok('Capital', `${capital} $ (mise max ${maxStake.toFixed(2)} $ par pari)`));
+
+  out.push(walletKeyCheck(env.POLYMARKET_PRIVATE_KEY, paper));
 
   const legacy = ['DIPARB_ENABLED', 'SMARTMONEY_ENABLED', 'ARBITRAGE_ENABLED', 'TREND_ANALYSIS_ENABLED'].filter(k => env[k] === 'true');
   out.push(legacy.length
