@@ -284,6 +284,13 @@ Telegram n'arrête jamais le bot. Les envois sont en file (≥ 1,1 s d'écart, r
 4 essais réseau, repli texte brut si le HTML est refusé) et le token n'apparaît jamais dans
 les logs.
 
+**Plantages :** un arrêt sur erreur envoie une alerte (« PM2 va le relancer ») et le message de
+démarrage suivant commence par « ↻ Relancé après un arrêt sur erreur ». Un arrêt brutal
+(kill -9, mémoire saturée : aucun message possible sur le moment) est détecté au lancement
+suivant et signalé de la même façon. En cas de plantage **en boucle**, les alertes sont
+espacées (10 min, 20, 40… jusqu'à 6 h, avec le nombre d'arrêts dans l'heure) au lieu de deux
+messages toutes les 15 s ; l'espacement repart de zéro après une heure sans plantage.
+
 **Messages envoyés :**
 
 ```
