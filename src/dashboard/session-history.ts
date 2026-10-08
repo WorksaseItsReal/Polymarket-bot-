@@ -3,7 +3,7 @@
  * Saves and loads trading session history to/from a JSON file
  */
 
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
+import { existsSync, renameSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 
@@ -149,7 +149,10 @@ export function saveHistory(history: HistoryData): void {
   ensureDataDir();
   
   try {
-    writeFileSync(HISTORY_FILE, JSON.stringify(history, null, 2));
+    // Écriture atomique : un arrêt pendant l'écriture ne laisse jamais un fichier tronqué.
+    const tmp = `${HISTORY_FILE}.tmp-${process.pid}`;
+    writeFileSync(tmp, JSON.stringify(history, null, 2));
+    renameSync(tmp, HISTORY_FILE);
     console.log('[SessionHistory] History saved successfully');
   } catch (error) {
     console.error('[SessionHistory] Error saving history:', error);
@@ -160,6 +163,15 @@ export function saveHistory(history: HistoryData): void {
  * Add a new session to history
  */
 export function addSession(session: SessionSummary): void {
+  // Fichier présent mais illisible : on ne l'écrase pas (avant : un fichier tronqué était
+  // remplacé par la seule nouvelle session, tout l'historique perdu). On le met de côté.
+  if (existsSync(HISTORY_FILE)) {
+    try {
+      JSON.parse(readFileSync(HISTORY_FILE, 'utf-8'));
+    } catch {
+      try { renameSync(HISTORY_FILE, `${HISTORY_FILE}.illisible-${Date.now()}`); } catch { return; }
+    }
+  }
   const history = loadHistory();
   
   // Add session at the beginning (newest first)

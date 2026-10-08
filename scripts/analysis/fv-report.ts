@@ -19,7 +19,7 @@ import { fetchRoundOutcome } from '../../src/services/paper-ledger.js';
 import { fairValueConfigFromEnv } from '../../src/services/fair-value.js';
 import {
   applyBlend, blendVerdict, zScaleConflictsWithBlend, bookStats, brier, byRound, calibration, compareModelBook, describeBlend, fitBlend,
-  fitZScale, halves, marketProbUp, normalizeZScale, rawModelProb, replay,
+  fitZScale, halves, marketProbUp, normalizeZScale, rawModelProb, replay, zScaleAdvice,
   thresholdGrid, type ResolvedRecord,
 } from '../../src/analysis/fv-analysis.js';
 
@@ -85,7 +85,10 @@ async function main() {
   // Toutes les évaluations ramenées au FV_Z_SCALE actuel (un journal peut couvrir un
   // changement de réglage), puis probabilité de décision recalculée avec le mélange actuel :
   // le rapport juge le réglage EN VIGUEUR, pas un mélange de réglages passés.
-  const rounds = normalizeZScale(byRound(resolved), cfg.zScale);
+  const rounds = normalizeZScale(byRound(resolved), cfg.zScale, cfg.tails);
+  if (resolved.some(r => r.zs === undefined) && cfg.zScale !== 1) {
+    console.error('(évaluations sans réglage enregistré : supposées faites avec FV_Z_SCALE=1)');
+  }
   const decisionRounds = applyBlend(rounds, cfg.blendModel, cfg.blendMarket);
   const evals = rounds.flat();
   console.log(`\n=== Journal : ${records.length} évaluations, ${new Set(records.map(r => r.slug)).size} rounds, ${rounds.length} rounds réglés ===\n`);
@@ -131,16 +134,10 @@ async function main() {
   }
 
   // 2b. Réglage de calibration suggéré
-  const fit = fitZScale(rounds);
+  const fit = fitZScale(rounds, 150, cfg.tails);
   if (fit) {
-    const suggested = Math.round(fit.m * 100) / 100;
-    const ok = fit.lo <= cfg.zScale && fit.hi >= cfg.zScale;
     console.log(`\n2b) Calibration (un paramètre, ${fit.n} rounds) : FV_Z_SCALE optimal ${fit.m} (IC95 ${fit.lo}–${fit.hi})`);
-    console.log(ok
-      ? `   → compatible avec le réglage actuel (FV_Z_SCALE=${cfg.zScale}) : rien à changer.`
-      : zScaleConflictsWithBlend(blendVerdict(blend, cfg), cfg)
-        ? '   → la confiance est déjà corrigée par le mélange (actif ou proposé en 1b) : ré-estimer le mélange, pas FV_Z_SCALE.'
-        : `   → le modèle est ${fit.m < 1 ? 'SUR-confiant' : 'SOUS-confiant'} : essayer FV_Z_SCALE=${suggested} (actuel ${cfg.zScale}), puis re-mesurer.`);
+    console.log(`   ${zScaleAdvice(fit, cfg.zScale, zScaleConflictsWithBlend(blendVerdict(blend, cfg), cfg))}`);
   }
 
   // 3. Seuils (probabilité utilisée par le bot, mélange compris s'il est configuré)

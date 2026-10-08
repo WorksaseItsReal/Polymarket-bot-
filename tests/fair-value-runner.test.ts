@@ -595,3 +595,24 @@ test('carnets lents : le spot est relu à l\'instant des carnets (pas d\'achat s
   assert.equal(spotCalls, 2, 'spot relu');
   assert.equal(loadLedger(env.ledgerPath)!.length, 0, 'plus de signal avec le spot à jour');
 });
+
+test('spot relu sans latence simulée : l\'achat se fait sur un carnet relu, jamais sur le carnet d\'avant le mouvement', async () => {
+  let spotCalls = 0;
+  let bookReads = 0;
+  const env = setup({
+    fillDelayMs: 0,
+    // 1re lecture : spot au strike (pas de signal) ; relu après les carnets lents : +0,12 %
+    getRoundData: async () => ({ spot: spotCalls++ === 0 ? 100 : 100.12, strike: 100, sigmaPerSqrtSec: SIGMA, source: 'test', candleAgeMs: 0 }),
+    getBook: async id => {
+      bookReads++;
+      if (bookReads <= 2) env.setNow((SLOT + 180) * 1000 + 2000); // carnets lents
+      // carnets d'AVANT le mouvement à 0,50 ; relus ensuite : déjà réajustés à 0,76
+      const ask = id === 'UP' ? (bookReads <= 2 ? 0.5 : 0.76) : 0.25;
+      return { asks: [{ price: ask, size: 100 }], bids: [] };
+    },
+  });
+  await env.runner().tick();
+  assert.equal(bookReads, 3, 'carnet relu avant l\'exécution');
+  const t = loadLedger(env.ledgerPath)!;
+  assert.ok(t.length === 0 || t[0].costPerShare > 0.7, `jamais exécuté au vieux prix de 0,50 : ${JSON.stringify(t[0]?.costPerShare)}`);
+});

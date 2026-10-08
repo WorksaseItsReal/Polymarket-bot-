@@ -22,7 +22,7 @@ import {
 } from '../../src/analysis/historical-backtest.js';
 import { fetchKlinesRange, fetchPriceHistory, fetchRoundsMeta, mapLimit, type RoundMeta } from '../../src/analysis/historical-data.js';
 import {
-  applyBlend, blendVerdict, zScaleConflictsWithBlend, byRound, calibration, describeBlend, fitBlend, fitZScale, halves, replay, thresholdGrid,
+  applyBlend, blendVerdict, zScaleAdvice, zScaleConflictsWithBlend, byRound, calibration, describeBlend, fitBlend, fitZScale, halves, replay, thresholdGrid,
 } from '../../src/analysis/fv-analysis.js';
 
 function arg(name: string): string | undefined {
@@ -74,7 +74,8 @@ async function main() {
 
   // 2. Historique de prix du token Up (cache)
   const hist = readJson<Record<string, PricePoint[]>>(HIST, {});
-  const needHist = resolved.filter(w => !hist[w.slug]);
+  // Absent, ou vide (anciennes versions mettaient en cache les échecs réseau sous forme de [])
+  const needHist = resolved.filter(w => !hist[w.slug]?.length);
   console.error(`Historiques de prix à télécharger : ${needHist.length}`);
   let shownRaw = false;
   let n = 0;
@@ -156,15 +157,11 @@ async function main() {
     console.log(`   ${(i / 10).toFixed(1)}-${((i + 1) / 10).toFixed(1)}  modèle ${pct(m?.meanP ?? null)} → ${pct(m?.freqUp ?? null)} (n=${m?.n ?? 0})   marché ${pct(k?.meanP ?? null)} → ${pct(k?.freqUp ?? null)} (n=${k?.n ?? 0})`);
   }
   const rounds = byRound(recs);
-  const fit = fitZScale(rounds);
+  const fit = fitZScale(rounds, 150, cfg.tails);
   const blend = fitBlend(rounds, { minTau: cfg.minTauSec, maxTau: cfg.maxTauSec });
   if (fit) {
-    console.log(`   Calibration à un paramètre : multiplicateur ${fit.m} (IC95 ${fit.lo}–${fit.hi})`
-      + (fit.lo <= cfg.zScale && fit.hi >= cfg.zScale
-        ? ' → compatible avec FV_Z_SCALE actuel'
-        : zScaleConflictsWithBlend(blendVerdict(blend, cfg), cfg)
-          ? ' → déjà corrigée par le mélange (actif ou proposé en 3b) : ré-estimer le mélange, pas FV_Z_SCALE'
-          : ` → essayer FV_Z_SCALE=${Math.round(fit.m * 100) / 100}`));
+    console.log(`   Calibration à un paramètre : FV_Z_SCALE optimal ${fit.m} (IC95 ${fit.lo}–${fit.hi})`);
+    console.log(`   ${zScaleAdvice(fit, cfg.zScale, zScaleConflictsWithBlend(blendVerdict(blend, cfg), cfg))}`);
   }
 
   // C bis. Mélange modèle + marché

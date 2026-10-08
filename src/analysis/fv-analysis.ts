@@ -17,7 +17,7 @@
  */
 
 import {
-  DEFAULT_FAIR_VALUE_CONFIG, blendWithMarket, bookMidUp, effectiveCostPerShare, normCdf, normInv,
+  DEFAULT_FAIR_VALUE_CONFIG, blendWithMarket, bookMidUp, effectiveCostPerShare, normCdf, normInv, studentT4CdfStd, studentT4InvStd,
 } from '../services/fair-value.js';
 import type { DecisionRecord } from '../services/decision-journal.js';
 import { clusteredMeanT, slotKey } from './stats.js';
@@ -36,15 +36,21 @@ export function rawModelProb(r: Pick<DecisionRecord, 'pUp' | 'pRaw'>): number | 
  * Sans cela, un journal qui couvre un changement de réglage mélange deux modèles, et les
  * estimations (calibration, mélange, seuils) dérivent à chaque itération.
  */
-export function normalizeZScale(rounds: ResolvedRecord[][], zNow: number): ResolvedRecord[][] {
+export function normalizeZScale(rounds: ResolvedRecord[][], zNow: number, tails: 'normal' | 't4' = 'normal'): ResolvedRecord[][] {
+  const { cdf, inv } = link(tails);
   return rounds.map(list => list.map(r => {
     const raw = rawModelProb(r);
-    const zRec = r.zs ?? 1;
+    const zRec = r.zs ?? 1; // journaux d'avant l'enregistrement du réglage : supposés à 1
     if (raw === null || zRec === zNow) return { ...r, pRaw: raw, zs: zRec };
-    const z = normInv(Math.min(0.999999, Math.max(0.000001, raw)));
-    const p = z === null ? raw : normCdf((zNow * z) / zRec);
+    const z = inv(Math.min(0.999999, Math.max(0.000001, raw)));
+    const p = z === null ? raw : cdf((zNow * z) / zRec);
     return { ...r, pRaw: p, zs: zNow };
   }));
+}
+
+/** Loi du modèle (FV_TAILS) : fonction de répartition et son inverse. */
+function link(tails: 'normal' | 't4'): { cdf: (z: number) => number; inv: (p: number) => number | null } {
+  return tails === 't4' ? { cdf: studentT4CdfStd, inv: studentT4InvStd } : { cdf: normCdf, inv: normInv };
 }
 
 /** Probabilité « Up » implicite du carnet : milieu entre l'ask Up et (1 − ask Down). */
@@ -184,7 +190,8 @@ export interface ZScaleFit {
  * pour ne pas compter plusieurs fois le même résultat. m < 1 : modèle sur-confiant.
  * m est directement la valeur de FV_Z_SCALE à essayer (z ramené au modèle de base).
  */
-export function fitZScale(rounds: ResolvedRecord[][], tauRef = 150): ZScaleFit | null {
+export function fitZScale(rounds: ResolvedRecord[][], tauRef = 150, tails: 'normal' | 't4' = 'normal'): ZScaleFit | null {
+  const { cdf, inv } = link(tails);
   const pts: Array<{ z: number; y: number }> = [];
   for (const list of rounds) {
     let best: ResolvedRecord | null = null;
@@ -195,7 +202,7 @@ export function fitZScale(rounds: ResolvedRecord[][], tauRef = 150): ZScaleFit |
     // FV_Z_SCALE agit sur le modèle seul : on calibre la probabilité AVANT mélange, ramenée au
     // modèle de base (z divisé par le FV_Z_SCALE en vigueur lors de l'évaluation). Le
     // multiplicateur estimé est donc directement la valeur de FV_Z_SCALE à essayer.
-    const zRaw = best ? normInv(Math.min(0.999, Math.max(0.001, rawModelProb(best) as number))) : null;
+    const zRaw = best ? inv(Math.min(0.999, Math.max(0.001, rawModelProb(best) as number))) : null;
     const z = zRaw === null || !best ? null : zRaw / (best.zs ?? 1);
     if (best && z !== null) pts.push({ z, y: best.upWon ? 1 : 0 });
   }
@@ -203,7 +210,7 @@ export function fitZScale(rounds: ResolvedRecord[][], tauRef = 150): ZScaleFit |
   const ll = (m: number) => {
     let s = 0;
     for (const { z, y } of pts) {
-      const p = Math.min(1 - 1e-9, Math.max(1e-9, normCdf(m * z)));
+      const p = Math.min(1 - 1e-9, Math.max(1e-9, cdf(m * z)));
       s += y ? Math.log(p) : Math.log(1 - p);
     }
     return s;
@@ -575,4 +582,20 @@ export function compareModelBook(rounds: ResolvedRecord[][], opts: { minTau?: nu
     brierMarket: mean(rows.map(r => r.k)),
     t: clusteredMeanT(rows.map(r => ({ key: r.key, x: r.m - r.k }))).t,
   };
+}
+
+/** Bornes acceptées par la variable FV_Z_SCALE (fairValueConfigFromEnv). */
+export const Z_SCALE_ENV_RANGE = [0.3, 2] as const;
+
+/** Conseil (FR) tiré d'un ajustement de FV_Z_SCALE ; partagé par les deux rapports. */
+export function zScaleAdvice(fit: ZScaleFit, current: number, blendConflict: boolean): string {
+  const suggested = Math.round(fit.m * 100) / 100;
+  if (fit.lo <= current && fit.hi >= current) return `→ compatible avec le réglage actuel (FV_Z_SCALE=${current}) : rien à changer.`;
+  if (blendConflict) return '→ la confiance est déjà corrigée par le mélange (actif ou proposé) : ré-estimer le mélange, pas FV_Z_SCALE.';
+  const [lo, hi] = Z_SCALE_ENV_RANGE;
+  if (suggested < lo || suggested > hi) {
+    return `→ valeur optimale ${suggested} hors des bornes de FV_Z_SCALE [${lo} ; ${hi}] (elle serait ignorée) : le modèle est trop`
+      + ' mal calibré pour ce simple réglage — revoir la volatilité ou le bruit du strike.';
+  }
+  return `→ le modèle est ${fit.m < current ? 'SUR-confiant' : 'SOUS-confiant'} : essayer FV_Z_SCALE=${suggested} (actuel ${current}), puis re-mesurer.`;
 }

@@ -446,7 +446,9 @@ export class FairValueRunner {
         // Carnets lents à venir : le spot lu AVANT eux peut être dépassé (spot revenu,
         // carnet déjà réajusté → on achèterait contre un prix juste). On relit le spot, à
         // l'instant de la lecture des carnets — information disponible à la décision.
+        let spotReread = false;
         if (nowBook - now > 500) {
+          spotReread = true;
           const fresh = await this.d.getRoundData(coin, slot, nowBook);
           if (!fresh) {
             this.holdLog(market.conditionId, `   ↳ ${market.slug} : spot indisponible après lecture des carnets → pas de mise`);
@@ -533,6 +535,11 @@ export class FairValueRunner {
         const delay = this.d.fillDelayMs ?? 0;
         if (delay > 0) {
           await (this.d.sleep ?? (ms => new Promise(r => setTimeout(r, ms))))(delay);
+        }
+        // Exécution sur un carnet POSTÉRIEUR à l'information utilisée : relu après la latence,
+        // et aussi sans latence si le spot a été relu (sinon on achèterait sur un carnet
+        // antérieur au mouvement vu par le modèle : biais d'anticipation).
+        if (delay > 0 || spotReread) {
           book = await this.d.getBook(decision.side === 'UP' ? market.upTokenId : market.downTokenId);
         }
         const fillAt = this.d.now();

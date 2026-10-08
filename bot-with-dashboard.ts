@@ -26,7 +26,7 @@ import type { BotState, BotConfig, LogLevel, DipArbSignal, SmartMoneySignal } fr
 import { addSession, createSessionFromState, type TradeRecord } from './src/dashboard/session-history.js';
 import { isSpotCoin, type SpotCoin } from './src/services/spot-price-service.js';
 import { computeStake, MAX_VARIANCE_PCT } from './src/services/stake-sizing.js';
-import { fairValueConfigFromEnv } from './src/services/fair-value.js';
+import { DEFAULT_FAIR_VALUE_CONFIG, fairValueConfigFromEnv } from './src/services/fair-value.js';
 import { getRoundMarketData } from './src/services/round-market-data.js';
 import { fetchRoundOutcome, ledgerStatsShared, readLedgerShared, type LedgerStats } from './src/services/paper-ledger.js';
 import { FairValueRunner, coinsFromEnv, type ScannedMarket } from './src/strategy/fair-value-runner.js';
@@ -1236,8 +1236,13 @@ async function setupFairValueStrategy(sdk: PolymarketSDK) {
   const modelKey = JSON.stringify({
     z: FV_CFG.zScale, tails: FV_CFG.tails, noise: FV_CFG.strikeNoiseSec, basis: FV_CFG.basisBps, twap: FV_CFG.twapWindowSec,
   });
+  const keyOf = (c: typeof FV_CFG) => JSON.stringify({
+    z: c.zScale, tails: c.tails, noise: c.strikeNoiseSec, basis: c.basisBps, twap: c.twapWindowSec,
+  });
   const shadow = new ShadowTracker({
     path: polyDir() + '/fv-shadow.json', fetchOutcome: slug => fetchRoundOutcome(slug), modelKey,
+    // Fichier d'avant l'empreinte : supposé mesuré avec les réglages par défaut.
+    legacyModelKey: keyOf(DEFAULT_FAIR_VALUE_CONFIG),
     onReset: n => log('WARN', `Réglages du modèle changés : la mesure « modèle vs carnet » (${n} rounds) repart de zéro`),
   });
   shadowTracker = shadow;
@@ -1807,7 +1812,7 @@ async function main() {
           binance: { ...CONFIG.binance },
           dryRun: CONFIG.dryRun,
         };
-        dashboardEmitter.updateConfig(newDashboardConfig);
+        dashboardEmitter.updateConfig({ ...newDashboardConfig, walletAddress: dashboardEmitter.getConfig()?.walletAddress });
 
         log('WARN', `⚠️ BOT MODE CHANGED TO: ${CONFIG.dryRun ? '🧪 DRY RUN' : '🔴 LIVE'}`);
       }
@@ -1962,6 +1967,9 @@ async function main() {
             if (enabled) {
               log('INFO', `Initializing Smart Money...`);
               sdk.connect(); // sans effet si déjà connecté ; nécessaire si démarré sans (papier)
+              // Les abonnements « activité » ne sont pas rejoués après connexion : attendre
+              // qu'elle soit établie, sinon ils seraient perdus sans bruit.
+              try { await sdk.waitForConnection(15_000); } catch { log('WARN', 'Smart Money : WebSocket Polymarket non connecté (15 s) — abonnements peut-être incomplets'); }
               // Call the lazy initializer we created
               initializeSmartMoney(sdk);
             } else {
@@ -2011,7 +2019,7 @@ async function main() {
           },
           dryRun: CONFIG.dryRun,
         };
-        dashboardEmitter.updateConfig(dashboardConfig);
+        dashboardEmitter.updateConfig({ ...dashboardConfig, walletAddress: dashboardEmitter.getConfig()?.walletAddress });
       } else {
         log('WARN', `Unknown strategy: ${strategy}`);
       }

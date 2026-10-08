@@ -401,3 +401,20 @@ test('FV_Z_SCALE jamais suggéré en plus d\'un mélange actif ou proposé', asy
   assert.equal(zScaleConflictsWithBlend('current', { blendModel: 0.6, blendMarket: 0.4 }), true);
   assert.equal(zScaleConflictsWithBlend('keep', { blendModel: 0.6, blendMarket: 0.4 }), true, 'mélange déjà actif');
 });
+
+test('loi t4 : inverse exacte ; remise à l\'échelle de FV_Z_SCALE cohérente avec probUp (normale ET t4)', async () => {
+  const { studentT4CdfStd, studentT4InvStd } = await import('../src/services/fair-value.ts');
+  const { normalizeZScale, zScaleAdvice } = await import('../src/analysis/fv-analysis.ts');
+  for (const x of [-3, -1, -0.2, 0, 0.5, 2.5]) close(studentT4InvStd(studentT4CdfStd(x))!, x, 1e-9);
+  const base = { spot: 100.08, strike: 100, sigmaPerSqrtSec: SIGMA, tauSec: 150 };
+  for (const tails of ['normal', 't4'] as const) {
+    const at = (z: number) => probUp(base, { ...CFG, tails, zScale: z })!;
+    const rec = { t: 0, slug: 's', coin: 'BTC', tau: 150, spot: 1, strike: 1, sig: 1, pUp: at(0.6), pRaw: at(0.6), zs: 0.6,
+      upAsk: null, downAsk: null, upAskSz: null, downAskSz: null, src: 't', act: 'hold' as const, upWon: true };
+    const [[r]] = normalizeZScale([[rec]], 1, tails);
+    close(r.pRaw!, at(1), 1e-6); // même probabilité que si le bot avait tourné à FV_Z_SCALE=1
+  }
+  assert.match(zScaleAdvice({ n: 100, m: 2.6, lo: 2.3, hi: 2.9 }, 1, false), /hors des bornes/);
+  assert.match(zScaleAdvice({ n: 100, m: 0.8, lo: 0.7, hi: 0.9 }, 1, false), /SUR-confiant : essayer FV_Z_SCALE=0.8/);
+  assert.match(zScaleAdvice({ n: 100, m: 0.95, lo: 0.8, hi: 1.1 }, 1, false), /rien à changer/);
+});

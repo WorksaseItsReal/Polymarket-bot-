@@ -59,6 +59,8 @@ export interface ShadowOptions {
   perCall?: number;
   /** Empreinte des réglages du modèle (FV_Z_SCALE, loi…) ; changée → nouvelle mesure. */
   modelKey?: string;
+  /** Empreinte supposée d'un fichier SANS empreinte (créé avant son introduction). */
+  legacyModelKey?: string;
   /** Appelé quand une mesure existante est écartée parce que le modèle a changé. */
   onReset?: (previousRounds: number) => void;
 }
@@ -82,15 +84,17 @@ export class ShadowTracker {
   private resolving = false;
 
   constructor(opts: ShadowOptions) {
-    this.o = { now: Date.now, maxPending: 200, perCall: 5, modelKey: '', onReset: () => undefined, ...opts };
+    this.o = { now: Date.now, maxPending: 200, perCall: 5, modelKey: '', legacyModelKey: '', onReset: () => undefined, ...opts };
     this.agg = { ...EMPTY, model: this.o.modelKey || undefined };
     try {
       if (existsSync(opts.path)) {
         const a = JSON.parse(readFileSync(opts.path, 'utf8')) as Partial<ShadowAggregate>;
         if ([a.n, a.sumModel, a.sumMarket, a.sumD, a.sumD2].every(x => typeof x === 'number' && Number.isFinite(x))) {
           const loaded = a as ShadowAggregate;
-          // Ancien fichier sans empreinte : on le garde (réglages par défaut jusqu'ici).
-          if (this.o.modelKey && loaded.model !== undefined && loaded.model !== this.o.modelKey) {
+          // Ancien fichier sans empreinte : supposé mesuré avec `legacyModelKey` (réglages par
+          // défaut) ; gardé seulement si c'est encore le modèle actuel.
+          const fileKey = loaded.model ?? (this.o.legacyModelKey || undefined);
+          if (this.o.modelKey && fileKey !== undefined && fileKey !== this.o.modelKey) {
             this.o.onReset(loaded.n);
           } else {
             this.agg = {

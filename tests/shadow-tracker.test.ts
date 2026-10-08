@@ -106,3 +106,14 @@ test('t groupé par créneau ; réglages du modèle changés → nouvelle mesure
   assert.equal(resetN, 200);
   assert.equal(new ShadowTracker({ path, modelKey: 'z=1', fetchOutcome: outcome }).stats().n, 200, 'même réglage : mesure conservée');
 });
+
+test('ancien fichier sans empreinte : gardé si le modèle est resté par défaut, écarté sinon', () => {
+  const path = join(mkdtempSync(join(tmpdir(), 'shadow-')), 'fv-shadow.json');
+  writeFileSync(path, JSON.stringify({ n: 10, sumModel: 1, sumMarket: 1.2, sumD: -0.2, sumD2: 0.05 }));
+  const outcome = async () => ({ resolved: false as const, reason: '' });
+  assert.equal(new ShadowTracker({ path, fetchOutcome: outcome, modelKey: 'defaut', legacyModelKey: 'defaut' }).stats().n, 10);
+  let reset = -1;
+  const t = new ShadowTracker({ path, fetchOutcome: outcome, modelKey: 'z=0.8', legacyModelKey: 'defaut', onReset: n => { reset = n; } });
+  assert.equal(t.stats().n, 0);
+  assert.equal(reset, 10);
+});

@@ -152,6 +152,21 @@ export function studentT4CdfStd(x: number): number {
   return 0.5 + 0.75 * u - 0.25 * u * u * u;
 }
 
+/** Inverse de studentT4CdfStd (bissection sur u = t/√(4+t²), fonction monotone). */
+export function studentT4InvStd(p: number): number | null {
+  if (!(p > 0 && p < 1)) return null;
+  let lo = -1;
+  let hi = 1;
+  for (let i = 0; i < 80; i++) {
+    const u = (lo + hi) / 2;
+    if (0.5 + 0.75 * u - 0.25 * u * u * u < p) lo = u;
+    else hi = u;
+  }
+  const u = (lo + hi) / 2;
+  const t = (2 * u) / Math.sqrt(1 - u * u);
+  return t / Math.SQRT2;
+}
+
 /** Frais taker par part pour un achat au prix p. */
 export function takerFeePerShare(p: number, rate: number): number {
   return rate * p * (1 - p);
