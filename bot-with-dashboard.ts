@@ -343,7 +343,7 @@ function canTrade(): boolean {
     log('ERROR', `🛑 Maximum drawdown reached: ${(state.currentDrawdown * 100).toFixed(1)}%`);
     state.isPaused = true;
     state.pauseUntil = Date.now() + (7 * 24 * 60 * 60 * 1000);
-    alertOnce('drawdown', `baisse de ${(state.currentDrawdown * 100).toFixed(1)} % depuis le plus haut : nouvelles positions bloquées (le plus haut ne s'efface pas : reprise sur décision manuelle — archiver ~/.polymarket/fv-ledger.json ou ajuster PAPER_CAPITAL)`);
+    alertOnce('drawdown', `baisse de ${(state.currentDrawdown * 100).toFixed(1)} % depuis le plus haut : nouvelles positions bloquées (le plus haut ne s'efface pas : reprise sur décision manuelle — ARRÊTER le bot, attendre qu'aucune position ne soit ouverte, archiver ~/.polymarket/fv-ledger.json, puis redémarrer)`);
     updateDashboard();
     return false;
   }
@@ -518,6 +518,8 @@ function simulateTrade(profit: number, strategy: string, description: string) {
 // ============================================================================
 
 let arbService: ArbitrageService | null = null;
+/** SDK, pour l'arrêt propre (services DipArb/WebSocket). */
+let sdkRef: PolymarketSDK | null = null;
 let isSmartMoneyInitialized = false;
 let isSmartMoneyInitializing = false;
 
@@ -1151,7 +1153,7 @@ function activateTelegram(client: TelegramClient, detail: string) {
   notify(msgStartup({
     capital: CONFIG.capital.totalUsd, minEdge: FV_CFG.minEdge, minProb: FV_CFG.minProb, feeRate: FV_CFG.takerFeeRate,
     pollSec: FV_POLL_MS / 1000, coins: [...FV_COINS], stats: ledgerStats(), warning: capitalWarning() ?? undefined,
-    zScale: FV_CFG.zScale, blendModel: FV_CFG.blendModel, blendMarket: FV_CFG.blendMarket,
+    zScale: FV_CFG.zScale, blendModel: FV_CFG.blendModel, blendMarket: FV_CFG.blendMarket, live: !CONFIG.dryRun,
   }));
 
   // Bilan périodique, seulement s'il s'est passé quelque chose depuis le précédent.
@@ -1179,6 +1181,9 @@ function activateTelegram(client: TelegramClient, detail: string) {
 // === ARRÊT SUR PERFORMANCE RÉELLE (src/strategy/performance-guard.ts) ===
 const guardFile = () => new PersistentGuard(polyDir() + '/fv-guard.json');
 let guardLoggedAt = 0;
+let calibLoggedAt = 0;
+/** Arrêt de sécurité déclenché pendant cette session (même si le fichier n'a pas pu être écrit). */
+let sessionStop: string | null = null;
 /** Raison de bloquer les entrées, ou null. Évalué à chaque signal (lecture du registre). */
 function perfGuard(): string | null {
   const g = guardFile();
@@ -1190,15 +1195,22 @@ function perfGuard(): string | null {
     }
     return existing;
   }
+  if (sessionStop) return sessionStop;
   const v = evaluateGuard(ledgerStats());
   if (v.warn) {
-    log('WARN', `⚠️ ${v.warn}`);
+    // Appelé à chaque signal : journal limité à une ligne par heure (avant : des dizaines
+    // de milliers de lignes par jour tant que l'alerte durait).
+    if (Date.now() - calibLoggedAt > 3_600_000) {
+      calibLoggedAt = Date.now();
+      log('WARN', `⚠️ ${v.warn}`);
+    }
     alertOnce('calibration', `${v.warn} — augmente FV_MIN_EDGE ou analyse le journal (scripts/analysis/fv-report.ts)`);
   }
   if (v.stop) {
+    sessionStop = v.stop; // même si l'écriture du fichier échoue : une seule alerte, blocage maintenu
     try { g.trip(v.stop, Date.now()); } catch { /* le blocage reste effectif pour cette session */ }
     log('ERROR', `🛑 ARRÊT DE SÉCURITÉ : ${v.stop}. Les nouvelles entrées sont bloquées.`);
-    notify(msgAlert(`ARRÊT DE SÉCURITÉ — ${v.stop}. Le bot n'ouvre plus de position (il continue d'observer). Pour reprendre : supprimer ~/.polymarket/fv-guard.json puis redémarrer.`));
+    notify(msgAlert(`ARRÊT DE SÉCURITÉ — ${v.stop}. Le bot n'ouvre plus de position (il continue d'observer). Pour reprendre : arrêter le bot, supprimer ~/.polymarket/fv-guard.json, puis redémarrer.`));
     return v.stop;
   }
   return null;
@@ -1287,7 +1299,7 @@ async function setupFairValueStrategy(sdk: PolymarketSDK) {
       const streak = /pertes consécutives/.test(reason);
       alertOnce(streak ? 'risk-streak' : 'risk-drawdown', streak
         ? `mise suspendue après une série de pertes (${reason.slice(0, 120)}) — reprise automatique quand ces pertes auront plus de 6 h`
-        : `mise suspendue : baisse ≥ 20 % depuis le plus haut. Arrêt de risque maintenu jusqu'à décision manuelle (analyser le journal, puis archiver ~/.polymarket/fv-ledger.json ou ajuster PAPER_CAPITAL)`);
+        : `mise suspendue : baisse ≥ 20 % depuis le plus haut. Arrêt de risque maintenu jusqu'à décision manuelle (analyser le journal ; pour repartir : arrêter le bot, archiver ~/.polymarket/fv-ledger.json une fois les positions réglées, redémarrer)`);
     },
     onTradeOpened: e => {
       simulateTrade(e.winProfit, 'fairValue', e.description);
@@ -1588,10 +1600,15 @@ async function shutdown(reason: string, code: number): Promise<void> {
   shuttingDown = true;
   log(code ? 'ERROR' : 'INFO', `Arrêt du bot (${reason})`);
   try { spotStream?.stop(); } catch { /* déjà arrêté */ }
+  const stopServices = (async () => {
+    try { await arbService?.stop(); } catch { /* déjà arrêté */ }
+    try { await sdkRef?.dipArb.stop(); } catch { /* déjà arrêté */ }
+    try { sdkRef?.stop(); } catch { /* déjà arrêté */ }
+  })();
   notify(code ? msgAlert(`bot arrêté sur erreur (${reason}) — PM2 va le relancer`) : `🛑 Bot arrêté (${reason})`);
   recordSessionHistory();
   await Promise.race([
-    Promise.all([telegram?.flush(), decisionJournal?.flush()]),
+    Promise.all([telegram?.flush(), decisionJournal?.flush(), stopServices]),
     new Promise(r => setTimeout(r, 5000)),
   ]);
   process.exit(code);
@@ -1699,9 +1716,16 @@ async function main() {
   const sdk = new PolymarketSDK({
     privateKey: sdkPrivateKey,
   });
+  // En papier, la stratégie juste valeur n'utilise ni le WebSocket Polymarket ni la clé
+  // API : seuls DipArb / SmartMoney en ont besoin. Sans eux, on ne se connecte pas (avant :
+  // 15 s de démarrage perdues et ~45 lignes d'erreur par tentative quand le serveur est
+  // injoignable). Activés plus tard depuis le dashboard, ils connectent à ce moment-là.
+  const needWs = !CONFIG.dryRun || CONFIG.smartMoney.enabled || CONFIG.dipArb.enabled;
   try {
-    if (ephemeralKey) {
-      sdk.connect(); // WebSocket public seulement : pas de dérivation de clé API
+    if (!needWs) {
+      log('INFO', 'Papier : WebSocket Polymarket non connecté (inutile sans DipArb / SmartMoney).');
+    } else if (ephemeralKey || CONFIG.dryRun) {
+      sdk.connect(); // WebSocket public seulement : pas de dérivation de clé API en papier
       await sdk.waitForConnection(15_000);
     } else {
       await sdk.start({ timeout: 15_000 });
@@ -1880,6 +1904,7 @@ async function main() {
                 log('WARN', `DipArb is already running.`);
               } else {
                 log('INFO', `Starting DipArb Service (Scanning for markets)...`);
+                sdk.connect(); // sans effet si déjà connecté ; nécessaire si démarré sans (papier)
                 await sdk.dipArb.findAndStart();
               }
             } else {
@@ -1936,6 +1961,7 @@ async function main() {
           } else if (strategy === 'smartMoney') {
             if (enabled) {
               log('INFO', `Initializing Smart Money...`);
+              sdk.connect(); // sans effet si déjà connecté ; nécessaire si démarré sans (papier)
               // Call the lazy initializer we created
               initializeSmartMoney(sdk);
             } else {
@@ -2038,13 +2064,9 @@ async function main() {
     }
   });
 
-  process.on('SIGINT', async () => {
-    console.log('\n\nShutting down...');
-    if (arbService) await arbService.stop();
-    await sdk.dipArb.stop();
-    sdk.stop();
-    process.exit(0);
-  });
+  // (Arrêt : géré par shutdown() — un 2e gestionnaire SIGINT appelait process.exit(0) avant
+  // l'écriture du journal et du message Telegram : 0 ligne sur 200 sauvée en test.)
+  sdkRef = sdk;
 
   log('INFO', '🚀 Bot + Dashboard running! Press Ctrl+C to stop.\n');
 

@@ -142,7 +142,9 @@ export function saveLedger(path: string, trades: LedgerTrade[]): void {
   try {
     // writeFileSync sur un descripteur boucle jusqu'à tout écrire (writeSync seul peut
     // écrire partiellement, ex. disque plein → JSON tronqué renommé sur le bon registre).
-    writeFileSync(fd, JSON.stringify(body, null, 2));
+    // JSON compact : ~40 % plus petit qu'indenté, donc écriture et relecture plus rapides
+    // quand le registre grossit (lecture humaine : scripts/analysis/ledger.ts).
+    writeFileSync(fd, JSON.stringify(body));
     fsyncSync(fd);
   } finally {
     closeSync(fd);

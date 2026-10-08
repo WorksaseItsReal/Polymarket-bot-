@@ -580,3 +580,18 @@ test('pause de risque : aucun pari, mais la MESURE continue (journal, marchés) 
   assert.ok(r.lastMarketsFoundAt > 0, 'marchés rafraîchis : pas de fausse alerte « aucun marché »');
   assert.ok(env.logs.some(l => /entrées bloquées \(pause de risque\)/.test(l)));
 });
+
+test('carnets lents : le spot est relu à l\'instant des carnets (pas d\'achat sur un mouvement déjà annulé)', async () => {
+  let spotCalls = 0;
+  const env = setup({
+    // 1re lecture : spot au-dessus du strike (signal UP) ; relu après les carnets : revenu au strike
+    getRoundData: async () => ({ spot: spotCalls++ === 0 ? 100.12 : 100, strike: 100, sigmaPerSqrtSec: SIGMA, source: 'test', candleAgeMs: 0 }),
+    getBook: async id => {
+      env.setNow((SLOT + 180) * 1000 + 2000); // les carnets arrivent 2 s plus tard
+      return { asks: [{ price: id === 'UP' ? 0.6 : 0.41, size: 100 }], bids: [] };
+    },
+  });
+  await env.runner().tick();
+  assert.equal(spotCalls, 2, 'spot relu');
+  assert.equal(loadLedger(env.ledgerPath)!.length, 0, 'plus de signal avec le spot à jour');
+});

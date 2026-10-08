@@ -88,6 +88,8 @@ export interface StartupInfo {
   stats: LedgerStats;
   /** Avertissement de configuration à afficher en tête (ex. capital trop petit). */
   warning?: string;
+  /** Démarré en RÉEL (DRY_RUN=false). */
+  live?: boolean;
   /** Réglages de calibration (affichés seulement s'ils diffèrent du modèle brut). */
   zScale?: number;
   blendModel?: number;
@@ -106,7 +108,9 @@ function tuningLine(i: StartupInfo): string | null {
 
 export function msgStartup(i: StartupInfo): string {
   return [
-    '🤖 <b>Bot Polymarket démarré</b> — mode PAPIER (aucun ordre réel)',
+    i.live
+      ? '🤖 <b>Bot Polymarket démarré</b> — ⚠️ mode RÉEL (DRY_RUN=false) : la stratégie juste valeur n\'envoie aucun ordre, mais les autres stratégies activées le peuvent'
+      : '🤖 <b>Bot Polymarket démarré</b> — mode PAPIER (aucun ordre réel)',
     `Marchés : « Up or Down » 5 min · ${escapeHtml(i.coins.join(', '))}`,
     `Règle : pari seulement si la probabilité calculée ≥ ${pct(i.minProb)} ET dépasse le prix payé (frais inclus) d'au moins ${(i.minEdge * 100).toFixed(0)} pts`,
     `Capital papier : ${amount(i.capital)} · vérification toutes les ${i.pollSec} s`,

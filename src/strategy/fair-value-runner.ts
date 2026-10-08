@@ -432,7 +432,7 @@ export class FairValueRunner {
       const coin = market.underlying;
       let rec: DecisionRecord | null = null; // évaluation journalisée (pari ou abstention)
       try {
-        const data = await this.d.getRoundData(coin, slot, now);
+        let data = await this.d.getRoundData(coin, slot, now);
         if (!data) {
           this.holdLog(market.conditionId, `   ↳ ${market.slug} : spot/strike/vol indisponibles ou périmés → pas de mise`);
           continue;
@@ -443,6 +443,17 @@ export class FairValueRunner {
         const nowBook = this.d.now();
         tauSec = (endMs - nowBook) / 1000;
         if (tauSec < cfg.minTauSec || tauSec > cfg.maxTauSec) continue;
+        // Carnets lents à venir : le spot lu AVANT eux peut être dépassé (spot revenu,
+        // carnet déjà réajusté → on achèterait contre un prix juste). On relit le spot, à
+        // l'instant de la lecture des carnets — information disponible à la décision.
+        if (nowBook - now > 500) {
+          const fresh = await this.d.getRoundData(coin, slot, nowBook);
+          if (!fresh) {
+            this.holdLog(market.conditionId, `   ↳ ${market.slug} : spot indisponible après lecture des carnets → pas de mise`);
+            continue;
+          }
+          data = fresh;
+        }
         const upBest = bestLevel(upBook.asks, 'ask');
         const downBest = bestLevel(downBook.asks, 'ask');
         const upBid = bestLevel(upBook.bids, 'bid');
