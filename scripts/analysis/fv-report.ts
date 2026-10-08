@@ -38,6 +38,19 @@ const cfg = fairValueConfigFromEnv(process.env);
 const pct = (x: number | null, d = 1) => (x === null ? '—' : `${(x * 100).toFixed(d)} %`);
 const num = (x: number | null, d = 3) => (x === null ? '—' : x.toFixed(d));
 
+/** Chaînes partagées : chaque ligne relue crée sinon sa propre copie du slug et du coin. */
+const strings = new Map<string, string>();
+const intern = (x: string) => strings.get(x) ?? (strings.set(x, x), x);
+
+/** Seuls les champs utiles à l'analyse : un journal de 30 jours ≈ 1 million de lignes. */
+function slim(r: DecisionRecord): DecisionRecord {
+  return {
+    t: r.t, slug: intern(r.slug), coin: intern(r.coin), tau: r.tau, spot: 0, strike: 0, sig: 0, pUp: r.pUp, pRaw: r.pRaw, zs: r.zs,
+    upAsk: r.upAsk, downAsk: r.downAsk, upAskSz: r.upAskSz, downAskSz: null, upBid: r.upBid, src: '', act: r.act === 'buy' ? 'buy' : 'hold',
+    ...(r.side ? { side: r.side } : {}),
+  };
+}
+
 function readJournal(): DecisionRecord[] {
   if (!existsSync(DIR)) {
     console.error(`Aucun journal dans ${DIR} (le bot écrit decisions-*.jsonl quand FV_JOURNAL≠false).`);
@@ -54,7 +67,7 @@ function readJournal(): DecisionRecord[] {
       if (!line.trim()) continue;
       try {
         const r = JSON.parse(line) as DecisionRecord;
-        if (typeof r.slug === 'string' && Number.isFinite(r.t) && r.t >= since) out.push(r);
+        if (typeof r.slug === 'string' && Number.isFinite(r.t) && r.t >= since) out.push(slim(r));
       } catch { bad++; }
     }
   }
@@ -83,9 +96,13 @@ async function resolveAll(slugs: string[]): Promise<Map<string, boolean>> {
 async function main() {
   const records = readJournal();
   const outcomes = await resolveAll([...new Set(records.map(r => r.slug))]);
-  const resolved: ResolvedRecord[] = records
-    .filter(r => outcomes.has(r.slug))
-    .map(r => ({ ...r, upWon: outcomes.get(r.slug) as boolean }));
+  // Issue ajoutée EN PLACE (objets fraîchement lus, propres à ce script) : pas de copie.
+  const resolved: ResolvedRecord[] = [];
+  for (const r of records) {
+    if (!outcomes.has(r.slug)) continue;
+    (r as ResolvedRecord).upWon = outcomes.get(r.slug) as boolean;
+    resolved.push(r as ResolvedRecord);
+  }
   // Toutes les évaluations ramenées au FV_Z_SCALE actuel (un journal peut couvrir un
   // changement de réglage), puis probabilité de décision recalculée avec le mélange actuel :
   // le rapport juge le réglage EN VIGUEUR, pas un mélange de réglages passés.

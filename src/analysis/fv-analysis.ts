@@ -41,7 +41,11 @@ export function normalizeZScale(rounds: ResolvedRecord[][], zNow: number, tails:
   return rounds.map(list => list.map(r => {
     const raw = rawModelProb(r);
     const zRec = r.zs ?? 1; // journaux d'avant l'enregistrement du réglage : supposés à 1
-    if (raw === null || zRec === zNow) return { ...r, pRaw: raw, zs: zRec };
+    if (raw === null || zRec === zNow) {
+      // Rien à changer : même objet (un journal de 30 jours ≈ 1 million d'évaluations ;
+      // une copie de chacune à chaque étape saturait la mémoire).
+      return r.pRaw === raw && r.zs === zRec ? r : { ...r, pRaw: raw, zs: zRec };
+    }
     const z = inv(Math.min(0.999999, Math.max(0.000001, raw)));
     const p = z === null ? raw : cdf((zNow * z) / zRec);
     return { ...r, pRaw: p, zs: zNow };
@@ -413,17 +417,25 @@ export interface BlendFit {
  * pour l'estimer (oos.tVsModel nettement négatif).
  */
 export function fitBlend(rounds: ResolvedRecord[][], opts: { minTau?: number; maxTau?: number } = {}): BlendFit | null {
-  const all = blendPoints(rounds, opts);
-  const nRounds = new Set(all.map(p => p.slug)).size;
-  if (nRounds < 60) return null;
-  const full = fitBlendParams(all);
+  // Points construits l'un après l'autre (jamais les trois ensembles en mémoire à la fois :
+  // ~1 million d'évaluations sur 30 jours de journal).
+  const countRounds = (pts: BlendPoint[]) => new Set(pts.map(p => p.slug)).size;
+  let nRounds = 0;
+  const full = (() => {
+    const all = blendPoints(rounds, opts);
+    nRounds = countRounds(all);
+    return nRounds < 60 ? null : fitBlendParams(all);
+  })();
+  if (!full) return null;
   const [h1, h2] = halves(rounds);
-  const p1 = blendPoints(h1, opts);
-  const p2 = blendPoints(h2, opts);
   let oos: BlendFit['oos'] = null;
-  if (new Set(p1.map(p => p.slug)).size >= 30 && new Set(p2.map(p => p.slug)).size >= 30) {
-    const fit1 = fitBlendParams(p1);
-    const sc = scoreBlend(p2, fit1.a, fit1.b);
+  const fit1 = (() => {
+    const p1 = blendPoints(h1, opts);
+    return countRounds(p1) >= 30 ? fitBlendParams(p1) : null;
+  })();
+  if (fit1) {
+    const p2 = blendPoints(h2, opts);
+    const sc = countRounds(p2) >= 30 ? scoreBlend(p2, fit1.a, fit1.b) : null;
     if (sc) oos = { ...sc, ...fit1 };
   }
   return { rounds: nRounds, a: full.a, b: full.b, oos };
@@ -435,7 +447,7 @@ export function applyBlend(rounds: ResolvedRecord[][], a: number, b: number): Re
   return rounds.map(list => list.map(r => {
     const raw = rawModelProb(r);
     const pUp = raw === null ? null : blendWithMarket(raw, bookMidUp(r.upAsk, r.downAsk), cfg);
-    return { ...r, pRaw: raw, pUp };
+    return r.pRaw === raw && r.pUp === pUp ? r : { ...r, pRaw: raw, pUp }; // pas de copie inutile
   }));
 }
 
