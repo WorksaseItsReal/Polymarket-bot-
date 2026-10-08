@@ -1,0 +1,180 @@
+/**
+ * doctor.ts — diagnostic d'installation (`npm run doctor`) : ce qui empêcherait le bot de
+ * mesurer ou de parier, dit en clair, AVANT de le découvrir après des jours de papier.
+ *
+ * Trois familles : configuration (.env), fichiers (registre, arrêt de sécurité, interface
+ * du dashboard), réseau (Gamma, carnet CLOB, Binance, horloge). Fonctions testables :
+ * l'environnement, les chemins et `fetch` sont injectés.
+ */
+
+import { existsSync, readdirSync, statSync } from 'node:fs';
+import { join } from 'node:path';
+import { fairValueConfigFromEnv, DEFAULT_FAIR_VALUE_CONFIG } from './fair-value.js';
+import { looksLikeBotToken, telegramConfigFromEnv } from './telegram.js';
+import { computeStats, readLedgerShared } from './paper-ledger.js';
+import { parseRoundTokens, roundSlug, slotStart } from './round-discovery.js';
+
+export type Level = 'ok' | 'warn' | 'error';
+export interface Check {
+  level: Level;
+  label: string;
+  detail: string;
+}
+
+type Env = Record<string, string | undefined>;
+const ok = (label: string, detail: string): Check => ({ level: 'ok', label, detail });
+const warn = (label: string, detail: string): Check => ({ level: 'warn', label, detail });
+const err = (label: string, detail: string): Check => ({ level: 'error', label, detail });
+
+const positive = (env: Env, ...keys: string[]) => {
+  for (const k of keys) {
+    const v = Number(env[k] ?? '');
+    if (Number.isFinite(v) && v > 0) return v;
+  }
+  return null;
+};
+
+/** Mêmes FV_* que lus par le bot ; ceux qui sont ignorés (hors bornes, illisibles). */
+const FV_ENV: Array<[string, keyof typeof DEFAULT_FAIR_VALUE_CONFIG]> = [
+  ['FV_MIN_EDGE', 'minEdge'], ['FV_MIN_PROB', 'minProb'], ['FV_MIN_TAU_SEC', 'minTauSec'], ['FV_MAX_TAU_SEC', 'maxTauSec'],
+  ['FV_MIN_ASK', 'minAsk'], ['FV_MAX_ASK', 'maxAsk'], ['FV_Z_SCALE', 'zScale'], ['FV_BLEND_MODEL', 'blendModel'],
+  ['FV_BLEND_MARKET', 'blendMarket'], ['FV_TAKER_FEE_RATE', 'takerFeeRate'], ['FV_BASIS_BPS', 'basisBps'],
+  ['FV_STRIKE_NOISE_SEC', 'strikeNoiseSec'], ['FV_TWAP_WINDOW_SEC', 'twapWindowSec'],
+];
+
+export function configChecks(env: Env): Check[] {
+  const out: Check[] = [];
+  const paper = (env.DRY_RUN ?? '').trim().toLowerCase() !== 'false';
+  out.push(paper ? ok('Mode', 'PAPIER (DRY_RUN) : aucun ordre réel') : err('Mode', 'DRY_RUN=false : mode RÉEL. La stratégie juste valeur n\'envoie aucun ordre, mais les autres stratégies activées le peuvent.'));
+
+  const capital = paper ? positive(env, 'PAPER_CAPITAL', 'CAPITAL_USD') ?? 50 : positive(env, 'CAPITAL_USD') ?? 250;
+  const minOrderRaw = (env.FV_MIN_ORDER_USD ?? '').trim();
+  const minOrder = minOrderRaw !== '' && Number.isFinite(Number(minOrderRaw)) && Number(minOrderRaw) >= 0 ? Number(minOrderRaw) : 1;
+  const maxStake = capital * 0.01;
+  out.push(minOrder > 0 && maxStake < minOrder
+    ? err('Capital', `${capital} $ : mise max ${maxStake.toFixed(2)} $ (1 %) < minimum Polymarket ${minOrder} $ → AUCUN pari. Mettre PAPER_CAPITAL=250.`)
+    : minOrder > 0 && maxStake < 2 * minOrder
+      ? warn('Capital', `${capital} $ : mise max ${maxStake.toFixed(2)} $, à peine au-dessus du minimum ${minOrder} $ — 250 $ recommandé.`)
+      : ok('Capital', `${capital} $ (mise max ${maxStake.toFixed(2)} $ par pari)`));
+
+  const legacy = ['DIPARB_ENABLED', 'SMARTMONEY_ENABLED', 'ARBITRAGE_ENABLED', 'TREND_ANALYSIS_ENABLED'].filter(k => env[k] === 'true');
+  out.push(legacy.length
+    ? warn('Anciennes stratégies', `${legacy.join(', ')} activé(s) : elles tournent en parallèle (requêtes, compteurs du dashboard). Les mettre à false sauf besoin précis.`)
+    : ok('Anciennes stratégies', 'désactivées'));
+
+  const tg = telegramConfigFromEnv(env);
+  if (!tg) out.push(warn('Telegram', 'non configuré (TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID) : aucune notification.'));
+  else if (!looksLikeBotToken(tg.token)) out.push(err('Telegram', 'TELEGRAM_BOT_TOKEN ne ressemble pas à un token @BotFather (123456789:ABC…).'));
+  else out.push(ok('Telegram', 'configuré (connexion testée plus bas)'));
+
+  const host = env.DASHBOARD_HOST || '127.0.0.1';
+  const local = ['127.0.0.1', '::1', 'localhost'].includes(host);
+  out.push(!local && !env.DASHBOARD_TOKEN
+    ? warn('Dashboard', `DASHBOARD_HOST=${host} sans DASHBOARD_TOKEN : le dashboard se repliera sur 127.0.0.1 (tunnel SSH pour y accéder).`)
+    : ok('Dashboard', local ? `local (${host})` : `exposé sur ${host}, protégé par jeton`));
+
+  const cfg = fairValueConfigFromEnv(env);
+  const ignored = FV_ENV.filter(([k, f]) => {
+    const raw = env[k];
+    if (raw === undefined || raw.trim() === '') return false;
+    return Number(raw) !== (cfg[f] as number);
+  }).map(([k]) => `${k}=${env[k]}`);
+  out.push(ignored.length
+    ? warn('Réglages FV', `ignorés (hors bornes ou illisibles, valeur par défaut utilisée) : ${ignored.join(', ')}`)
+    : ok('Réglages FV', `edge ≥ ${cfg.minEdge}, p ≥ ${cfg.minProb}, τ ∈ [${cfg.minTauSec}, ${cfg.maxTauSec}] s, confiance ×${cfg.zScale}, mélange ${cfg.blendModel}/${cfg.blendMarket}`));
+  return out;
+}
+
+export function fileChecks(polyDir: string, repoDir: string): Check[] {
+  const out: Check[] = [];
+  const ledgerPath = join(polyDir, 'fv-ledger.json');
+  const trades = readLedgerShared(ledgerPath);
+  if (trades === null) out.push(err('Registre', `${ledgerPath} illisible : le bot n'ouvrira aucune position (fichier préservé ; le réparer ou l'archiver).`));
+  else {
+    const st = computeStats(trades);
+    out.push(ok('Registre', existsSync(ledgerPath) ? `${st.n} trades réglés, ${st.open} en cours, PnL ${st.pnl.toFixed(2)} $` : 'pas encore créé (normal au premier lancement)'));
+  }
+  const guard = join(polyDir, 'fv-guard.json');
+  out.push(existsSync(guard)
+    ? err('Arrêt de sécurité', `${guard} présent : nouvelles entrées BLOQUÉES (perte significative constatée). Analyser, puis supprimer ce fichier et redémarrer.`)
+    : ok('Arrêt de sécurité', 'aucun'));
+  out.push(existsSync(join(repoDir, 'dashboard', 'dist', 'index.html'))
+    ? ok('Interface du dashboard', 'construite')
+    : warn('Interface du dashboard', 'non construite : (cd dashboard && npm install && npm run build)'));
+  const jdir = join(polyDir, 'journal');
+  if (existsSync(jdir)) {
+    let bytes = 0;
+    let files = 0;
+    for (const f of readdirSync(jdir)) {
+      if (!/^decisions-/.test(f)) continue;
+      files++;
+      try { bytes += statSync(join(jdir, f)).size; } catch { /* fichier disparu */ }
+    }
+    out.push(ok('Journal des décisions', `${files} fichier(s), ${(bytes / 1e6).toFixed(1)} Mo`));
+  } else {
+    out.push(warn('Journal des décisions', 'pas encore créé (normal avant le premier passage ; sinon vérifier FV_JOURNAL)'));
+  }
+  return out;
+}
+
+async function get(fetchImpl: typeof fetch, url: string, timeoutMs: number): Promise<{ status: number; body: unknown; date: string | null } | null> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetchImpl(url, { signal: controller.signal, headers: { Accept: 'application/json' } });
+    let body: unknown = null;
+    try { body = await res.json(); } catch { /* pas du JSON */ }
+    return { status: res.status, body, date: res.headers.get('date') };
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** Accès aux API publiques utilisées par la stratégie, et décalage d'horloge. */
+export async function networkChecks(fetchImpl: typeof fetch, nowMs: number, timeoutMs = 6000): Promise<Check[]> {
+  const out: Check[] = [];
+  const slot = slotStart(nowMs);
+  const slug = roundSlug('BTC', slot);
+  const g = await get(fetchImpl, `https://gamma-api.polymarket.com/events?slug=${slug}`, timeoutMs);
+  let upToken: string | null = null;
+  if (!g) out.push(err('Polymarket Gamma', 'injoignable : ni découverte des rounds ni règlement possibles (réseau, DNS, pare-feu ?)'));
+  else if (g.status !== 200) out.push(err('Polymarket Gamma', `HTTP ${g.status}`));
+  else {
+    upToken = parseRoundTokens(g.body, 'BTC', slug)?.upTokenId ?? null;
+    out.push(upToken ? ok('Polymarket Gamma', `round en cours trouvé (${slug})`) : warn('Polymarket Gamma', `joignable, mais ${slug} pas (encore) listé — réessayer dans une minute`));
+  }
+  if (upToken) {
+    const b = await get(fetchImpl, `https://clob.polymarket.com/book?token_id=${upToken}`, timeoutMs);
+    out.push(!b ? err('Carnet CLOB', 'injoignable : aucune évaluation possible')
+      : b.status === 200 ? ok('Carnet CLOB', 'carnet du round lu') : err('Carnet CLOB', `HTTP ${b.status}`));
+  }
+  let binanceDate: string | null = null;
+  const main = await get(fetchImpl, 'https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&limit=1', timeoutMs);
+  if (main?.status === 200) {
+    binanceDate = main.date;
+    out.push(ok('Binance', 'api.binance.com joignable'));
+  } else {
+    const vision = await get(fetchImpl, 'https://data-api.binance.vision/api/v3/klines?symbol=BTCUSDT&interval=1m&limit=1', timeoutMs);
+    if (vision?.status === 200) {
+      binanceDate = vision.date;
+      out.push(warn('Binance', `api.binance.com ${main ? `HTTP ${main.status}${main.status === 451 ? ' (pays bloqué)' : ''}` : 'injoignable'} : repli binance.vision OK (le bot l'utilise automatiquement)`));
+    } else {
+      out.push(err('Binance', 'ni api.binance.com ni binance.vision : spot dégradé (repli Coinbase), à corriger'));
+    }
+  }
+  if (binanceDate) {
+    const skew = Date.parse(binanceDate) - nowMs; // en-tête HTTP à la seconde près
+    out.push(Math.abs(skew) > 3000
+      ? err('Horloge', `décalée d'environ ${(skew / 1000).toFixed(0)} s : le temps restant des rounds est faux → activer NTP (timedatectl set-ntp true)`)
+      : ok('Horloge', 'à l\'heure (±1 s)'));
+  }
+  return out;
+}
+
+export function summarize(checks: Check[]): { text: string; errors: number; warnings: number } {
+  const icon = { ok: '✅', warn: '⚠️ ', error: '❌' } as const;
+  const text = checks.map(c => `${icon[c.level]} ${c.label.padEnd(24)} ${c.detail}`).join('\n');
+  return { text, errors: checks.filter(c => c.level === 'error').length, warnings: checks.filter(c => c.level === 'warn').length };
+}
