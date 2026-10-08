@@ -8,12 +8,12 @@
 import 'dotenv/config';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { configChecks, fileChecks, networkChecks, summarize, type Check } from '../src/services/doctor.js';
+import { configChecks, fileChecks, networkChecks, runtimeChecks, summarize, type Check } from '../src/services/doctor.js';
 import { TelegramClient, telegramConfigFromEnv } from '../src/services/telegram.js';
 
 async function main(): Promise<number> {
   const poly = join(process.env.HOME || homedir(), '.polymarket');
-  const checks: Check[] = [...configChecks(process.env), ...fileChecks(poly, process.cwd())];
+  const checks: Check[] = [...runtimeChecks(), ...configChecks(process.env), ...fileChecks(poly, process.cwd())];
   console.log('Vérification du réseau (quelques secondes)…\n');
   checks.push(...await networkChecks((...a: Parameters<typeof fetch>) => fetch(...a), Date.now(), 6000, Date.now));
   const tg = telegramConfigFromEnv(process.env);

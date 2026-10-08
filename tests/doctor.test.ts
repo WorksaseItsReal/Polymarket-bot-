@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { configChecks, fileChecks, networkChecks, summarize } from '../src/services/doctor.ts';
+import { configChecks, fileChecks, networkChecks, runtimeChecks, summarize } from '../src/services/doctor.ts';
 
 const level = (cs: ReturnType<typeof configChecks>, label: string) => cs.find(c => c.label === label)?.level;
 
@@ -115,4 +115,12 @@ test('réglages du bot : valeurs ramenées ou ignorées signalées (comme le bot
   assert.match(d.detail, /ADA inconnu/);
   assert.match(d.detail, /FV_EXIT_EDGE=2 ignoré/);
   assert.equal(configChecks({ PAPER_CAPITAL: '250', FV_POLL_SEC: '10', FV_COINS: 'btc,eth' }).find(c => c.label === 'Réglages du bot')!.level, 'ok');
+});
+
+test('Node.js : ≥ 20.6 requis (PM2 lance le bot par node --import tsx)', () => {
+  assert.equal(runtimeChecks('22.22.0')[0].level, 'ok');
+  assert.equal(runtimeChecks('20.6.0')[0].level, 'ok');
+  assert.equal(runtimeChecks('20.5.1')[0].level, 'error');
+  assert.equal(runtimeChecks('18.19.0')[0].level, 'error');
+  assert.equal(runtimeChecks()[0].level, 'ok', 'le Node qui fait tourner les tests');
 });

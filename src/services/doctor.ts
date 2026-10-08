@@ -158,6 +158,18 @@ function botSettingsCheck(env: Env, minEdge: number): Check {
   return notes.length ? warn('Réglages du bot', notes.join(' ; ')) : ok('Réglages du bot', 'valeurs reconnues');
 }
 
+/**
+ * Version de Node : PM2 lance le bot par `node --import tsx` (ecosystem.config.cjs), option
+ * reconnue à partir de Node 20.6 — en dessous, le bot ne démarrerait plus sous PM2.
+ */
+export function runtimeChecks(nodeVersion: string = process.versions.node): Check[] {
+  const [maj, min] = nodeVersion.split('.').map(Number);
+  const okVersion = maj > 20 || (maj === 20 && min >= 6);
+  return [okVersion
+    ? ok('Node.js', `v${nodeVersion}`)
+    : err('Node.js', `v${nodeVersion} : Node ≥ 20.6 requis (PM2 lance le bot par « node --import tsx »). Mettre Node à jour (22 LTS recommandé).`)];
+}
+
 export function fileChecks(polyDir: string, repoDir: string, nowMs = Date.now()): Check[] {
   const out: Check[] = [];
   const ledgerPath = join(polyDir, 'fv-ledger.json');
