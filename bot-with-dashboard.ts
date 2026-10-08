@@ -26,7 +26,7 @@ import type { BotState, BotConfig, LogLevel, DipArbSignal, SmartMoneySignal } fr
 import { addSession, createSessionFromState, type TradeRecord } from './src/dashboard/session-history.js';
 import { isSpotCoin, type SpotCoin } from './src/services/spot-price-service.js';
 import { computeStake, MAX_VARIANCE_PCT } from './src/services/stake-sizing.js';
-import { DEFAULT_FAIR_VALUE_CONFIG, fairValueConfigFromEnv } from './src/services/fair-value.js';
+import { fairValueConfigFromEnv } from './src/services/fair-value.js';
 import { getRoundMarketData } from './src/services/round-market-data.js';
 import { fetchRoundOutcome, ledgerStatsShared, readLedgerShared, type LedgerStats } from './src/services/paper-ledger.js';
 import { FairValueRunner, coinsFromEnv, type ScannedMarket } from './src/strategy/fair-value-runner.js';
@@ -1233,17 +1233,15 @@ async function setupFairValueStrategy(sdk: PolymarketSDK) {
   // Mesure continue « modèle vs carnet » sur tous les rounds observés (bilan Telegram).
   // Empreinte du modèle MESURÉ (le mélange n'en fait pas partie : la mesure porte sur le
   // modèle seul). Si elle change, « Modèle vs carnet » repart de zéro.
+  // `mesure` : définition de la mesure (v2 = moyenne de toutes les évaluations du round).
   const modelKey = JSON.stringify({
-    z: FV_CFG.zScale, tails: FV_CFG.tails, noise: FV_CFG.strikeNoiseSec, basis: FV_CFG.basisBps, twap: FV_CFG.twapWindowSec,
-  });
-  const keyOf = (c: typeof FV_CFG) => JSON.stringify({
-    z: c.zScale, tails: c.tails, noise: c.strikeNoiseSec, basis: c.basisBps, twap: c.twapWindowSec,
+    mesure: 2, z: FV_CFG.zScale, tails: FV_CFG.tails, noise: FV_CFG.strikeNoiseSec, basis: FV_CFG.basisBps, twap: FV_CFG.twapWindowSec,
   });
   const shadow = new ShadowTracker({
     path: polyDir() + '/fv-shadow.json', fetchOutcome: slug => fetchRoundOutcome(slug), modelKey,
-    // Fichier d'avant l'empreinte : supposé mesuré avec les réglages par défaut.
-    legacyModelKey: keyOf(DEFAULT_FAIR_VALUE_CONFIG),
-    onReset: n => log('WARN', `Réglages du modèle changés : la mesure « modèle vs carnet » (${n} rounds) repart de zéro`),
+    // Fichier d'avant l'empreinte : ancienne définition (1re évaluation seulement) → repart de zéro.
+    legacyModelKey: 'mesure-1',
+    onReset: n => log('WARN', `Réglages du modèle ou définition de la mesure changés : « modèle vs carnet » (${n} rounds) repart de zéro`),
   });
   shadowTracker = shadow;
   setInterval(() => { void shadow.resolveDue(); }, 30_000).unref?.();

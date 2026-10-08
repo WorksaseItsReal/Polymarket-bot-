@@ -1,9 +1,12 @@
 /**
  * shadow-tracker.ts — « le modèle prédit-il mieux que le carnet ? », mesuré en continu.
  *
- * Pour chaque round observé (tradé ou non), on garde la PREMIÈRE évaluation complète :
- * P(Up) du modèle et P(Up) implicite du carnet (milieu des asks). Une fois le round
- * réglé, on ajoute au bilan l'erreur quadratique (Brier) de chacun. La différence
+ * Pour chaque round observé (tradé ou non), on garde ses évaluations complètes (au plus
+ * une toutes les 10 s) : P(Up) du modèle et P(Up) implicite du carnet (milieu des asks).
+ * Une fois le round réglé, on ajoute au bilan l'erreur quadratique (Brier) MOYENNE de
+ * chacun sur ces évaluations — chaque round compte pour un. Avant : seule la première
+ * évaluation (début de round, où tout est proche de 50 %) comptait, d'où très peu de
+ * puissance statistique. La différence
  * appariée d = Brier(modèle) − Brier(carnet) et sa t-stat disent si le modèle est
  * SIGNIFICATIVEMENT meilleur (d < 0) — condition nécessaire pour gagner de l'argent.
  *
@@ -45,8 +48,9 @@ export interface ShadowStats {
 
 interface Pending {
   endMs: number;
-  pModel: number;
-  pMarket: number;
+  /** Évaluations retenues (modèle, carnet), au plus une toutes les 10 s. */
+  evals: Array<{ pm: number; pk: number }>;
+  lastT: number;
 }
 
 export interface ShadowOptions {
@@ -114,16 +118,23 @@ export class ShadowTracker {
     // Modèle SEUL : avec un mélange actif, pUp contient déjà le carnet et la comparaison
     // « modèle vs carnet » serait truquée.
     const pModel = rawModelProb(r);
-    if (this.pending.has(r.slug) || pModel === null) return;
+    if (pModel === null) return;
     const pMarket = marketProbUp(r);
     if (pMarket === null) return;
+    const existing = this.pending.get(r.slug);
+    if (existing) {
+      if (r.t - existing.lastT < 10_000 || existing.evals.length >= 40) return;
+      existing.evals.push({ pm: pModel, pk: pMarket });
+      existing.lastT = r.t;
+      return;
+    }
     const slot = Number(r.slug.split('-').pop());
     if (!Number.isFinite(slot)) return;
     if (this.pending.size >= this.o.maxPending) {
       const oldest = this.pending.keys().next().value;
       if (oldest !== undefined) this.pending.delete(oldest);
     }
-    this.pending.set(r.slug, { endMs: slot * 1000 + 300_000, pModel, pMarket });
+    this.pending.set(r.slug, { endMs: slot * 1000 + 300_000, evals: [{ pm: pModel, pk: pMarket }], lastT: r.t });
   }
 
   /** Règle les rounds terminés (au plus `perCall` requêtes). Ne lève jamais. */
@@ -149,8 +160,8 @@ export class ShadowTracker {
         }
         if (!out.resolved) continue;
         const y = out.upWon ? 1 : 0;
-        const bm = (p.pModel - y) ** 2;
-        const bk = (p.pMarket - y) ** 2;
+        const bm = p.evals.reduce((a, e) => a + (e.pm - y) ** 2, 0) / p.evals.length;
+        const bk = p.evals.reduce((a, e) => a + (e.pk - y) ** 2, 0) / p.evals.length;
         const d = bm - bk;
         const sums: ClusterSums = {
           n: this.agg.n, sum: this.agg.sumD, clusters: this.agg.clusters ?? this.agg.n,

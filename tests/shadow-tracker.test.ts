@@ -16,7 +16,7 @@ const rec = (slug: string, pUp: number, upAsk: number, downAsk: number): Decisio
   t: 0, slug, coin: 'BTC', tau: 200, spot: 1, strike: 1, sig: 1e-4, pUp, upAsk, downAsk, upAskSz: 1, downAskSz: 1, src: 't', act: 'hold',
 });
 
-test('première évaluation par round, résolution après la fin, Brier apparié, persistance', async () => {
+test('évaluations d\'un round (≥ 10 s d\'écart), résolution après la fin, Brier apparié, persistance', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'shadow-'));
   let now = (SLOT + 100) * 1000;
   const outcomes: Record<string, boolean> = {};
@@ -27,7 +27,7 @@ test('première évaluation par round, résolution après la fin, Brier apparié
   });
   const slug = `btc-updown-5m-${SLOT}`;
   t.observe(rec(slug, 0.9, 0.61, 0.41)); // carnet : (0,61 + 0,59)/2 = 0,60
-  t.observe(rec(slug, 0.1, 0.5, 0.5)); // ignorée : pas la première
+  t.observe(rec(slug, 0.1, 0.5, 0.5)); // ignorée : moins de 10 s après la précédente
   await t.resolveDue();
   assert.equal(fetched.length, 0, 'pas avant la fin du round + 60 s');
   now = (SLOT + 400) * 1000;
@@ -116,4 +116,21 @@ test('ancien fichier sans empreinte : gardé si le modèle est resté par défau
   const t = new ShadowTracker({ path, fetchOutcome: outcome, modelKey: 'z=0.8', legacyModelKey: 'defaut', onReset: n => { reset = n; } });
   assert.equal(t.stats().n, 0);
   assert.equal(reset, 10);
+});
+
+test('toutes les évaluations du round comptent (moyenne), chaque round pesant 1', async () => {
+  let now = (SLOT + 100) * 1000;
+  const t = new ShadowTracker({
+    path: join(mkdtempSync(join(tmpdir(), 'shadow-')), 'fv-shadow.json'), now: () => now,
+    fetchOutcome: async () => ({ resolved: true, upWon: true }),
+  });
+  const slug = `btc-updown-5m-${SLOT}`;
+  t.observe({ ...rec(slug, 0.6, 0.51, 0.51), t: 0 }); // carnet 0,50
+  t.observe({ ...rec(slug, 0.9, 0.71, 0.31), t: 20_000 }); // carnet 0,70
+  now = (SLOT + 400) * 1000;
+  await t.resolveDue();
+  const st = t.stats();
+  assert.equal(st.n, 1, 'un round');
+  assert.ok(Math.abs(st.brierModel! - (0.16 + 0.01) / 2) < 1e-12, `${st.brierModel}`);
+  assert.ok(Math.abs(st.brierMarket! - (0.25 + 0.09) / 2) < 1e-12, `${st.brierMarket}`);
 });
