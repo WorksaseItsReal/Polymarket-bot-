@@ -14,8 +14,18 @@
  * une panne disque ne bloque ni ne fait planter la stratégie.
  */
 
-import { appendFile, mkdir, readdir, unlink } from 'node:fs/promises';
+import { appendFile, mkdir, readFile, readdir, rename, unlink, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { join } from 'node:path';
+import { promisify } from 'node:util';
+import { gzip } from 'node:zlib';
+
+const gzipAsync = promisify(gzip);
+const DAY_MS = 86_400_000;
+
+/** Fichiers du journal : `decisions-AAAA-MM-JJ.jsonl`, compressés ensuite en `.jsonl.gz`
+ *  (avec un suffixe numérique si une archive du même jour existe déjà). */
+export const JOURNAL_FILE_RE = /^decisions-(\d{4}-\d{2}-\d{2})(?:\.\d+)?\.jsonl(\.gz)?$/;
 
 export interface DecisionRecord {
   /** Horodatage (ms epoch). */
@@ -78,7 +88,7 @@ export class DecisionJournal {
   constructor(opts: DecisionJournalOptions) {
     this.dir = opts.dir;
     this.minIntervalMs = opts.minIntervalMs ?? 10_000;
-    this.keepDays = opts.keepDays ?? 10;
+    this.keepDays = opts.keepDays ?? 30;
     this.log = opts.log ?? (() => undefined);
   }
 
@@ -129,8 +139,24 @@ export class DecisionJournal {
     if (!Number.isFinite(todayMs)) return;
     try {
       for (const f of await readdir(this.dir)) {
-        const m = /^decisions-(\d{4}-\d{2}-\d{2})\.jsonl$/.exec(f);
-        if (m && todayMs - Date.parse(m[1]) > this.keepDays * 86_400_000) await unlink(join(this.dir, f));
+        const m = JOURNAL_FILE_RE.exec(f);
+        if (!m) continue;
+        const age = todayMs - Date.parse(m[1]);
+        if (age > this.keepDays * DAY_MS) {
+          await unlink(join(this.dir, f));
+          continue;
+        }
+        // Jours révolus (≥ 2 jours : plus aucune ligne n'y sera ajoutée) : compressés, ~10×
+        // plus petits, ce qui permet de garder des semaines de mesure (~12 Mo/jour sinon).
+        if (!m[2] && age >= 2 * DAY_MS) {
+          const src = join(this.dir, f);
+          let dst = `${src}.gz`;
+          for (let k = 1; existsSync(dst); k++) dst = join(this.dir, `decisions-${m[1]}.${k}.jsonl.gz`);
+          const tmp = `${dst}.tmp`;
+          await writeFile(tmp, await gzipAsync(await readFile(src)));
+          await rename(tmp, dst);
+          await unlink(src);
+        }
       }
     } catch { /* nettoyage best effort */ }
   }

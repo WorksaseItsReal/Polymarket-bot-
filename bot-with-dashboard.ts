@@ -1264,7 +1264,11 @@ async function setupFairValueStrategy(sdk: PolymarketSDK) {
   setInterval(() => { void shadow.resolveDue(); }, 30_000).unref?.();
   const journal = (process.env.FV_JOURNAL ?? 'true').toLowerCase() === 'false'
     ? null
-    : new DecisionJournal({ dir: polyDir() + '/journal', log: m => log('WARN', m) });
+    : new DecisionJournal({
+      dir: polyDir() + '/journal', log: m => log('WARN', m),
+      // jours révolus compressés (~1 Mo/jour) : 30 jours par défaut, réglable
+      keepDays: Math.min(365, Math.max(1, Number(process.env.FV_JOURNAL_KEEP_DAYS ?? '') || 30)),
+    });
   decisionJournal = journal;
   // Prix spot temps réel (WebSocket Binance) ; sans lui, repli automatique sur le REST.
   const stream = (process.env.FV_SPOT_STREAM ?? 'true').toLowerCase() === 'false'

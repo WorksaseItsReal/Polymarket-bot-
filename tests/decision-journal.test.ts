@@ -214,3 +214,31 @@ test('contrôle négatif : carnet JUSTE, modèle SUR-confiant (voit de l\'edge p
   assert.ok(!(ev > 0 && t >= 2), `gain « significatif » dans un monde sans edge : ${row}`);
   assert.ok(ev < 0, `perte attendue (spread + frais contre un carnet juste) : ${row}`);
 });
+
+test('journal : jours révolus compressés (.jsonl.gz, archive existante jamais écrasée) et relus par le rapport', async () => {
+  const { gzipSync, gunzipSync } = await import('node:zlib');
+  const dir = mkdtempSync(join(tmpdir(), 'journal-'));
+  const old = 'decisions-2026-10-04.jsonl'; // 3 jours avant l'évaluation (07/10)
+  writeFileSync(join(dir, old), '{"a":1}\n{"a":2}\n');
+  writeFileSync(join(dir, old + '.gz'), gzipSync('{"deja":1}\n')); // archive déjà là
+  writeFileSync(join(dir, 'decisions-2026-10-06.jsonl'), '{"hier":1}\n'); // trop récent : non compressé
+  const j = new DecisionJournal({ dir });
+  j.record(rec({}));
+  await j.flush();
+  assert.equal(existsSync(join(dir, old)), false, 'original remplacé par son archive');
+  assert.equal(gunzipSync(readFileSync(join(dir, old + '.gz'))).toString(), '{"deja":1}\n', 'archive existante intacte');
+  assert.equal(gunzipSync(readFileSync(join(dir, 'decisions-2026-10-04.1.jsonl.gz'))).toString(), '{"a":1}\n{"a":2}\n');
+  assert.ok(existsSync(join(dir, 'decisions-2026-10-06.jsonl')));
+
+  // le rapport lit les archives compressées
+  const home = mkdtempSync(join(tmpdir(), 'report-gz-'));
+  const poly = join(home, '.polymarket');
+  mkdirSync(join(poly, 'journal'), { recursive: true });
+  const now = Date.now();
+  const slot = Math.floor(now / 1000 / 300) * 300 - 3600;
+  const lines = [0, 1, 2].map(i => JSON.stringify(rec({ t: now - 3600_000 + i * 10_000, slug: `btc-updown-5m-${slot}`, pUp: 0.6 })));
+  writeFileSync(join(poly, 'journal', `decisions-${new Date(now).toISOString().slice(0, 10)}.jsonl.gz`), gzipSync(lines.join('\n') + '\n'));
+  writeFileSync(join(poly, 'outcomes-cache.json'), JSON.stringify({ [`btc-updown-5m-${slot}`]: true }));
+  const out = execFileSync('npx', ['tsx', 'scripts/analysis/fv-report.ts', '--days', '3'], { env: { ...process.env, HOME: home }, encoding: 'utf8', timeout: 120_000 });
+  assert.match(out, /Journal : 3 évaluations, 1 rounds, 1 rounds réglés/);
+});

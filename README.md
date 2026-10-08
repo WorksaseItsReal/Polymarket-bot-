@@ -344,8 +344,9 @@ sur des asks **reconstitués** (indicatif). ⚠️ Si le prix historique est un 
 ### Mesurer si ça marche (journal des décisions)
 
 Chaque évaluation — pari **ou** abstention — est écrite dans
-`~/.polymarket/journal/decisions-AAAA-MM-JJ.jsonl` (≤ 1 ligne / round / 10 s, 10 jours
-gardés, `FV_JOURNAL=false` pour couper). Après quelques jours :
+`~/.polymarket/journal/decisions-AAAA-MM-JJ.jsonl` (≤ 1 ligne / round / 10 s, 30 jours
+gardés par défaut, `FV_JOURNAL_KEEP_DAYS` ; les jours révolus sont compressés en `.jsonl.gz`,
+~1 Mo/jour ; `FV_JOURNAL=false` pour couper). Après quelques jours :
 
 ```bash
 npx tsx scripts/analysis/fv-report.ts --days 7

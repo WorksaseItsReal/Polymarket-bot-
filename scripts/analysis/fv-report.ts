@@ -14,7 +14,8 @@ import 'dotenv/config';
 import { existsSync, readdirSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
-import type { DecisionRecord } from '../../src/services/decision-journal.js';
+import { JOURNAL_FILE_RE, type DecisionRecord } from '../../src/services/decision-journal.js';
+import { gunzipSync } from 'node:zlib';
 import { fetchRoundOutcome } from '../../src/services/paper-ledger.js';
 import { fairValueConfigFromEnv } from '../../src/services/fair-value.js';
 import {
@@ -45,8 +46,11 @@ function readJournal(): DecisionRecord[] {
   const since = Date.now() - DAYS * 86_400_000;
   const out: DecisionRecord[] = [];
   let bad = 0;
-  for (const f of readdirSync(DIR).filter(f => /^decisions-\d{4}-\d{2}-\d{2}\.jsonl$/.test(f)).sort()) {
-    for (const line of readFileSync(join(DIR, f), 'utf8').split('\n')) {
+  for (const f of readdirSync(DIR).filter(f => JOURNAL_FILE_RE.test(f)).sort()) {
+    // jours révolus compressés (.jsonl.gz) par le bot
+    const raw = readFileSync(join(DIR, f));
+    const text = f.endsWith('.gz') ? gunzipSync(raw).toString('utf8') : raw.toString('utf8');
+    for (const line of text.split('\n')) {
       if (!line.trim()) continue;
       try {
         const r = JSON.parse(line) as DecisionRecord;
