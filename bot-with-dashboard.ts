@@ -1204,7 +1204,8 @@ function perfGuard(): string | null {
 async function setupFairValueStrategy(sdk: PolymarketSDK) {
   log('INFO', `📐 Stratégie juste valeur : p_modèle ≥ ${FV_CFG.minProb} et edge ≥ ${(FV_CFG.minEdge * 100).toFixed(1)} pt après frais `
     + `(taker ${FV_CFG.takerFeeRate}), τ ∈ [${FV_CFG.minTauSec}, ${FV_CFG.maxTauSec}] s, ask ∈ [${FV_CFG.minAsk}, ${FV_CFG.maxAsk}], `
-    + `loi ${FV_CFG.tails}, sortie si bid net > p_modèle + ${FV_EXIT_EDGE}, scrutation ${FV_POLL_MS / 1000} s`);
+    + `loi ${FV_CFG.tails}, confiance ×${FV_CFG.zScale}, mélange modèle ${FV_CFG.blendModel} / carnet ${FV_CFG.blendMarket}, `
+    + `sortie si bid net > p + ${FV_EXIT_EDGE}, scrutation ${FV_POLL_MS / 1000} s`);
   if (!CONFIG.dryRun) {
     log('WARN', 'Stratégie juste valeur : exécution LIVE non implémentée — décisions journalisées, AUCUN ordre envoyé.');
   }
@@ -1593,9 +1594,17 @@ async function main() {
   startDashboard(dashPort, { host: dashHost, token: process.env.DASHBOARD_TOKEN || undefined });
   console.log(`\n🌐 Dashboard: http://${dashHost === '0.0.0.0' ? '<ip-du-serveur>' : dashHost}:${dashPort}\n`);
 
-  if (!process.env.POLYMARKET_PRIVATE_KEY) {
-    log('ERROR', 'POLYMARKET_PRIVATE_KEY not found');
-    process.exit(1);
+  // En papier, aucune signature n'est faite : une clé absente ou factice (placeholder de
+  // .env.example) ne doit pas empêcher le démarrage. Clé éphémère, sans fonds, pour les
+  // seuls appels publics du SDK. En réel, une clé valide reste obligatoire.
+  let sdkPrivateKey = process.env.POLYMARKET_PRIVATE_KEY?.trim();
+  if (!sdkPrivateKey || !/^(0x)?[0-9a-fA-F]{64}$/.test(sdkPrivateKey)) {
+    if (!CONFIG.dryRun) {
+      log('ERROR', 'POLYMARKET_PRIVATE_KEY absente ou invalide (64 caractères hexadécimaux attendus)');
+      process.exit(1);
+    }
+    sdkPrivateKey = ethers.Wallet.createRandom().privateKey;
+    log('INFO', 'Mode papier : pas de clé de wallet valide — clé éphémère sans fonds (lecture seule).');
   }
 
   // Send config to dashboard
@@ -1648,7 +1657,7 @@ async function main() {
   }
 
   const sdk = new PolymarketSDK({
-    privateKey: process.env.POLYMARKET_PRIVATE_KEY,
+    privateKey: sdkPrivateKey,
   });
   try {
     await sdk.start({ timeout: 15_000 });

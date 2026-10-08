@@ -129,7 +129,7 @@ Variables (nom → rôle) :
 
 | Variable | Rôle |
 |---|---|
-| `POLYMARKET_PRIVATE_KEY` | Clé du wallet Polymarket (Polygon). **Placeholder en DRY_RUN.** Valeur : `[REDACTED]`. |
+| `POLYMARKET_PRIVATE_KEY` | Clé du wallet Polymarket (Polygon). **Facultative en DRY_RUN** (absente ou factice → clé éphémère sans fonds, lecture seule) ; obligatoire et valide en réel. Valeur : `[REDACTED]`. |
 | `POLYGON_RPC_URL` | Endpoint RPC Polygon. Valeur : `[REDACTED]`. |
 | `OPENCODE_GO_API_KEY` | Clé du provider LLM (opencode-go/zen). Valeur : `[REDACTED]`. |
 
