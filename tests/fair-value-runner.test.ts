@@ -13,7 +13,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { DEFAULT_FAIR_VALUE_CONFIG, blendWithMarket, probUp } from '../src/services/fair-value.ts';
+import { DEFAULT_FAIR_VALUE_CONFIG, blendWithMarket, decide, effectiveCostPerShare, maxBuyPriceForEdge, probNoiseSd, probUp } from '../src/services/fair-value.ts';
 import { loadLedger, type RoundOutcome } from '../src/services/paper-ledger.ts';
 import type { RoundMarketData } from '../src/services/round-market-data.ts';
 import { FairValueRunner, slotOf, type Book, type RunnerDeps, type ScannedMarket } from '../src/strategy/fair-value-runner.ts';
@@ -245,6 +245,9 @@ test('journal : chaque évaluation est transmise (abstention puis pari), avec as
   assert.equal(evals[0].upBidSz, 12);
   assert.equal(evals[0].downBid, null, 'pas de bid');
   assert.ok(Math.abs((evals[0].pUp as number) - p) < 1e-12);
+  // modèle en vigueur (règlement TWAP) et bruit du modèle seul : ce que le rapport rejoue
+  assert.equal(evals[0].tw, 60);
+  assert.ok(Math.abs((evals[0].ns as number) - probNoiseSd({ spot: 100.12, strike: 100, sigmaPerSqrtSec: SIGMA, tauSec: 120 })) < 1e-4);
   fair = false;
   env.setNow((SLOT + 190) * 1000);
   await r.tick();
@@ -674,4 +677,70 @@ test('blocage apparu pendant le trajet de l\'ordre (arrêt du bot) : aucun pari 
   const ok = setup({ fillDelayMs: 1000, sleep: async () => undefined, entryBlock: () => null });
   await ok.runner().tick();
   assert.equal(loadLedger(ok.ledgerPath)!.length, 1);
+});
+
+test('arrêt commencé pendant la relecture du carnet (après la latence) : aucun pari enregistré ni annoncé', async () => {
+  for (const fillDelayMs of [1000, 0]) {
+    let calls = 0;
+    let stopping = false;
+    const env = setup({
+      fillDelayMs, sleep: async () => undefined,
+      getBook: async id => {
+        if (++calls >= 3) stopping = true; // 3e lecture = carnet relu à l'arrivée de l'ordre
+        const ask = id === 'UP' ? 0.6 : 0.41;
+        return { asks: [{ price: 0.99, size: 1000 }, { price: ask, size: 100 }], bids: [{ price: ask - 0.01, size: 100 }] };
+      },
+      entryBlock: () => (stopping ? 'arrêt du bot en cours' : null),
+      getRoundData: async () => ({ spot: 100.12, strike: 100, sigmaPerSqrtSec: SIGMA, source: fillDelayMs ? 'test' : 'binance+ws', candleAgeMs: 0 }),
+    });
+    await env.runner().tick();
+    if (calls < 3) continue; // pas de relecture dans ce mode : rien à tester
+    assert.equal((loadLedger(env.ledgerPath) ?? []).length, 0, `latence ${fillDelayMs} ms : aucun pari`);
+    assert.ok(!env.messages.some(m => /NOUVEAU PARI/.test(m)));
+  }
+});
+
+test('prix limite = edge EXIGÉ (marge de bruit incluse), pas seulement FV_MIN_EDGE', async () => {
+  const spot = 100.06;
+  const d0 = decide({ spot, strike: 100, sigmaPerSqrtSec: SIGMA, tauSec: 120, upAsk: 0.5, downAsk: 0.9 });
+  const p = d0.pUp!;
+  const req = d0.requiredEdge!;
+  assert.ok(req - DEFAULT_FAIR_VALUE_CONFIG.minEdge > 0.06, `marge ${req - DEFAULT_FAIR_VALUE_CONFIG.minEdge}`);
+  // 1er niveau : edge = exigé + 1 pt (décision OK) mais 0,1 part seulement ; 2e niveau : edge
+  // entre FV_MIN_EDGE et l'exigé → hors limite → mise impossible.
+  let lo = 0.01;
+  let hi = 0.99;
+  for (let i = 0; i < 60; i++) { const m = (lo + hi) / 2; if (p - effectiveCostPerShare(m, 0.07) > req + 0.01) lo = m; else hi = m; }
+  const a1 = lo;
+  const a2 = a1 + 0.04;
+  assert.ok(p - effectiveCostPerShare(a2, 0.07) > DEFAULT_FAIR_VALUE_CONFIG.minEdge, '2e niveau au-dessus de FV_MIN_EDGE');
+  const env = setup({
+    spot,
+    getBook: async id => (id === 'UP'
+      ? { asks: [{ price: a2, size: 1000 }, { price: a1, size: 0.1 }], bids: [] }
+      : { asks: [{ price: 0.9, size: 1000 }], bids: [] }),
+  });
+  await env.runner().tick();
+  assert.equal((loadLedger(env.ledgerPath) ?? []).length, 0);
+  const limit = maxBuyPriceForEdge(p, req, 0.07)!;
+  assert.ok(env.logs.some(l => l.includes(`sous la limite ${limit.toFixed(3)}`)), env.logs.join('\n'));
+});
+
+test('règlement TWAP : aucune revente dans la minute finale (même avec FV_MIN_TAU_SEC plus bas)', async () => {
+  const sellAt = async (cfg: typeof DEFAULT_FAIR_VALUE_CONFIG) => {
+    const env = setup();
+    const r = env.runner();
+    await r.tick(); // pari à τ = 120 s
+    assert.equal(loadLedger(env.ledgerPath)![0].status, 'open');
+    env.deps.cfg = cfg;
+    // spot revenu au strike (valeur ≈ 0,5) et bid à 0,97 : revente évidente si autorisée
+    env.deps.getRoundData = async () => ({ spot: 100, strike: 100, sigmaPerSqrtSec: SIGMA, source: 'test', candleAgeMs: 0 });
+    env.deps.getBook = async () => ({ asks: [{ price: 0.99, size: 1000 }], bids: [{ price: 0.97, size: 1000 }] });
+    env.setNow((SLOT + 250) * 1000); // τ = 50 s
+    await r.tick();
+    return loadLedger(env.ledgerPath)![0].status;
+  };
+  const base = { ...DEFAULT_FAIR_VALUE_CONFIG, minTauSec: 30, noiseEdgeK: 0 };
+  assert.equal(await sellAt(base), 'open', 'TWAP 60 s : part déjà moyennée inconnue → on garde');
+  assert.equal(await sellAt({ ...base, twapWindowSec: 0 }), 'sold', 'contrôle : règlement ponctuel, τ ≥ 30 s → revente');
 });

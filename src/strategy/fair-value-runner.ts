@@ -486,7 +486,7 @@ export class FairValueRunner {
         rec = {
           t: now, slug: market.slug, coin, tau: Math.round(tauSec * 10) / 10, spot: data.spot, strike: data.strike,
           sig: data.sigmaPerSqrtSec, pUp: decision.pUp, pRaw: decision.pRaw ?? null, zs: cfg.zScale,
-          ...(decision.noiseSd !== undefined ? { ns: Math.round(decision.noiseSd * 1e4) / 1e4 } : {}),
+          ...(decision.noiseSdRaw !== undefined ? { ns: Math.round(decision.noiseSdRaw * 1e4) / 1e4 } : {}),
           ...(cfg.tails === 't4' ? { tl: 't4' as const } : {}), ...(cfg.twapWindowSec > 0 ? { tw: cfg.twapWindowSec } : {}),
           ...(coins ? { mv: true as const } : {}), upAsk: upBest?.price ?? null, downAsk: downBest?.price ?? null,
           upAskSz: upBest?.size ?? null, downAskSz: downBest?.size ?? null,
@@ -606,6 +606,13 @@ export class FairValueRunner {
           tokenId: decision.side === 'UP' ? market.upTokenId : market.downTokenId,
           otherTokenId: decision.side === 'UP' ? market.downTokenId : market.upTokenId, slotSec: slot,
         };
+        // Dernier contrôle après le DERNIER await (relecture du carnet : jusqu'à 8 s en réel) :
+        // un arrêt commencé entre-temps ne doit ni enregistrer ni annoncer ce pari.
+        const finalBlock = this.d.entryBlock?.() ?? null;
+        if (finalBlock) {
+          this.holdLog(market.conditionId, `   ↳ ${ctx} → PAS de mise : ${finalBlock}`);
+          continue;
+        }
         let pushed = false;
         const saved = this.update(trades => {
           if (!trades.some(t => t.id === trade.id)) {

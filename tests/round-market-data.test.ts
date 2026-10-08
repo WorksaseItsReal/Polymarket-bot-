@@ -66,3 +66,18 @@ test('round pas encore ouvert → null sans requête réseau', async () => {
   assert.equal(d, null);
   assert.equal(calls, 0);
 });
+
+test('repli Coinbase : [temps, bas, haut, ouverture, clôture, volume] bien lu (strike (O+H+L+C)/4)', async () => {
+  const klines = binanceKlines() as unknown[][];
+  // format Coinbase, du plus récent au plus ancien
+  const coinbase = klines.map(k => [Number(k[0]) / 1000, Number(k[3]), Number(k[2]), Number(k[1]), Number(k[4]), 1]).reverse();
+  const d = await withFetch(async (url) => (url.includes('coinbase.com')
+    ? new Response(JSON.stringify(coinbase), { status: 200 })
+    : new Response('indisponible', { status: 503 })), () => getRoundMarketData('DOGE', SLOT, NOW));
+  assert.ok(d, 'données attendues');
+  assert.equal(d!.source, 'coinbase');
+  const prev = klines.find(k => k[0] === SLOT * 1000 - 60_000)!.map(Number);
+  const ohlc4 = (prev[1] + prev[2] + prev[3] + prev[4]) / 4;
+  // haut et bas inversés à la lecture → incohérents → repli (O+C)/2 : le test le verrait
+  assert.ok(Math.abs(d!.strike - ohlc4) < 1e-9, `${d!.strike} ≠ ${ohlc4} (plus haut / plus bas mal lus ?)`);
+});

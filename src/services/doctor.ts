@@ -117,7 +117,7 @@ export function configChecks(env: Env): Check[] {
     out.push(warn('Règlement', `FV_TWAP_WINDOW_SEC=${cfg.twapWindowSec} : Polymarket règle les rounds 5 min sur la moyenne Chainlink des 60 s (fin et prix à battre) depuis août 2026 — retirer ce réglage (défaut 60).`));
   }
   if ((cfg.noiseEdgeK ?? 0) === 0) {
-    out.push(warn('Marge de bruit', 'FV_NOISE_EDGE_K=0 : le bot parie aussi sur des écarts que son propre bruit (prix à battre estimé) explique — en simulation, perte d\'environ 11 % par pari contre un carnet juste.'));
+    out.push(warn('Marge de bruit', 'FV_NOISE_EDGE_K=0 : le bot parie aussi sur des écarts que son propre bruit (prix à battre estimé) explique — en simulation (30 000 rounds), 13 % des rounds joués à −5 % par pari contre un carnet juste (écart et frais payés pour rien).'));
   }
   out.push(ignored.length
     ? warn('Réglages FV', `ignorés (hors bornes ou illisibles, valeur par défaut utilisée) : ${ignored.join(', ')}`)

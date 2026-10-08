@@ -170,7 +170,7 @@ Variables (nom → rôle) :
 | Variable | Défaut | Rôle |
 |---|---|---|
 | `FV_MIN_EDGE` | `0.04` | Edge minimal exigé (probabilité modèle − coût réel par part), **après frais**. |
-| `FV_NOISE_EDGE_K` | `1.5` | Marge en plus, en écarts-types du bruit de notre probabilité (prix à battre estimé, écart Binance/Chainlink) : edge exigé = `FV_MIN_EDGE + k·σ`. Grande près de 50/50 et quand la vol est faible. En simulation (3 000 rounds) : k = 0 → contre un carnet juste, 11 % des rounds joués à −11 %/$ ; k = 1,5 → aucun pari, et sur un carnet en retard le gain par pari double. S'applique aussi aux reventes. |
+| `FV_NOISE_EDGE_K` | `1.5` | Marge en plus, en écarts-types du bruit de notre probabilité (prix à battre estimé, écart Binance/Chainlink) : edge exigé = `FV_MIN_EDGE + k·σ`. Grande près de 50/50 et quand la vol est faible. En simulation (10 graines × 3 000 rounds) : k = 0 → contre un carnet juste, 13 % des rounds joués à −5 %/$ (t = −3,9) ; k = 1,5 → 0,1 %. Sur un carnet en retard de 10 s, le gain par pari passe de +17,5 % à +38 % et le gain total augmente de 17 %. S'applique aussi aux reventes. |
 | `FV_MIN_PROB` | `0.60` | Probabilité modèle minimale du côté acheté : ne parie que sur le côté probable → **win rate attendu ≥ 60 %** (au prix de quelques paris +EV sur l'outsider). |
 | `FV_EXIT_EDGE` | = `FV_MIN_EDGE` | Vente anticipée si `bid − frais` dépasse `p_modèle` d'au moins cette marge. |
 | `FV_MIN_TAU_SEC` / `FV_MAX_TAU_SEC` | `60` / `270` | Fenêtre de temps restant où l'on peut entrer ou revendre. Jamais dans la minute finale : une partie de la moyenne de règlement y est déjà acquise et le modèle ne la connaît pas. |

@@ -44,7 +44,7 @@ function mulberry32(seed: number) {
 const SIGMA = 0.0006 / Math.sqrt(60); // ≈ 0,06 % par minute
 const ROUND = 300;
 
-function simulate(lag: number, rounds: number, seed: number) {
+function simulate(lag: number, rounds: number, seed: number, cfg = CFG) {
   const rnd = mulberry32(seed);
   const gauss = () => Math.sqrt(-2 * Math.log(rnd() + 1e-12)) * Math.cos(2 * Math.PI * rnd());
   const tick = (p: number) => Math.min(0.99, Math.max(0.01, Math.ceil(p * 100 - 1e-9) / 100));
@@ -72,14 +72,14 @@ function simulate(lag: number, rounds: number, seed: number) {
     };
     const strikeEst = strikeFromCandles(candle, 0, CFG.twapWindowSec) as number;
     // Le bot regarde toutes les 10 s, au plus une entrée par round.
-    for (let t = ROUND - CFG.maxTauSec; t <= ROUND - CFG.minTauSec; t += 10) {
+    for (let t = ROUND - cfg.maxTauSec; t <= ROUND - cfg.minTauSec; t += 10) {
       const tau = ROUND - t;
       const seen = Math.max(0, t - lag);
       const pMkt = fair(at(seen), strike, tau + (t - seen));
       const d = decide({
         spot: at(t), strike: strikeEst, sigmaPerSqrtSec: SIGMA, tauSec: tau,
         upAsk: tick(pMkt + 0.005), downAsk: tick(1 - pMkt + 0.005),
-      });
+      }, cfg);
       if (!d.side || !d.best) continue;
       const cost = effectiveCostPerShare(d.best.ask, CFG.takerFeeRate);
       const won = (d.side === 'UP') === upWon;
@@ -103,6 +103,15 @@ test('contrôle NÉGATIF : carnet juste → quasiment aucun pari, aucun gain inv
   const r = simulate(0, 4000, 7);
   assert.ok(r.n <= 4000 * 0.02, `le bot ne devrait presque jamais parier contre un carnet juste (n=${r.n})`);
   if (r.n >= 30) assert.ok(r.t < 2, `aucun gain significatif ne doit apparaître (t=${r.t.toFixed(2)})`);
+});
+
+test('contrôle NÉGATIF sans marge de bruit (k = 0) : le bot parie souvent, mais aucun gain n\'apparaît', () => {
+  // Avec la marge, le bot ne parie presque plus contre un carnet juste : le test ci-dessus
+  // vérifie alors surtout que la marge est active. Ici, sans elle, on vérifie que la
+  // simulation (frais, tick, prix à battre estimé) ne fabrique pas de gain.
+  const r = simulate(0, 4000, 7, { ...CFG, noiseEdgeK: 0 });
+  assert.ok(r.n >= 100, `assez de paris pour juger (n=${r.n})`);
+  assert.ok(r.t < 2, `aucun gain significatif sans edge (EV ${r.mean.toFixed(4)} $/$, t=${r.t.toFixed(2)})`);
 });
 
 test('contrôle POSITIF : carnet en retard de 10 s → gain significatif, win rate élevé et calibré', () => {

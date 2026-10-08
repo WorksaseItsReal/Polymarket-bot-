@@ -23,6 +23,8 @@ import type { DecisionRecord } from '../services/decision-journal.js';
 import { clusteredMeanT, slotKey } from './stats.js';
 
 export interface ResolvedRecord extends DecisionRecord {
+  /** Poids du modèle dans le mélange appliqué par `applyBlend` (absent = modèle seul). */
+  ba?: number;
   upWon: boolean;
 }
 
@@ -50,9 +52,20 @@ export function normalizeZScale(rounds: ResolvedRecord[][], zNow: number, tails:
     // z du modèle de base avec la loi de l'évaluation, puis probabilité du modèle ACTUEL
     const z = link(recTails).inv(Math.min(0.999999, Math.max(0.000001, raw)));
     const p = z === null ? raw : cdf((zNow * z) / zRec);
+    // Bruit σ_p = densité(z)·zs·√(bruit/V) : même √(bruit/V), nouveaux z et zs.
+    const ns = r.ns && z !== null
+      ? r.ns * (zNow / zRec) * density(tails, (zNow * z) / zRec) / Math.max(1e-12, density(recTails, z))
+      : r.ns;
     const { tl: _old, ...rest } = r;
-    return { ...rest, pRaw: p, zs: zNow, ...(tails === 't4' ? { tl: 't4' as const } : {}) };
+    return { ...rest, pRaw: p, zs: zNow, ...(ns !== undefined ? { ns } : {}), ...(tails === 't4' ? { tl: 't4' as const } : {}) };
   }));
+}
+
+/** Densité de la loi du modèle (dérivée numérique de la répartition). */
+function density(tails: 'normal' | 't4', z: number): number {
+  const { cdf } = link(tails);
+  const h = 1e-4;
+  return (cdf(z + h) - cdf(z - h)) / (2 * h);
 }
 
 /** Loi du modèle (FV_TAILS) : fonction de répartition et son inverse. */
@@ -143,7 +156,10 @@ export function replay(rounds: ResolvedRecord[][], minEdge: number, minProb: num
       if (r.upAsk !== null) cands.push({ up: true, prob: r.pUp, ask: r.upAsk });
       if (r.downAsk !== null) cands.push({ up: false, prob: 1 - r.pUp, ask: r.downAsk });
       let best: { up: boolean; cost: number; edge: number } | null = null;
-      const required = minEdge + (p.noiseK ?? 0) * (r.ns ?? 0);
+      // Même edge exigé que le bot : bruit du modèle seul × effet du mélange (applyBlend → ba).
+      const pr = r.pRaw === null || r.pRaw === undefined ? null : Math.min(0.99, Math.max(0.01, r.pRaw));
+      const blendFactor = pr === null ? 1 : ((r.ba ?? 1) * r.pUp * (1 - r.pUp)) / (pr * (1 - pr));
+      const required = minEdge + (p.noiseK ?? 0) * (r.ns ?? 0) * blendFactor;
       for (const c of cands) {
         if (!(c.ask >= p.minAsk && c.ask <= p.maxAsk) || c.prob < minProb) continue;
         const cost = effectiveCostPerShare(c.ask, p.feeRate);
@@ -454,7 +470,11 @@ export function applyBlend(rounds: ResolvedRecord[][], a: number, b: number): Re
   return rounds.map(list => list.map(r => {
     const raw = rawModelProb(r);
     const pUp = raw === null ? null : blendWithMarket(raw, bookMidUp(r.upAsk, r.downAsk), cfg);
-    return r.pRaw === raw && r.pUp === pUp ? r : { ...r, pRaw: raw, pUp }; // pas de copie inutile
+    const plain = a === 1 && b === 0;
+    // `ba` : poids du modèle, pour que le rejeu exige le même edge que le bot (bruit × mélange)
+    if (r.pRaw === raw && r.pUp === pUp && (plain ? r.ba === undefined : r.ba === a)) return r; // pas de copie inutile
+    const { ba: _ba, ...rest } = r;
+    return { ...rest, pRaw: raw, pUp, ...(plain ? {} : { ba: a }) };
   }));
 }
 

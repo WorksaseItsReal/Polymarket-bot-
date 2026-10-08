@@ -460,7 +460,56 @@ test('edge exigé : minEdge + k·σ_p (bruit du prix à battre), plus grand prè
   const d = decide(input);
   close(d.requiredEdge!, CFG.minEdge + CFG.noiseEdgeK * d.noiseSd!, 1e-12);
   assert.equal(decide(input, { ...CFG, noiseEdgeK: 0 }).requiredEdge, CFG.minEdge);
-  if (!d.side) assert.match(d.reason, /bruit du prix à battre/);
+  // La marge CHANGE la décision : ask choisi pour un edge entre minEdge et l'edge exigé.
+  const base = { ...input, spot: 100.06, downAsk: 0.9 };
+  const ref = decide({ ...base, upAsk: 0.5 });
+  const pUp = ref.pUp!;
+  assert.ok(pUp >= CFG.minProb && ref.requiredEdge! - CFG.minEdge > 0.02, `p ${pUp}, marge ${ref.requiredEdge! - CFG.minEdge}`);
+  let lo = 0.01;
+  let hi = 0.99;
+  const target = CFG.minEdge + 0.5 * (ref.requiredEdge! - CFG.minEdge);
+  for (let i = 0; i < 60; i++) { const m = (lo + hi) / 2; if (pUp - effectiveCostPerShare(m, CFG.takerFeeRate) > target) lo = m; else hi = m; }
+  const mid = { ...base, upAsk: lo };
+  const dm = decide(mid);
+  const d0 = decide(mid, { ...CFG, noiseEdgeK: 0 });
+  assert.equal(d0.side, 'UP', d0.reason);
+  assert.equal(dm.side, null, dm.reason);
+  assert.match(dm.reason, /bruit du prix à battre\) requis/);
+});
+
+test('σ_p = |dp/d ln K| · √bruit (dérivée numérique) — lois normale et t4, FV_Z_SCALE, mélange', async () => {
+  const { probNoiseSd, blendWithMarket } = await import('../src/services/fair-value.ts');
+  const sig = 0.0006 / Math.sqrt(60);
+  const h = 1e-6;
+  for (const tails of ['normal', 't4'] as const) {
+    for (const zScale of [0.7, 1, 1.4]) {
+      const cfg = { ...CFG, tails, zScale };
+      const noise = Math.sqrt(sig * sig * cfg.strikeNoiseSec + (cfg.basisBps / 1e4) ** 2);
+      for (const spot of [100, 100.04, 99.93]) {
+        const p = (k: number) => probUp({ spot, strike: k, sigmaPerSqrtSec: sig, tauSec: 150 }, cfg)!;
+        const deriv = Math.abs(p(100 * Math.exp(h)) - p(100 * Math.exp(-h))) / (2 * h);
+        close(probNoiseSd({ spot, strike: 100, sigmaPerSqrtSec: sig, tauSec: 150 }, cfg), deriv * noise, 1e-4);
+      }
+    }
+  }
+  // Mélange : σ_p de la probabilité MÉLANGÉE (decide.noiseSd) = dérivée de la probabilité utilisée.
+  const cfg = { ...CFG, blendModel: 0.5, blendMarket: 1 };
+  const input = { spot: 100.04, strike: 100, sigmaPerSqrtSec: sig, tauSec: 150, upAsk: 0.62, downAsk: 0.4 };
+  const market = (input.upAsk + 1 - input.downAsk) / 2;
+  const pb = (k: number) => blendWithMarket(probUp({ ...input, strike: k }, cfg)!, market, cfg)!;
+  const noise = Math.sqrt(sig * sig * cfg.strikeNoiseSec + (cfg.basisBps / 1e4) ** 2);
+  const d = decide(input, cfg);
+  close(d.noiseSd!, (Math.abs(pb(100 * Math.exp(h)) - pb(100 * Math.exp(-h))) / (2 * h)) * noise, 1e-4);
+  close(d.noiseSdRaw!, probNoiseSd(input, cfg), 1e-12);
+  assert.ok(d.noiseSd! < d.noiseSdRaw!, 'un carnet de poids 1 contre 0,5 réduit le bruit utile');
+});
+
+test('réglage τ incohérent (fenêtre vide avec la minute moyennée) : défauts plutôt qu\'aucun pari', () => {
+  const c = fairValueConfigFromEnv({ FV_MIN_TAU_SEC: '30', FV_MAX_TAU_SEC: '50' });
+  assert.equal(c.minTauSec, CFG.minTauSec);
+  assert.equal(c.maxTauSec, CFG.maxTauSec);
+  const ok = fairValueConfigFromEnv({ FV_MIN_TAU_SEC: '90', FV_MAX_TAU_SEC: '200' });
+  assert.deepEqual([ok.minTauSec, ok.maxTauSec], [90, 200]);
 });
 
 test('règlement TWAP : ni entrée ni réévaluation dans la dernière minute (part déjà moyennée inconnue)', () => {

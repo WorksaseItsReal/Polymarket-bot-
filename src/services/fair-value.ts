@@ -54,9 +54,10 @@ export interface FairValueConfig {
   /** Marge supplémentaire exigée, en écarts-types du bruit de NOTRE probabilité (prix à
    *  battre seulement estimé, écart de flux) : edge requis = minEdge + k·σ_p. Le carnet
    *  connaît le prix à battre exact (affiché par Polymarket) ; un désaccord de l'ordre de
-   *  notre bruit n'est pas un edge mais de la sélection adverse. Simulation (3 000 rounds,
-   *  règlement TWAP) : k = 0 → contre un carnet juste, 11 % des rounds joués à −11 %/$ ;
-   *  k = 1,5 → aucun, et le gain sur un carnet en retard passe de +18 % à +37 %/$. */
+   *  notre bruit n'est pas un edge mais de la sélection adverse. Simulation (10 graines ×
+   *  3 000 rounds, règlement TWAP) : k = 0 → contre un carnet juste, 13 % des rounds joués
+   *  à −5 %/$ (t = −3,9 : écart et frais payés sans edge) ; k = 1,5 → 0,1 %. Carnet en
+   *  retard de 10 s : +17,5 % → +38 %/$ par pari, et gain total +17 %. */
   noiseEdgeK: number;
   /** Probabilité modèle minimale du côté acheté. Monte le win rate (on ne parie que
    *  sur le côté probable) et réduit la variance, au prix de quelques paris +EV sur
@@ -453,8 +454,10 @@ export interface FairValueDecision {
   pRaw?: number | null;
   quotes: SideQuote[];
   best: SideQuote | null;
-  /** Écart-type de bruit de la probabilité utilisée (voir `probNoiseSd`). */
+  /** Écart-type de bruit de la probabilité utilisée (voir `probNoiseSd`), mélange compris. */
   noiseSd?: number;
+  /** Le même, modèle seul (avant mélange) : ce que garde le journal, le rejeu applique le mélange. */
+  noiseSdRaw?: number;
   /** Edge exigé pour ce passage : minEdge + noiseEdgeK · noiseSd. */
   requiredEdge?: number;
 }
@@ -513,7 +516,8 @@ export function decide(input: DecisionInput, cfg: FairValueConfig = DEFAULT_FAIR
   const pUp = blendWithMarket(pRaw, bookMidUp(input.upAsk, input.downAsk), cfg);
   if (pUp === null) return none('mélange modèle/marché configuré mais carnet incomplet', { pRaw });
 
-  const noiseSd = probNoiseSd(input, cfg) * blendNoiseFactor(pRaw, pUp, cfg);
+  const noiseSdRaw = probNoiseSd(input, cfg);
+  const noiseSd = noiseSdRaw * blendNoiseFactor(pRaw, pUp, cfg);
   const requiredEdge = cfg.minEdge + Math.max(0, cfg.noiseEdgeK ?? 0) * noiseSd;
   const reqTxt = requiredEdge > cfg.minEdge + 5e-4
     ? `${(requiredEdge * 100).toFixed(1)}pt (${(cfg.minEdge * 100).toFixed(1)} + ${((requiredEdge - cfg.minEdge) * 100).toFixed(1)} bruit du prix à battre)`
@@ -526,7 +530,7 @@ export function decide(input: DecisionInput, cfg: FairValueConfig = DEFAULT_FAIR
   };
   add('UP', pUp, input.upAsk);
   add('DOWN', 1 - pUp, input.downAsk);
-  const ctx = { pUp, pRaw, noiseSd, requiredEdge };
+  const ctx = { pUp, pRaw, noiseSd, noiseSdRaw, requiredEdge };
   if (quotes.length === 0) return none('aucun ask exploitable', ctx);
 
   const inBounds = quotes.filter(q => q.ask >= cfg.minAsk && q.ask <= cfg.maxAsk);
@@ -578,7 +582,8 @@ export function fairValueConfigFromEnv(env: Record<string, string | undefined>):
     blendModel: num('FV_BLEND_MODEL', d.blendModel, 0, 3),
     blendMarket: num('FV_BLEND_MARKET', d.blendMarket, 0, 3),
   };
-  if (cfg.minTauSec > cfg.maxTauSec) { cfg.minTauSec = d.minTauSec; cfg.maxTauSec = d.maxTauSec; }
+  // Fenêtre vide (y compris à cause de la minute finale moyennée) : aucun pari possible → défauts.
+  if (entryMinTauSec(cfg) > cfg.maxTauSec) { cfg.minTauSec = d.minTauSec; cfg.maxTauSec = d.maxTauSec; }
   if (cfg.minAsk > cfg.maxAsk) { cfg.minAsk = d.minAsk; cfg.maxAsk = d.maxAsk; }
   return cfg;
 }

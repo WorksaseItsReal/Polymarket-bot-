@@ -9,7 +9,8 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DecisionJournal, journalFileName, type DecisionRecord } from '../src/services/decision-journal.ts';
-import { brier, byRound, calibration, halves, marketProbUp, replay, strikeVsOfficial, type ResolvedRecord } from '../src/analysis/fv-analysis.ts';
+import { applyBlend, brier, byRound, calibration, halves, marketProbUp, normalizeZScale, replay, strikeVsOfficial, type ResolvedRecord } from '../src/analysis/fv-analysis.ts';
+import { DEFAULT_FAIR_VALUE_CONFIG as FV, decide, probNoiseSd } from '../src/services/fair-value.ts';
 import { DEFAULT_FAIR_VALUE_CONFIG, normCdf } from '../src/services/fair-value.ts';
 
 const DAY = Date.parse('2026-10-07T00:00:00Z');
@@ -378,4 +379,51 @@ test('rapport : avec les prix publiés par Polymarket, la section 0 compare notr
   assert.match(r.stdout, /0\) Prix à battre : notre estimation .* vs Polymarket \(8 rounds\)/);
   assert.match(r.stdout, /BTC +n= +8 +écart moyen +2\.0 bps/);
   assert.match(r.stdout, /cohérence « prix final ≥ prix à battre ⇔ Up » : 100/);
+});
+
+test('rejeu = règle du bot : même edge exigé (marge de bruit × mélange), au réglage en vigueur', () => {
+  // Évaluations produites par decide() lui-même, journalisées comme le fait le bot ; le
+  // rejeu doit parier exactement quand le bot parie (premier passage de chaque round).
+  const sig = 0.0006 / Math.sqrt(60);
+  const params = { feeRate: FV.takerFeeRate, minAsk: FV.minAsk, maxAsk: FV.maxAsk, noiseK: FV.noiseEdgeK };
+  for (const [a, b] of [[1, 0], [0.5, 1]] as const) {
+    const cfg = { ...FV, blendModel: a, blendMarket: b };
+    let agree = 0;
+    let bets = 0;
+    const N = 300;
+    for (let i = 0; i < N; i++) {
+      const spot = 100 * Math.exp(((i % 37) - 18) * 0.00008);
+      const upAsk = 0.1 + ((i * 7) % 80) / 100;
+      const downAsk = Math.min(0.99, 1.02 - upAsk + ((i * 3) % 5) / 100);
+      const input = { spot, strike: 100, sigmaPerSqrtSec: sig, tauSec: 150, upAsk, downAsk };
+      const d = decide(input, cfg);
+      const rec: ResolvedRecord = {
+        t: i, slug: `s${i}`, coin: 'BTC', tau: 150, spot, strike: 100, sig, pUp: d.pUp, pRaw: d.pRaw ?? null, zs: cfg.zScale,
+        ns: d.noiseSdRaw, upAsk, downAsk, upAskSz: 10, downAskSz: 10, src: 't', act: 'hold', upWon: true,
+      };
+      const r = replay(applyBlend([[rec]], a, b), cfg.minEdge, cfg.minProb, params);
+      if ((r.n === 1) === (d.side !== null)) agree++;
+      if (d.side) bets++;
+    }
+    assert.ok(bets >= 10 && bets <= N - 10, `cas variés (paris : ${bets})`);
+    assert.equal(agree, N, `mélange ${a}/${b} : le rejeu diverge du bot`);
+  }
+  // sans la marge (noiseK absent), le rejeu parie davantage : le paramètre est bien appliqué
+  const loose = { feeRate: FV.takerFeeRate, minAsk: FV.minAsk, maxAsk: FV.maxAsk };
+  const rec: ResolvedRecord = { t: 0, slug: 'x', coin: 'BTC', tau: 150, spot: 100, strike: 100, sig, pUp: 0.7, pRaw: 0.7, zs: 1, ns: 0.05,
+    upAsk: 0.62, downAsk: 0.4, upAskSz: 10, downAskSz: 10, src: 't', act: 'hold', upWon: true };
+  assert.equal(replay([[rec]], 0.04, 0.6, loose).n, 1);
+  assert.equal(replay([[rec]], 0.04, 0.6, { ...loose, noiseK: 1.5 }).n, 0, 'edge 6,7 pt < 4 + 1,5 × 5 pt');
+});
+
+test('changement de FV_Z_SCALE : le bruit journalisé suit (σ_p recalculé au nouveau réglage)', () => {
+  const sig = 0.0006 / Math.sqrt(60);
+  const input = { spot: 100.03, strike: 100, sigmaPerSqrtSec: sig, tauSec: 150 };
+  const rec: ResolvedRecord = { t: 0, slug: 'x', coin: 'BTC', tau: 150, spot: 100.03, strike: 100, sig, pUp: probUp1(), pRaw: probUp1(), zs: 1,
+    ns: probNoiseSd(input, FV), upAsk: 0.6, downAsk: 0.42, upAskSz: 10, downAskSz: 10, src: 't', act: 'hold', upWon: true };
+  function probUp1() { return decide({ ...input, upAsk: 0.6, downAsk: 0.42 }, FV).pRaw as number; }
+  for (const z of [0.7, 1.4]) {
+    const out = normalizeZScale([[rec]], z)[0][0];
+    assert.ok(Math.abs((out.ns as number) - probNoiseSd(input, { ...FV, zScale: z })) < 1e-4, `z ${z} : ${out.ns}`);
+  }
 });

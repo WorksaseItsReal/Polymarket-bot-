@@ -51,8 +51,9 @@ export interface DecisionRecord {
   /** Fenêtre TWAP du modèle (s) ; absente = ancien modèle à règlement ponctuel (strike =
    *  open du slot). L'analyse ne mélange pas les deux définitions. */
   tw?: number;
-  /** Écart-type du bruit de la probabilité (prix à battre estimé, écart de flux) : l'edge
-   *  exigé est minEdge + FV_NOISE_EDGE_K · ns. Absent des anciens journaux (= 0). */
+  /** Écart-type du bruit de la probabilité du modèle SEUL, au FV_Z_SCALE `zs` (prix à battre
+   *  estimé, écart de flux) : edge exigé = minEdge + FV_NOISE_EDGE_K · ns · effet du mélange.
+   *  Absent des anciens journaux (= 0). */
   ns?: number;
   /** Évaluation déclenchée par un MOUVEMENT du spot (et non par le passage régulier) :
    *  gardée pour rejouer les paris, exclue des mesures « modèle vs carnet » et de la
