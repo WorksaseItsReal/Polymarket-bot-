@@ -20,6 +20,7 @@
 
 import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
+import { clusteredMeanT, slotKey } from '../analysis/stats.js';
 
 export type LedgerSide = 'UP' | 'DOWN';
 export type LedgerStatus = 'open' | 'won' | 'lost' | 'sold';
@@ -204,12 +205,9 @@ export function computeStats(trades: readonly LedgerTrade[]): LedgerStats {
   const losses = pnls.filter(p => p < 0).length;
   const pnl = pnls.reduce((s, p) => s + p, 0);
 
-  let tStat: number | null = null;
-  if (n >= 2) {
-    const mean = pnl / n;
-    const variance = pnls.reduce((s, p) => s + (p - mean) ** 2, 0) / (n - 1);
-    if (variance > 0) tStat = mean / Math.sqrt(variance / n);
-  }
+  // t groupé par créneau : les paris sur plusieurs cryptos d'un même round de 5 min sont
+  // corrélés ; les compter comme indépendants gonflerait le t (critère « Avant le réel »).
+  const tStat = clusteredMeanT(resolved.map(t => ({ key: String(t.slotSec ?? slotKey(t.slug)), x: t.pnl as number }))).t;
 
   let lossStreak = 0;
   for (let i = pnls.length - 1; i >= 0 && pnls[i] < 0; i--) lossStreak++;

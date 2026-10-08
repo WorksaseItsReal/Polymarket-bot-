@@ -184,7 +184,7 @@ const noJunk = (s: string) => {
 
 function stats(pnls: number[], open = 0) {
   const trades: LedgerTrade[] = pnls.map((p, i) => ({
-    id: String(i), slug: 's', coin: 'BTC', side: 'UP', stake: 1, costPerShare: 0.6, shares: 1.66, modelProb: 0.68,
+    id: String(i), slug: `btc-updown-5m-${1_790_000_100 + 300 * i}`, coin: 'BTC', side: 'UP', stake: 1, costPerShare: 0.6, shares: 1.66, modelProb: 0.68,
     edge: 0.08, openedAt: '2026-10-07T10:00:00Z', endMs: 0, status: p > 0 ? 'won' : 'lost', pnl: p,
     resolvedAt: `2026-10-07T10:${String(i % 60).padStart(2, '0')}:00Z`,
   }));

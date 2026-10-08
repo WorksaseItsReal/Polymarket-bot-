@@ -18,6 +18,7 @@
 import { probUp, realizedVolPerSqrtSec, type FairValueConfig } from '../services/fair-value.js';
 import type { Candle } from '../services/round-market-data.js';
 import type { ResolvedRecord } from './fv-analysis.js';
+import { clusteredMeanT, slotKey } from './stats.js';
 
 export interface PricePoint {
   /** secondes epoch */
@@ -44,14 +45,19 @@ export function parsePriceHistory(data: unknown): PricePoint[] {
   return out.sort((a, b) => a.t - b.t);
 }
 
-/** Dernier prix connu à `tSec`, s'il date de moins de `maxStaleSec`. */
-export function marketProbAt(history: PricePoint[], tSec: number, maxStaleSec = 90): number | null {
+/** Dernier point de prix connu à `tSec`, s'il date de moins de `maxStaleSec`. */
+export function marketPointAt(history: PricePoint[], tSec: number, maxStaleSec = 90): PricePoint | null {
   let best: PricePoint | null = null;
   for (const pt of history) {
     if (pt.t > tSec) break;
     best = pt;
   }
-  return best && tSec - best.t <= maxStaleSec ? best.p : null;
+  return best && tSec - best.t <= maxStaleSec ? best : null;
+}
+
+/** Dernier prix connu à `tSec`, s'il date de moins de `maxStaleSec`. */
+export function marketProbAt(history: PricePoint[], tSec: number, maxStaleSec = 90): number | null {
+  return marketPointAt(history, tSec, maxStaleSec)?.p ?? null;
 }
 
 export interface HistoricalRound {
@@ -87,6 +93,9 @@ export interface BacktestPoint {
   /** P(Up) du modèle selon chaque estimateur de vol. */
   pModel: Record<string, number | null>;
   upWon: boolean;
+  /** Avance (s) du prix marché sur le spot vu par le modèle (≥ 0 : le modèle est
+   *  désavantagé, jamais l'inverse). */
+  lagSec?: number;
 }
 
 export const DEFAULT_TAUS = [240, 180, 120, 60];
@@ -107,12 +116,22 @@ export function evaluateRound(
   if (!strikeCandle) return [];
   const sorted = [...candles].sort((a, b) => a.openTimeMs - b.openTimeMs);
   const out: BacktestPoint[] = [];
+  const seen = new Set<number>();
   for (const tau of taus) {
-    const tSec = round.slotSec + 300 - tau;
+    // Le prix marché retenu peut dater de plusieurs dizaines de secondes. Avant, le modèle
+    // voyait le spot À L'INSTANT visé et le marché un prix plus ancien : même un marché
+    // parfait paraissait battu (biais optimiste mesuré : t = −5 pour 5 s de retard). Le
+    // modèle est maintenant évalué À L'HEURE du prix marché, avec la dernière bougie
+    // TERMINÉE à cet instant : s'il y a un désavantage, il est pour le modèle.
+    const mk = marketPointAt(history, round.slotSec + 300 - tau);
+    if (!mk) continue;
+    const tSec = Math.floor(mk.t / 60) * 60;
+    if (tSec <= round.slotSec || seen.has(tSec)) continue;
+    seen.add(tSec);
+    const tauM = round.slotSec + 300 - tSec;
     const spotCandle = byOpen.get((tSec - 60) * 1000); // se termine à tSec
     if (!spotCandle) continue;
-    const pMarket = marketProbAt(history, tSec);
-    if (pMarket === null) continue;
+    const pMarket = mk.p;
     // Clôtures des bougies terminées à tSec (les 61 dernières → 60 rendements).
     const closes = sorted.filter(c => c.openTimeMs <= (tSec - 60) * 1000).slice(-61).map(c => c.close);
     const pModel: Record<string, number | null> = {};
@@ -120,12 +139,12 @@ export function evaluateRound(
     for (const [name, f] of Object.entries(VOL_VARIANTS)) {
       const s = f(closes);
       if (name === LIVE_VARIANT && s) sig = s;
-      pModel[name] = s ? probUp({ spot: spotCandle.close, strike: strikeCandle.open, sigmaPerSqrtSec: s, tauSec: tau }, cfg) : null;
+      pModel[name] = s ? probUp({ spot: spotCandle.close, strike: strikeCandle.open, sigmaPerSqrtSec: s, tauSec: tauM }, cfg) : null;
     }
     if (pModel[LIVE_VARIANT] === null) continue;
     out.push({
-      slug: round.slug, coin: round.coin, slotSec: round.slotSec, tau, spot: spotCandle.close, strike: strikeCandle.open,
-      sig, pMarket, pModel, upWon: round.upWon,
+      slug: round.slug, coin: round.coin, slotSec: round.slotSec, tau: tauM, spot: spotCandle.close, strike: strikeCandle.open,
+      sig, pMarket, pModel, upWon: round.upWon, lagSec: mk.t - tSec,
     });
   }
   return out;
@@ -160,13 +179,9 @@ export function compareBrier(points: BacktestPoint[], variant = LIVE_VARIANT): B
     r.n++;
     perRound.set(pt.slug, r);
   }
-  const ds = [...perRound.values()].map(r => r.d / r.n);
-  let tDiff: number | null = null;
-  if (ds.length >= 2) {
-    const mean = ds.reduce((a, b) => a + b, 0) / ds.length;
-    const v = ds.reduce((a, b) => a + (b - mean) ** 2, 0) / (ds.length - 1);
-    if (v > 0) tDiff = mean / Math.sqrt(v / ds.length);
-  }
+  // Différence moyenne par round, t groupé par CRÉNEAU (les cryptos d'un même round de
+  // 5 min sont corrélées : les compter comme indépendantes gonflerait le t).
+  const tDiff = clusteredMeanT([...perRound.entries()].map(([slug, r]) => ({ key: slotKey(slug), x: r.d / r.n }))).t;
   return { rounds: perRound.size, points: n, brierModel: n ? sm / n : null, brierMarket: n ? sk / n : null, tDiff };
 }
 
@@ -175,11 +190,11 @@ export function compareBrier(points: BacktestPoint[], variant = LIVE_VARIANT): B
  * seuils, FV_Z_SCALE). Les asks sont RECONSTITUÉS : prix + demi-écart, arrondis au tick
  * supérieur — approximation optimiste d'un carnet réel (profondeur ignorée).
  */
-export function toResolvedRecords(points: BacktestPoint[], halfSpread = 0.005): ResolvedRecord[] {
+export function toResolvedRecords(points: BacktestPoint[], halfSpread = 0.005, zScale = 1): ResolvedRecord[] {
   const tick = (x: number) => Math.min(0.99, Math.max(0.01, Math.ceil(x * 100 - 1e-9) / 100));
   return points.map(pt => ({
     t: (pt.slotSec + 300 - pt.tau) * 1000, slug: pt.slug, coin: pt.coin, tau: pt.tau, spot: pt.spot, strike: pt.strike,
-    sig: pt.sig, pUp: pt.pModel[LIVE_VARIANT] ?? null,
+    sig: pt.sig, pUp: pt.pModel[LIVE_VARIANT] ?? null, zs: zScale,
     upAsk: tick(pt.pMarket + halfSpread), downAsk: tick(1 - pt.pMarket + halfSpread),
     upAskSz: null, downAskSz: null, src: 'historique', act: 'hold' as const, upWon: pt.upWon,
   }));

@@ -12,7 +12,7 @@ import {
   compareBrier, evaluateRound, marketProbAt, parsePriceHistory, toResolvedRecords, LIVE_VARIANT, type BacktestPoint,
 } from '../src/analysis/historical-backtest.ts';
 import { fetchKlinesRange, fetchPriceHistory, fetchRoundsMeta, mapLimit } from '../src/analysis/historical-data.ts';
-import { DEFAULT_FAIR_VALUE_CONFIG as CFG, probUp } from '../src/services/fair-value.ts';
+import { DEFAULT_FAIR_VALUE_CONFIG as CFG, normCdf, probUp } from '../src/services/fair-value.ts';
 
 const SLOT = 1_790_000_100; // multiple de 300 et de 60
 
@@ -140,4 +140,41 @@ test('script de bout en bout contre un faux Polymarket/Binance : détecte un mar
   assert.match(again.stderr, /Rounds à interroger sur Gamma : 0 /);
   assert.match(again.stderr, /Historiques de prix à télécharger : 0/);
   assert.match(again.stdout, /Backtest historique/);
+});
+
+test('prix marché en retard d\'une minute : le modèle n\'est PAS déclaré meilleur (biais optimiste corrigé)', () => {
+  // Marché PARFAIT à son heure (juste valeur exacte calculée avec le spot de son instant),
+  // mais publié seulement toutes les 2 min : à τ = 120 s et 60 s, le dernier prix date
+  // d'une minute. Avant, le modèle voyait le spot à l'heure et « battait » ce marché.
+  let a = 77;
+  const rnd = () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+  const gauss = () => Math.sqrt(-2 * Math.log(rnd() + 1e-12)) * Math.cos(2 * Math.PI * rnd());
+  const sigMin = 0.0006;
+  const points: BacktestPoint[] = [];
+  for (let k = 0; k < 400; k++) {
+    const slot = SLOT + k * 300;
+    const px: number[] = [100]; // px[i] = clôture de la minute i, i = 0 ↔ slot − 66 min
+    for (let i = 1; i < 72; i++) px.push(px[i - 1] * Math.exp(sigMin * gauss()));
+    const at = (m: number) => px[m + 66]; // clôture de la minute commençant à slot + 60·m
+    const candles = [];
+    for (let m = -65; m < 5; m++) candles.push({ openTimeMs: (slot + m * 60) * 1000, open: at(m - 1), close: at(m) });
+    const strike = at(-1);
+    const sigS = sigMin / Math.sqrt(60);
+    const hist = [0, 120, 240].map(off => {
+      const spot = at(off / 60 - 1); // spot à l'instant slot + off (clôture de la minute précédente)
+      return { t: slot + off, p: normCdf(Math.log(spot / strike) / (sigS * Math.sqrt(300 - off + CFG.strikeNoiseSec))) };
+    });
+    const upWon = at(4) >= strike;
+    points.push(...evaluateRound({ slug: `btc-updown-5m-${slot}`, coin: 'BTC', slotSec: slot, upWon }, candles, hist, CFG));
+  }
+  assert.ok(points.length > 0);
+  assert.ok(points.every(p => (p.lagSec ?? 0) >= 0), 'le marché n\'est jamais plus ancien que le spot du modèle');
+  const c = compareBrier(points);
+  assert.ok(c.tDiff === null || c.tDiff > -2, `marché parfait déclaré battu : t = ${c.tDiff}`);
 });

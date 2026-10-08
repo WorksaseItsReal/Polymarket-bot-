@@ -70,7 +70,7 @@ test('settlePnl : gagné = parts − mise, perdu = − mise', () => {
 
 test('computeStats : ouverts exclus, série de pertes, drawdown, t-stat', () => {
   const t = (pnl: number, i: number, status: LedgerTrade['status'] = pnl > 0 ? 'won' : 'lost') =>
-    trade({ status, pnl, resolvedAt: `2026-10-07T10:${String(i).padStart(2, '0')}:00Z`, modelProb: 0.7 });
+    trade({ status, pnl, resolvedAt: `2026-10-07T10:${String(i).padStart(2, '0')}:00Z`, modelProb: 0.7, slug: `btc-updown-5m-${1_790_000_100 + 300 * i}` });
   const trades = [t(0.6, 1), t(0.6, 2), t(-1, 3), t(0.6, 4), t(-1, 5), t(-1, 6), trade({ stake: 0.5 })];
   const st = computeStats(trades);
   assert.equal(st.n, 6);
@@ -161,4 +161,18 @@ test('registre partagé : gelé (aucune modification accidentelle), stats recalc
   saveLedger(path, [...copy, trade({ id: 'b' })]);
   assert.notEqual(ledgerStatsShared(path), s1, 'fichier modifié : stats recalculées');
   assert.equal(readLedgerShared(path)!.length, 2);
+});
+
+test('t du PnL groupé par créneau : 5 paris corrélés du même round ne valent pas 5 preuves', () => {
+  const slot = (k: number) => `-updown-5m-${1_790_000_100 + 300 * k}`;
+  const mk = (coin: string, k: number, pnl: number) => trade({ coin, slug: coin.toLowerCase() + slot(k), status: pnl > 0 ? 'won' : 'lost', pnl, resolvedAt: `2026-10-07T10:${String(k).padStart(2, '0')}:00Z` });
+  // 12 créneaux, 5 coins qui gagnent ou perdent ENSEMBLE (corrélation parfaite)
+  const pattern = [1, 1, -1, 1, 1, -1, 1, 1, 1, -1, 1, 1];
+  const together = pattern.flatMap((w, k) => ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE'].map(c => mk(c, k, w > 0 ? 0.6 : -1)));
+  const one = pattern.map((w, k) => mk('BTC', k, w > 0 ? 0.6 : -1));
+  const tTogether = computeStats(together).tStat!;
+  const tOne = computeStats(one).tStat!;
+  // 60 trades parfaitement corrélés par 5 = 12 observations indépendantes : même t (à l'arrondi
+  // de petit échantillon près), pas √5 fois plus.
+  assert.ok(Math.abs(tTogether - tOne) / tOne < 0.1, `${tTogether} vs ${tOne}`);
 });

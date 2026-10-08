@@ -79,3 +79,30 @@ test('mélange actif : la comparaison porte sur le modèle SEUL (pRaw), pas sur 
   await t.resolveDue();
   assert.ok(Math.abs(t.stats().brierModel! - 0.01) < 1e-12, 'Brier de 0,9, pas de 0,6');
 });
+
+test('t groupé par créneau ; réglages du modèle changés → nouvelle mesure (jamais deux modèles mélangés)', async () => {
+  const outcome = async (slug: string) => ({ resolved: true as const, upWon: Number(slug.split('-').pop()) % 600 === 0 });
+  const run = async (path: string, coins: string[], modelKey?: string) => {
+    let now = 0;
+    const t = new ShadowTracker({ path, now: () => now, perCall: 1000, modelKey, fetchOutcome: outcome });
+    for (let k = 0; k < 40; k++) {
+      for (const c of coins) t.observe(rec(`${c}-updown-5m-${SLOT + k * 300}`, 0.7, 0.61, 0.41));
+      now = (SLOT + k * 300 + 361) * 1000;
+      await t.resolveDue();
+    }
+    return t.stats();
+  };
+  const path = join(mkdtempSync(join(tmpdir(), 'shadow-')), 'fv-shadow.json');
+  // 5 cryptos aux mêmes probabilités : 5 copies du même résultat par créneau
+  const grouped = await run(path, ['btc', 'eth', 'sol', 'xrp', 'doge'], 'z=1');
+  assert.equal(grouped.n, 200);
+  const single = await run(join(mkdtempSync(join(tmpdir(), 'shadow-')), 'fv-shadow.json'), ['btc']);
+  assert.ok(Math.abs(grouped.tDiff! - single.tDiff!) / Math.abs(single.tDiff!) < 0.05,
+    `5 copies corrélées ≠ 5× plus de preuve : ${grouped.tDiff} vs ${single.tDiff}`);
+  // réglages changés : la mesure repart de zéro, avec un signalement
+  let resetN = -1;
+  const changed = new ShadowTracker({ path, modelKey: 'z=0.8', onReset: n => { resetN = n; }, fetchOutcome: outcome });
+  assert.equal(changed.stats().n, 0);
+  assert.equal(resetN, 200);
+  assert.equal(new ShadowTracker({ path, modelKey: 'z=1', fetchOutcome: outcome }).stats().n, 200, 'même réglage : mesure conservée');
+});

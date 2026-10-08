@@ -123,7 +123,7 @@ test('rapport complet : journal + résultats en cache → le modèle bat un carn
     env: { ...process.env, HOME: home }, encoding: 'utf8', timeout: 120_000,
   });
   assert.match(out, /400 rounds réglés/);
-  assert.match(out, /le modèle bat le carnet/);
+  assert.match(out, /le modèle bat SIGNIFICATIVEMENT le carnet/);
   assert.match(out, /réglage actuel/);
   assert.match(out, /1b\) Mélange modèle \+ carnet/);
   if (process.env.SHOW_REPORT) console.log(out);

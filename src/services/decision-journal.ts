@@ -32,6 +32,9 @@ export interface DecisionRecord {
   pUp: number | null;
   /** Probabilité du modèle seul (avant mélange) ; absente des anciens journaux. */
   pRaw?: number | null;
+  /** FV_Z_SCALE en vigueur (absent des anciens journaux = 1) : l'analyse ramène toutes les
+   *  évaluations au même réglage avant d'estimer quoi que ce soit. */
+  zs?: number;
   upAsk: number | null;
   downAsk: number | null;
   /** Taille (parts) au meilleur ask. */

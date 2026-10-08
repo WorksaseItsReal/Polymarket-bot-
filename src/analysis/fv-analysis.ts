@@ -20,6 +20,7 @@ import {
   DEFAULT_FAIR_VALUE_CONFIG, blendWithMarket, bookMidUp, effectiveCostPerShare, normCdf, normInv,
 } from '../services/fair-value.js';
 import type { DecisionRecord } from '../services/decision-journal.js';
+import { clusteredMeanT, slotKey } from './stats.js';
 
 export interface ResolvedRecord extends DecisionRecord {
   upWon: boolean;
@@ -28,6 +29,22 @@ export interface ResolvedRecord extends DecisionRecord {
 /** Probabilité du modèle SEUL (avant mélange) ; les anciens journaux n'ont que pUp. */
 export function rawModelProb(r: Pick<DecisionRecord, 'pUp' | 'pRaw'>): number | null {
   return r.pRaw ?? r.pUp;
+}
+
+/**
+ * Ramène chaque évaluation au réglage FV_Z_SCALE ACTUEL : p' = Φ(zNow · Φ⁻¹(p) / zEnregistré).
+ * Sans cela, un journal qui couvre un changement de réglage mélange deux modèles, et les
+ * estimations (calibration, mélange, seuils) dérivent à chaque itération.
+ */
+export function normalizeZScale(rounds: ResolvedRecord[][], zNow: number): ResolvedRecord[][] {
+  return rounds.map(list => list.map(r => {
+    const raw = rawModelProb(r);
+    const zRec = r.zs ?? 1;
+    if (raw === null || zRec === zNow) return { ...r, pRaw: raw, zs: zRec };
+    const z = normInv(Math.min(0.999999, Math.max(0.000001, raw)));
+    const p = z === null ? raw : normCdf((zNow * z) / zRec);
+    return { ...r, pRaw: p, zs: zNow };
+  }));
 }
 
 /** Probabilité « Up » implicite du carnet : milieu entre l'ask Up et (1 − ask Down). */
@@ -100,6 +117,7 @@ export function byRound(records: ResolvedRecord[]): ResolvedRecord[][] {
 /** Rejoue la règle du bot pour un couple de seuils : premier pari qualifiant par round. */
 export function replay(rounds: ResolvedRecord[][], minEdge: number, minProb: number, p: ScanParams): ScanResult {
   const pnls: number[] = [];
+  const keys: string[] = [];
   let wins = 0;
   for (const list of rounds) {
     for (const r of list) {
@@ -119,6 +137,7 @@ export function replay(rounds: ResolvedRecord[][], minEdge: number, minProb: num
       if (!best) continue;
       const won = best.up === r.upWon;
       pnls.push(won ? 1 / best.cost - 1 : -1);
+      keys.push(slotKey(r.slug));
       if (won) wins++;
       break; // un seul pari par round
     }
@@ -126,11 +145,8 @@ export function replay(rounds: ResolvedRecord[][], minEdge: number, minProb: num
   const n = pnls.length;
   const total = pnls.reduce((a, b) => a + b, 0);
   const mean = n ? total / n : null;
-  let tStat: number | null = null;
-  if (n >= 2 && mean !== null) {
-    const v = pnls.reduce((a, b) => a + (b - mean) ** 2, 0) / (n - 1);
-    if (v > 0) tStat = mean / Math.sqrt(v / n);
-  }
+  // t groupé par créneau (les paris sur plusieurs cryptos d'un même round sont corrélés)
+  const tStat = clusteredMeanT(pnls.map((x, i) => ({ key: keys[i], x }))).t;
   return { minEdge, minProb, n, wins, winRate: n ? wins / n : null, evPerDollar: mean, total, tStat };
 }
 
@@ -155,7 +171,7 @@ export function halves(rounds: ResolvedRecord[][]): [ResolvedRecord[][], Resolve
 export interface ZScaleFit {
   /** Nombre de rounds utilisés (une évaluation par round). */
   n: number;
-  /** Multiplicateur optimal à appliquer au z ENREGISTRÉ. */
+  /** FV_Z_SCALE optimal (multiplicateur du z du modèle de base). */
   m: number;
   /** Intervalle de confiance 95 % (rapport de vraisemblance). */
   lo: number;
@@ -166,7 +182,7 @@ export interface ZScaleFit {
  * Calibration à un paramètre : trouve m maximisant la vraisemblance de P(Up) = Φ(m·z),
  * où z = Φ⁻¹(pUp enregistré). Une évaluation par round (la plus proche de τ = 150 s)
  * pour ne pas compter plusieurs fois le même résultat. m < 1 : modèle sur-confiant.
- * Le réglage suggéré est FV_Z_SCALE(actuel) × m.
+ * m est directement la valeur de FV_Z_SCALE à essayer (z ramené au modèle de base).
  */
 export function fitZScale(rounds: ResolvedRecord[][], tauRef = 150): ZScaleFit | null {
   const pts: Array<{ z: number; y: number }> = [];
@@ -176,8 +192,11 @@ export function fitZScale(rounds: ResolvedRecord[][], tauRef = 150): ZScaleFit |
       if (rawModelProb(r) === null) continue;
       if (!best || Math.abs(r.tau - tauRef) < Math.abs(best.tau - tauRef)) best = r;
     }
-    // FV_Z_SCALE agit sur le modèle seul : on calibre la probabilité AVANT mélange.
-    const z = best ? normInv(Math.min(0.999, Math.max(0.001, rawModelProb(best) as number))) : null;
+    // FV_Z_SCALE agit sur le modèle seul : on calibre la probabilité AVANT mélange, ramenée au
+    // modèle de base (z divisé par le FV_Z_SCALE en vigueur lors de l'évaluation). Le
+    // multiplicateur estimé est donc directement la valeur de FV_Z_SCALE à essayer.
+    const zRaw = best ? normInv(Math.min(0.999, Math.max(0.001, rawModelProb(best) as number))) : null;
+    const z = zRaw === null || !best ? null : zRaw / (best.zs ?? 1);
     if (best && z !== null) pts.push({ z, y: best.upWon ? 1 : 0 });
   }
   if (pts.length < 30) return null;
@@ -356,22 +375,17 @@ export function scoreBlend(pts: BlendPoint[], a: number, b: number): BlendScore 
     r.w += pt.w;
     per.set(pt.slug, r);
   }
-  const rows = [...per.values()].map(r => ({ m: r.m / r.w, k: r.k / r.w, x: r.x / r.w }));
+  const rows = [...per.entries()].map(([slug, r]) => ({ key: slotKey(slug), m: r.m / r.w, k: r.k / r.w, x: r.x / r.w }));
   if (!rows.length) return null;
   const mean = (xs: number[]) => xs.reduce((s, v) => s + v, 0) / xs.length;
-  const tStat = (ds: number[]) => {
-    if (ds.length < 2) return null;
-    const m = mean(ds);
-    const v = ds.reduce((s, d) => s + (d - m) ** 2, 0) / (ds.length - 1);
-    return v > 0 ? m / Math.sqrt(v / ds.length) : null;
-  };
   return {
     rounds: rows.length,
     brierModel: mean(rows.map(r => r.m)),
     brierMarket: mean(rows.map(r => r.k)),
     brierBlend: mean(rows.map(r => r.x)),
-    tVsModel: tStat(rows.map(r => r.x - r.m)),
-    tVsMarket: tStat(rows.map(r => r.x - r.k)),
+    // t groupé par créneau (les 5 cryptos d'un même round sont corrélées)
+    tVsModel: clusteredMeanT(rows.map(r => ({ key: r.key, x: r.x - r.m }))).t,
+    tVsMarket: clusteredMeanT(rows.map(r => ({ key: r.key, x: r.x - r.k }))).t,
   };
 }
 
@@ -517,4 +531,48 @@ export function bookStats(records: DecisionRecord[]): BookStats[] {
       medianAskSize: median(rs.filter(r => r.upAskSz != null).map(r => r.upAskSz as number)),
     };
   });
+}
+
+export interface ModelBookComparison {
+  /** rounds où modèle ET carnet sont connus */
+  rounds: number;
+  brierModel: number | null;
+  brierMarket: number | null;
+  /** t groupé par créneau de (Brier modèle − Brier carnet) ; négatif = modèle meilleur */
+  t: number | null;
+}
+
+/**
+ * Le modèle prédit-il mieux que le carnet ? Comparaison APPARIÉE : pour chaque round,
+ * moyenne des erreurs sur ses évaluations où les deux sont connus (chaque round compte
+ * pour 1, les évaluations d'un même round étant corrélées), puis t groupé par créneau
+ * (les cryptos d'un même round le sont aussi).
+ */
+export function compareModelBook(rounds: ResolvedRecord[][], opts: { minTau?: number; maxTau?: number } = {}): ModelBookComparison {
+  const rows: Array<{ key: string; m: number; k: number }> = [];
+  for (const list of rounds) {
+    let m = 0;
+    let k = 0;
+    let n = 0;
+    for (const r of list) {
+      if (opts.minTau !== undefined && r.tau < opts.minTau) continue;
+      if (opts.maxTau !== undefined && r.tau > opts.maxTau) continue;
+      const pm = rawModelProb(r);
+      const pk = marketProbUp(r);
+      if (pm === null || pk === null) continue;
+      const y = r.upWon ? 1 : 0;
+      m += (pm - y) ** 2;
+      k += (pk - y) ** 2;
+      n++;
+    }
+    if (n) rows.push({ key: slotKey(list[0].slug), m: m / n, k: k / n });
+  }
+  if (!rows.length) return { rounds: 0, brierModel: null, brierMarket: null, t: null };
+  const mean = (xs: number[]) => xs.reduce((a, b) => a + b, 0) / xs.length;
+  return {
+    rounds: rows.length,
+    brierModel: mean(rows.map(r => r.m)),
+    brierMarket: mean(rows.map(r => r.k)),
+    t: clusteredMeanT(rows.map(r => ({ key: r.key, x: r.m - r.k }))).t,
+  };
 }

@@ -12,7 +12,7 @@ import { computeStats, type LedgerTrade } from '../src/services/paper-ledger.ts'
 
 function stats(pnls: number[], modelProb = 0.7) {
   return computeStats(pnls.map((pnl, i): LedgerTrade => ({
-    id: String(i), slug: 's', coin: 'BTC', side: 'UP', stake: 1, costPerShare: 0.6, shares: 1.66, modelProb, edge: 0.1,
+    id: String(i), slug: `btc-updown-5m-${1_790_000_100 + 300 * i}`, coin: 'BTC', side: 'UP', stake: 1, costPerShare: 0.6, shares: 1.66, modelProb, edge: 0.1,
     openedAt: '2026-10-07T00:00:00Z', endMs: 0, status: pnl > 0 ? 'won' : 'lost', pnl, resolvedAt: new Date(1e12 + i * 1000).toISOString(),
   })));
 }

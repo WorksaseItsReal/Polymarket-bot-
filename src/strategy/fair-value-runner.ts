@@ -252,8 +252,11 @@ export class FairValueRunner {
         await this.checkExits();
         this.lastFullPassAt = this.d.now();
       }
-      if (!this.d.canTrade()) return true;
-      await this.enterNewTrades(coins);
+      // Porte de risque fermée : les ÉVALUATIONS continuent (journal, mesure « modèle vs
+      // carnet », marchés rafraîchis pour le chien de garde) ; seules les entrées sont
+      // bloquées. Avant, une pause coupait la mesure précisément pendant les mauvaises
+      // périodes, ce qui flattait le verdict.
+      await this.enterNewTrades(coins, this.d.canTrade() ? null : 'pause de risque');
       this.consecutiveTickFailures = 0;
     } catch (err) {
       this.consecutiveTickFailures++;
@@ -415,7 +418,7 @@ export class FairValueRunner {
     if (this.markets.length) this.lastMarketsFoundAt = now;
   }
 
-  async enterNewTrades(coins?: readonly string[]): Promise<void> {
+  async enterNewTrades(coins?: readonly string[], gateBlock: string | null = null): Promise<void> {
     const { cfg } = this.d;
     await this.refreshMarkets();
     for (const market of this.markets) {
@@ -447,7 +450,7 @@ export class FairValueRunner {
         const decision = decide({ ...data, tauSec, upAsk: upBest?.price ?? null, downAsk: downBest?.price ?? null }, cfg);
         rec = {
           t: now, slug: market.slug, coin, tau: Math.round(tauSec * 10) / 10, spot: data.spot, strike: data.strike,
-          sig: data.sigmaPerSqrtSec, pUp: decision.pUp, pRaw: decision.pRaw ?? null, upAsk: upBest?.price ?? null, downAsk: downBest?.price ?? null,
+          sig: data.sigmaPerSqrtSec, pUp: decision.pUp, pRaw: decision.pRaw ?? null, zs: cfg.zScale, upAsk: upBest?.price ?? null, downAsk: downBest?.price ?? null,
           upAskSz: upBest?.size ?? null, downAskSz: downBest?.size ?? null,
           upBid: upBid?.price ?? null, downBid: downBid?.price ?? null, upBidSz: upBid?.size ?? null, downBidSz: downBid?.size ?? null,
           src: data.source, act: 'hold',
@@ -459,7 +462,7 @@ export class FairValueRunner {
           continue;
         }
 
-        const block = this.d.entryBlock?.() ?? null;
+        const block = gateBlock ?? this.d.entryBlock?.() ?? null;
         if (block) {
           this.holdLog(market.conditionId, `   ↳ ${ctx} → signal ${decision.side} ignoré : entrées bloquées (${block})`);
           continue;

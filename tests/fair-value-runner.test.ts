@@ -569,3 +569,14 @@ test('mélange actif, redémarrage avec entrées bloquées : la revente reste po
   assert.equal(loadLedger(env.ledgerPath)![0].status, 'sold');
   assert.ok(reads.includes('DOWN'));
 });
+
+test('pause de risque : aucun pari, mais la MESURE continue (journal, marchés) — pas de trou pendant les mauvaises périodes', async () => {
+  const evals: Array<{ act: string }> = [];
+  const env = setup({ canTrade: () => false, onEvaluation: r => evals.push({ act: r.act }) });
+  const r = env.runner();
+  await r.tick();
+  assert.equal(loadLedger(env.ledgerPath)!.length, 0, 'aucun pari en pause');
+  assert.deepEqual(evals, [{ act: 'hold' }], 'évaluation journalisée malgré la pause');
+  assert.ok(r.lastMarketsFoundAt > 0, 'marchés rafraîchis : pas de fausse alerte « aucun marché »');
+  assert.ok(env.logs.some(l => /entrées bloquées \(pause de risque\)/.test(l)));
+});

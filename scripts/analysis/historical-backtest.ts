@@ -78,18 +78,25 @@ async function main() {
   console.error(`Historiques de prix à télécharger : ${needHist.length}`);
   let shownRaw = false;
   let n = 0;
+  let failedHist = 0;
   await mapLimit(needHist, 4, async w => {
+    let answered = false;
     const pts = await fetchPriceHistory(meta[w.slug].upTokenId, w.slot - 120, w.slot + 300, {
       onRaw: raw => {
+        answered = true;
         if (shownRaw) return;
         shownRaw = true;
         console.error(`  Exemple de réponse brute prices-history (${w.slug}) : ${JSON.stringify(raw).slice(0, 300)}`);
       },
     });
-    hist[w.slug] = pts;
+    // Échec réseau (aucune réponse) : NE PAS mettre en cache, sinon le round est perdu pour
+    // toujours (avant : `[]` en cache, jamais re-téléchargé).
+    if (answered) hist[w.slug] = pts;
+    else failedHist++;
     if (++n % 500 === 0) { console.error(`  prix : ${n}/${needHist.length}`); writeFileSync(HIST, JSON.stringify(hist)); }
   });
   writeFileSync(HIST, JSON.stringify(hist));
+  if (failedHist) console.error(`  ⚠️ ${failedHist} historiques non obtenus (réseau) : relancer le script pour les récupérer.`);
 
   // 3. Bougies Binance + évaluation
   const points: BacktestPoint[] = [];
@@ -105,6 +112,12 @@ async function main() {
   }
   const nRounds = new Set(points.map(p => p.slug)).size;
   console.log(`\n=== Backtest historique : ${nRounds} rounds, ${points.length} points (τ = 240/180/120/60 s) ===\n`);
+  const lags = points.map(p => p.lagSec ?? 0).sort((a, b) => a - b);
+  if (lags.length) {
+    console.log(`Alignement : le modèle est évalué à l'heure de chaque prix marché, avec la dernière bougie TERMINÉE`
+      + ` (spot en retard de ${lags[Math.floor(lags.length / 2)]} s en médiane, ${lags[lags.length - 1]} s au plus) :`
+      + ' tout désavantage est pour le modèle.\n');
+  }
   if (!points.length) { console.log('Aucun point évaluable (historique de prix vide ?). Voir l\'exemple de réponse brute ci-dessus.'); return; }
 
   // A. Modèle vs marché
@@ -132,7 +145,7 @@ async function main() {
   }
 
   // C. Calibration
-  const recs = toResolvedRecords(points);
+  const recs = toResolvedRecords(points, 0.005, cfg.zScale);
   console.log('\n3) Calibration (modèle | marché)');
   const calM = calibration(recs, r => r.pUp);
   const calK = calibration(points.map(p => ({ ...recs[0], pUp: p.pMarket, upWon: p.upWon })), r => r.pUp);
@@ -147,11 +160,11 @@ async function main() {
   const blend = fitBlend(rounds, { minTau: cfg.minTauSec, maxTau: cfg.maxTauSec });
   if (fit) {
     console.log(`   Calibration à un paramètre : multiplicateur ${fit.m} (IC95 ${fit.lo}–${fit.hi})`
-      + (fit.lo <= 1 && fit.hi >= 1
+      + (fit.lo <= cfg.zScale && fit.hi >= cfg.zScale
         ? ' → compatible avec FV_Z_SCALE actuel'
         : zScaleConflictsWithBlend(blendVerdict(blend, cfg), cfg)
           ? ' → déjà corrigée par le mélange (actif ou proposé en 3b) : ré-estimer le mélange, pas FV_Z_SCALE'
-          : ` → essayer FV_Z_SCALE=${Math.round(cfg.zScale * fit.m * 100) / 100}`));
+          : ` → essayer FV_Z_SCALE=${Math.round(fit.m * 100) / 100}`));
   }
 
   // C bis. Mélange modèle + marché

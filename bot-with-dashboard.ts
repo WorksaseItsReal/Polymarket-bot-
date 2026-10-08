@@ -1219,7 +1219,15 @@ async function setupFairValueStrategy(sdk: PolymarketSDK) {
   const discovery = new RoundDiscovery();
   let lastFallbackScan = 0;
   // Mesure continue « modèle vs carnet » sur tous les rounds observés (bilan Telegram).
-  const shadow = new ShadowTracker({ path: polyDir() + '/fv-shadow.json', fetchOutcome: slug => fetchRoundOutcome(slug) });
+  // Empreinte du modèle MESURÉ (le mélange n'en fait pas partie : la mesure porte sur le
+  // modèle seul). Si elle change, « Modèle vs carnet » repart de zéro.
+  const modelKey = JSON.stringify({
+    z: FV_CFG.zScale, tails: FV_CFG.tails, noise: FV_CFG.strikeNoiseSec, basis: FV_CFG.basisBps, twap: FV_CFG.twapWindowSec,
+  });
+  const shadow = new ShadowTracker({
+    path: polyDir() + '/fv-shadow.json', fetchOutcome: slug => fetchRoundOutcome(slug), modelKey,
+    onReset: n => log('WARN', `Réglages du modèle changés : la mesure « modèle vs carnet » (${n} rounds) repart de zéro`),
+  });
   shadowTracker = shadow;
   setInterval(() => { void shadow.resolveDue(); }, 30_000).unref?.();
   const journal = (process.env.FV_JOURNAL ?? 'true').toLowerCase() === 'false'

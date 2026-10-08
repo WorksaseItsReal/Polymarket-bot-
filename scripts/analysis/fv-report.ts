@@ -18,7 +18,8 @@ import type { DecisionRecord } from '../../src/services/decision-journal.js';
 import { fetchRoundOutcome } from '../../src/services/paper-ledger.js';
 import { fairValueConfigFromEnv } from '../../src/services/fair-value.js';
 import {
-  applyBlend, blendVerdict, zScaleConflictsWithBlend, bookStats, brier, byRound, calibration, describeBlend, fitBlend, fitZScale, halves, marketProbUp, rawModelProb, replay,
+  applyBlend, blendVerdict, zScaleConflictsWithBlend, bookStats, brier, byRound, calibration, compareModelBook, describeBlend, fitBlend,
+  fitZScale, halves, marketProbUp, normalizeZScale, rawModelProb, replay,
   thresholdGrid, type ResolvedRecord,
 } from '../../src/analysis/fv-analysis.js';
 
@@ -81,24 +82,32 @@ async function main() {
   const resolved: ResolvedRecord[] = records
     .filter(r => outcomes.has(r.slug))
     .map(r => ({ ...r, upWon: outcomes.get(r.slug) as boolean }));
-  const rounds = byRound(resolved);
+  // Toutes les évaluations ramenées au FV_Z_SCALE actuel (un journal peut couvrir un
+  // changement de réglage), puis probabilité de décision recalculée avec le mélange actuel :
+  // le rapport juge le réglage EN VIGUEUR, pas un mélange de réglages passés.
+  const rounds = normalizeZScale(byRound(resolved), cfg.zScale);
+  const decisionRounds = applyBlend(rounds, cfg.blendModel, cfg.blendMarket);
+  const evals = rounds.flat();
   console.log(`\n=== Journal : ${records.length} évaluations, ${new Set(records.map(r => r.slug)).size} rounds, ${rounds.length} rounds réglés ===\n`);
   if (!rounds.length) return;
 
-  // 1. Modèle vs marché (une évaluation par round : la première, pour ne pas sur-pondérer)
-  // (modèle SEUL, avant un éventuel mélange avec le carnet)
-  const first = rounds.map(l => l[0]);
-  const bm = brier(first, rawModelProb);
-  const bk = brier(first, marketProbUp);
-  console.log('1) Le modèle prédit-il mieux que le carnet ? (Brier, plus bas = meilleur)');
-  console.log(`   1re évaluation de chaque round : modèle ${num(bm.score, 4)} | carnet ${num(bk.score, 4)} (n=${bm.n} rounds)`);
-  const am = brier(resolved, rawModelProb);
-  const ak = brier(resolved, marketProbUp);
+  // 1. Modèle vs marché : appariée (mêmes évaluations), chaque round pesant 1, modèle SEUL
+  // (avant mélange), t groupé par créneau (les 5 cryptos d'un round sont corrélées).
+  const cmp = compareModelBook(rounds, { minTau: cfg.minTauSec, maxTau: cfg.maxTauSec });
+  const bm = { n: cmp.rounds, score: cmp.brierModel };
+  const bk = { n: cmp.rounds, score: cmp.brierMarket };
+  console.log('1) Le modèle prédit-il mieux que le carnet ? (Brier, plus bas = meilleur ; t ≤ −2 = modèle meilleur)');
+  console.log(`   par round (fenêtre d'entrée)   : modèle ${num(cmp.brierModel, 4)} | carnet ${num(cmp.brierMarket, 4)}`
+    + ` | t ${num(cmp.t, 1)} (n=${cmp.rounds} rounds)`);
+  const am = brier(evals, rawModelProb);
+  const ak = brier(evals, marketProbUp);
   console.log(`   toutes les évaluations         : modèle ${num(am.score, 4)} | carnet ${num(ak.score, 4)} (n=${am.n}, corrélées au sein d'un round)`);
-  if (bm.score !== null && bk.score !== null) {
-    console.log(bm.score < bk.score
-      ? '   → le modèle bat le carnet sur cet échantillon : un edge est POSSIBLE.'
-      : '   → le carnet prédit au moins aussi bien : PAS d\'edge exploitable, quel que soit le seuil.');
+  if (cmp.t !== null) {
+    console.log(cmp.t <= -2
+      ? '   → le modèle bat SIGNIFICATIVEMENT le carnet : un edge est possible (à confirmer par les seuils sur les deux moitiés).'
+      : cmp.t >= 2
+        ? '   → le carnet prédit significativement mieux : PAS d\'edge, quel que soit le seuil.'
+        : '   → pas de différence significative : aucun edge démontré à ce stade.');
   }
 
   // 1b. Mélange modèle + carnet
@@ -117,16 +126,16 @@ async function main() {
   // 2. Calibration
   console.log('\n2) Calibration du modèle seul (toutes évaluations)');
   console.log('   tranche     n      p moyen   Up réel');
-  for (const b of calibration(resolved, rawModelProb)) {
+  for (const b of calibration(evals, rawModelProb)) {
     console.log(`   ${b.lo.toFixed(1)}-${b.hi.toFixed(1)}  ${String(b.n).padStart(6)}   ${pct(b.meanP)}   ${pct(b.freqUp)}`);
   }
 
   // 2b. Réglage de calibration suggéré
   const fit = fitZScale(rounds);
   if (fit) {
-    const suggested = Math.round(cfg.zScale * fit.m * 100) / 100;
-    const ok = fit.lo <= 1 && fit.hi >= 1;
-    console.log(`\n2b) Calibration (un paramètre, ${fit.n} rounds) : multiplicateur optimal ${fit.m} (IC95 ${fit.lo}–${fit.hi})`);
+    const suggested = Math.round(fit.m * 100) / 100;
+    const ok = fit.lo <= cfg.zScale && fit.hi >= cfg.zScale;
+    console.log(`\n2b) Calibration (un paramètre, ${fit.n} rounds) : FV_Z_SCALE optimal ${fit.m} (IC95 ${fit.lo}–${fit.hi})`);
     console.log(ok
       ? `   → compatible avec le réglage actuel (FV_Z_SCALE=${cfg.zScale}) : rien à changer.`
       : zScaleConflictsWithBlend(blendVerdict(blend, cfg), cfg)
@@ -137,10 +146,10 @@ async function main() {
   // 3. Seuils (probabilité utilisée par le bot, mélange compris s'il est configuré)
   const edges = [0, 0.02, 0.04, 0.06, 0.08, 0.1];
   const probs = [0.5, 0.55, 0.6, 0.65, 0.7, 0.8];
-  const [h1, h2] = halves(rounds);
+  const [h1, h2] = halves(decisionRounds);
   console.log('\n3) Seuils rejoués (1 pari/round au meilleur ask, frais inclus) — EV par 1 $ misé');
   console.log('   edge  pmin     n     WR      EV/$     t   | moitié 1 EV   moitié 2 EV');
-  for (const r of thresholdGrid(rounds, edges, probs, params)) {
+  for (const r of thresholdGrid(decisionRounds, edges, probs, params)) {
     if (r.n < 10) continue;
     const a = replay(h1, r.minEdge, r.minProb, params);
     const b = replay(h2, r.minEdge, r.minProb, params);
@@ -151,7 +160,7 @@ async function main() {
   console.log('   Ne retenir un réglage que s\'il est positif sur LES DEUX moitiés.');
 
   // 3b. Où est l'avantage ? (réglage actuel, par coin et par temps restant)
-  const fmtRow = (label: string, rs: typeof rounds) => {
+  const fmtRow = (label: string, rs: typeof decisionRounds) => {
     const r = replay(rs, cfg.minEdge, cfg.minProb, params);
     const [a, b] = halves(rs);
     const ra = replay(a, cfg.minEdge, cfg.minProb, params);
@@ -160,11 +169,11 @@ async function main() {
   };
   console.log(`\n3b) Réglage actuel (edge ${cfg.minEdge}, pmin ${cfg.minProb}) par coin`);
   for (const coin of [...new Set(resolved.map(r => r.coin))].sort()) {
-    fmtRow(coin, rounds.filter(l => l[0].coin === coin));
+    fmtRow(coin, decisionRounds.filter(l => l[0].coin === coin));
   }
   console.log('    … et par temps restant au moment de l\'évaluation (s)');
   for (const [lo, hi] of [[45, 90], [90, 150], [150, 210], [210, 270]]) {
-    const rs = rounds.map(l => l.filter(r => r.tau >= lo && r.tau < hi)).filter(l => l.length);
+    const rs = decisionRounds.map(l => l.filter(r => r.tau >= lo && r.tau < hi)).filter(l => l.length);
     fmtRow(`τ ${lo}-${hi}`, rs);
   }
 
@@ -189,7 +198,7 @@ async function main() {
 
   const out = arg('json');
   if (out) {
-    writeFileSync(out, JSON.stringify({ brierModel: bm, brierMarket: bk, blend, calibration: calibration(resolved, rawModelProb), grid: thresholdGrid(rounds, edges, probs, params) }, null, 2));
+    writeFileSync(out, JSON.stringify({ brierModel: bm, brierMarket: bk, blend, calibration: calibration(evals, rawModelProb), grid: thresholdGrid(decisionRounds, edges, probs, params) }, null, 2));
     console.log(`\nJSON écrit : ${out}`);
   }
 }
