@@ -324,6 +324,19 @@ pas ; face à un carnet en retard de 10 s il gagne, avec un win rate ≈ 69 % é
 probabilité annoncée (calibration). Cela valide la logique, **pas** l'existence d'un edge sur
 le vrai Polymarket.
 
+### Réponse rapide sur l'historique (backtest)
+
+```bash
+npx tsx scripts/analysis/historical-backtest.ts --days 3     # réseau requis, résultats en cache
+```
+
+Rejoue le modèle sur les rounds des derniers jours (prix Polymarket minute par minute,
+bougies Binance, résolutions Gamma) : Brier modèle vs marché à τ = 240/180/120/60 s, par coin,
+comparaison de 3 estimateurs de volatilité, calibration, `FV_Z_SCALE` suggéré, seuils rejoués
+sur des asks **reconstitués** (indicatif). ⚠️ Si le prix historique est un dernier prix
+échangé, il peut être en retard et le test **surestime** l'avantage : c'est un filtre rapide
+(« pas d'edge ici → inutile d'attendre »), pas une preuve. La preuve vient du journal en direct.
+
 ### Mesurer si ça marche (journal des décisions)
 
 Chaque évaluation — pari **ou** abstention — est écrite dans

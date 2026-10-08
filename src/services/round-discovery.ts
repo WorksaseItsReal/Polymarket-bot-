@@ -45,8 +45,15 @@ function parseArr(v: unknown): unknown[] | null {
   }
 }
 
-/** Interprète la réponse Gamma `events?slug=`. Pure. null = round inexploitable. */
-export function parseDiscoveryEvent(data: unknown, coin: DiscoveryCoin, slug: string): DiscoveredRound | null {
+/**
+ * Tokens Up/Down et conditionId d'un round dans la réponse Gamma `events?slug=`, que le
+ * marché soit ouvert ou clôturé (le backtest historique en a besoin). Pure.
+ */
+export function parseRoundTokens(
+  data: unknown,
+  coin: DiscoveryCoin,
+  slug: string,
+): (DiscoveredRound & { closed: boolean }) | null {
   const events = Array.isArray(data) ? data : [];
   const ev = events.find(e => e && typeof e === 'object' && (e as { slug?: unknown }).slug === slug) as
     | { markets?: unknown; title?: unknown }
@@ -56,7 +63,7 @@ export function parseDiscoveryEvent(data: unknown, coin: DiscoveryCoin, slug: st
   const m = markets[0] as
     | { conditionId?: unknown; clobTokenIds?: unknown; outcomes?: unknown; closed?: unknown; question?: unknown }
     | undefined;
-  if (!m || m.closed === true) return null;
+  if (!m) return null;
   const conditionId = typeof m.conditionId === 'string' && /^0x[0-9a-fA-F]{64}$/.test(m.conditionId) ? m.conditionId : null;
   const tokens = (parseArr(m.clobTokenIds) ?? []).map(String);
   const outcomes = (parseArr(m.outcomes) ?? []).map(o => String(o).toLowerCase());
@@ -74,7 +81,16 @@ export function parseDiscoveryEvent(data: unknown, coin: DiscoveryCoin, slug: st
     durationMinutes: 5,
     upTokenId,
     downTokenId,
+    closed: m.closed === true,
   };
+}
+
+/** Interprète la réponse Gamma `events?slug=`. Pure. null = round inexploitable ou clôturé. */
+export function parseDiscoveryEvent(data: unknown, coin: DiscoveryCoin, slug: string): DiscoveredRound | null {
+  const r = parseRoundTokens(data, coin, slug);
+  if (!r || r.closed) return null;
+  const { closed: _closed, ...round } = r;
+  return round;
 }
 
 export interface DiscoveryOptions {

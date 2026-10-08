@@ -21,7 +21,7 @@ import { realizedVolPerSqrtSec } from './fair-value.js';
 import type { SpotCoin } from './spot-price-service.js';
 import type { LivePrice } from './spot-stream.js';
 
-interface Candle {
+export interface Candle {
   openTimeMs: number;
   open: number;
   close: number;
@@ -72,7 +72,7 @@ async function fetchJson(url: string): Promise<unknown | null> {
   }
 }
 
-function parseBinance(data: unknown): Candle[] | null {
+export function parseBinance(data: unknown): Candle[] | null {
   if (!Array.isArray(data)) return null;
   const out: Candle[] = [];
   for (const k of data) {
