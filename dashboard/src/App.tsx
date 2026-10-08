@@ -18,6 +18,7 @@ import {
   HistoryPage,
   PositionsPage,
   StrategyControls,
+  FairValuePanel,
 } from './components';
 
 type Page = 'dashboard' | 'history' | 'positions';
@@ -98,6 +99,9 @@ function App() {
           <QuickStats state={state} config={config} />
           <BalanceCards state={state} />
         </div>
+
+        {/* Stratégie active : résultats réels, mesure modèle vs carnet, critères avant le réel */}
+        <FairValuePanel state={state} />
 
         {/* Row 2: Main Trading Grid - 4 columns */}
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">

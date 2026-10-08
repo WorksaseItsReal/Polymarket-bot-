@@ -38,7 +38,7 @@ import { withTimeout } from './src/utils/with-timeout.js';
 import { PersistentGuard, evaluateGuard } from './src/strategy/performance-guard.js';
 import { ShadowTracker } from './src/strategy/shadow-tracker.js';
 import { TelegramClient, telegramConfigFromEnv } from './src/services/telegram.js';
-import { isValidTimeZone, msgAlert, msgStartup, msgSummary } from './src/services/telegram-messages.js';
+import { goLiveLine, isValidTimeZone, msgAlert, msgStartup, msgSummary, shadowLine } from './src/services/telegram-messages.js';
 
 // ============================================================================
 // CONFIGURATION (same as bot-config.ts)
@@ -960,6 +960,13 @@ function syncRealizedPnl() {
   const st = ledgerStatsShared(ledgerPath());
   const v = st.pnl;
   state.ledger = { trades: st.n, wins: st.wins, losses: st.losses, open: st.open, winRate: st.winRate, pnl: st.pnl, tStat: st.tStat };
+  const sh = shadowTracker?.stats();
+  state.fairValueSummary = {
+    shadow: sh ? shadowLine(sh) : 'Modèle vs carnet : mesure non démarrée',
+    goLive: goLiveLine(st, sh),
+    openPositions: trades.filter(t => t.status === 'open').slice(-20)
+      .map(t => ({ coin: t.coin, side: t.side, stake: t.stake, costPerShare: t.costPerShare, endMs: t.endMs })),
+  };
   state.totalPnL = v;
   // Pertes du jour / du mois CALENDAIRES (UTC), recalculées à chaque tick depuis le
   // registre : avant, ces compteurs n'étaient jamais alimentés en papier (aucun PnL

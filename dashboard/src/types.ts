@@ -38,6 +38,12 @@ export interface BotState {
   directTrades: number;
   /** Paris de la stratégie juste valeur (session en cours). */
   fairValueTrades?: number;
+  /** Résumé de la stratégie juste valeur (mêmes lignes que le bilan Telegram). */
+  fairValueSummary?: {
+    shadow: string;
+    goLive: string;
+    openPositions: Array<{ coin: string; side: 'UP' | 'DOWN'; stake: number; costPerShare: number; endMs: number }>;
+  };
   /** Statistiques RÉELLES du registre papier (toutes sessions), source de vérité. */
   ledger?: {
     trades: number;
