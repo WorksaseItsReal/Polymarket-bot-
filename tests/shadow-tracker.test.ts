@@ -135,7 +135,7 @@ test('toutes les évaluations du round comptent (moyenne), chaque round pesant 1
   assert.ok(Math.abs(st.brierMarket! - (0.25 + 0.09) / 2) < 1e-12, `${st.brierMarket}`);
 });
 
-test('grille fixe de 10 s : gigue tolérée, évaluations déclenchées par un saut du spot exclues', async () => {
+test('écart minimal de 8 s : gigue tolérée, évaluations déclenchées par un saut du spot exclues', async () => {
   let now = (SLOT + 100) * 1000;
   const t = new ShadowTracker({
     path: join(mkdtempSync(join(tmpdir(), 'shadow-')), 'fv-shadow.json'), now: () => now,

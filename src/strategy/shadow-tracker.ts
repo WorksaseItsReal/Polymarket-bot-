@@ -1,8 +1,8 @@
 /**
  * shadow-tracker.ts — « le modèle prédit-il mieux que le carnet ? », mesuré en continu.
  *
- * Pour chaque round observé (tradé ou non), on garde ses évaluations RÉGULIÈRES (une par
- * tranche de 10 s ; celles déclenchées par un saut du spot sont exclues) : P(Up) du modèle et P(Up) implicite du carnet (milieu des asks).
+ * Pour chaque round observé (tradé ou non), on garde ses évaluations RÉGULIÈRES (au plus
+ * une toutes les 8 s ; celles déclenchées par un saut du spot sont exclues) : P(Up) du modèle et P(Up) implicite du carnet (milieu des asks).
  * Une fois le round réglé, on ajoute au bilan l'erreur quadratique (Brier) MOYENNE de
  * chacun sur ces évaluations — chaque round compte pour un. Avant : seule la première
  * évaluation (début de round, où tout est proche de 50 %) comptait, d'où très peu de
@@ -48,9 +48,9 @@ export interface ShadowStats {
 
 interface Pending {
   endMs: number;
-  /** Évaluations retenues (modèle, carnet), au plus une par tranche de 10 s du round. */
+  /** Évaluations retenues (modèle, carnet), au plus une toutes les 8 s. */
   evals: Array<{ pm: number; pk: number }>;
-  lastBucket: number;
+  lastT: number;
 }
 
 export interface ShadowOptions {
@@ -113,7 +113,7 @@ export class ShadowTracker {
     } catch { /* fichier illisible : on repart de zéro, sans l'écraser tant que rien n'est mesuré */ }
   }
 
-  /** Retient les évaluations régulières du round (une par tranche de 10 s). */
+  /** Retient les évaluations régulières du round (au plus une toutes les 8 s). */
   observe(r: DecisionRecord): void {
     // Modèle SEUL : avec un mélange actif, pUp contient déjà le carnet et la comparaison
     // « modèle vs carnet » serait truquée.
@@ -126,21 +126,20 @@ export class ShadowTracker {
     if (pMarket === null) return;
     const slot = Number(r.slug.split('-').pop());
     if (!Number.isFinite(slot)) return;
-    // Une évaluation par tranche de 10 s depuis le début du round (grille fixe : un
-    // passage à 9,98 s du précédent n'est plus perdu à cause de la gigue réseau).
-    const bucket = Math.floor((r.t / 1000 - slot) / 10);
+    // Au plus une évaluation toutes les 8 s (passages réguliers ~10 s : la gigue réseau ne
+    // fait plus perdre de passage ; des tranches fixes en perdaient aussi).
     const existing = this.pending.get(r.slug);
     if (existing) {
-      if (bucket <= existing.lastBucket || existing.evals.length >= 40) return;
+      if (r.t - existing.lastT < 8_000 || existing.evals.length >= 40) return;
       existing.evals.push({ pm: pModel, pk: pMarket });
-      existing.lastBucket = bucket;
+      existing.lastT = r.t;
       return;
     }
     if (this.pending.size >= this.o.maxPending) {
       const oldest = this.pending.keys().next().value;
       if (oldest !== undefined) this.pending.delete(oldest);
     }
-    this.pending.set(r.slug, { endMs: slot * 1000 + 300_000, evals: [{ pm: pModel, pk: pMarket }], lastBucket: bucket });
+    this.pending.set(r.slug, { endMs: slot * 1000 + 300_000, evals: [{ pm: pModel, pk: pMarket }], lastT: r.t });
   }
 
   /** Règle les rounds terminés (au plus `perCall` requêtes). Ne lève jamais. */

@@ -3,9 +3,10 @@
  * Saves and loads trading session history to/from a JSON file
  */
 
-import { existsSync, renameSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
-import { join } from 'path';
+import { copyFileSync, existsSync, renameSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
+import { dirname, join } from 'path';
 import { homedir } from 'os';
+import { fileURLToPath } from 'url';
 
 // Types
 export interface TradeRecord {
@@ -76,6 +77,20 @@ export interface HistoryData {
 // dépôt — le fichier modifié à chaque arrêt bloquait les `git pull` et finissait commité.
 const dataDir = () => join(process.env.HOME || homedir(), '.polymarket');
 const historyFile = () => join(dataDir(), 'session-history.json');
+/** Ancien emplacement (data/ dans le dépôt) : repris une fois s'il existe. */
+const legacyHistoryFile = join(dirname(fileURLToPath(import.meta.url)), '../../data/session-history.json');
+let migrated = false;
+function migrateLegacyHistory(): void {
+  if (migrated) return;
+  migrated = true;
+  try {
+    if (!existsSync(historyFile()) && existsSync(legacyHistoryFile)) {
+      mkdirSync(dataDir(), { recursive: true });
+      copyFileSync(legacyHistoryFile, historyFile());
+      console.log(`[SessionHistory] historique repris depuis ${legacyHistoryFile}`);
+    }
+  } catch { /* best effort : l'historique n'est qu'un affichage */ }
+}
 
 /**
  * Ensure data directory exists
@@ -91,7 +106,8 @@ function ensureDataDir(): void {
  */
 export function loadHistory(): HistoryData {
   ensureDataDir();
-  
+  migrateLegacyHistory();
+
   if (!existsSync(historyFile())) {
     return emptyHistory();
   }

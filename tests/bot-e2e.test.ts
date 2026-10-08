@@ -23,7 +23,8 @@ test('bot complet sur faux réseau : évalue, journalise, parie et règle, dashb
   const seconds = Number(process.env.E2E_SECONDS ?? '35');
   const child = spawn(process.execPath, ['--import', 'tsx', '--import', './tests/fixtures/fake-live-net.ts', 'bot-with-dashboard.ts'], {
     env: {
-      ...process.env, HOME: home, DRY_RUN: 'true', PAPER_CAPITAL: '1000', FV_POLL_SEC: '5', FV_SPOT_STREAM: 'false',
+      // DOTENV_CONFIG_PATH : le .env du serveur (FV_*, clés…) ne doit pas influencer le test
+      ...process.env, HOME: home, DOTENV_CONFIG_PATH: '/dev/null', DRY_RUN: 'true', PAPER_CAPITAL: '1000', FV_POLL_SEC: '5', FV_SPOT_STREAM: 'false',
       TELEGRAM_BOT_TOKEN: '123456789:' + 'A'.repeat(35), TELEGRAM_CHAT_ID: '42', FAKE_TELEGRAM_LOG: tgLog,
       DASHBOARD_PORT: String(port), POLYMARKET_PRIVATE_KEY: '',
       FAKE_TIME_SPEED: '20', FAKE_BOOK_LAG_SEC: '45',

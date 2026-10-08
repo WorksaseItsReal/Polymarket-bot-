@@ -127,7 +127,7 @@ test('script de bout en bout contre un faux Polymarket/Binance : détecte un mar
   const out = execFileSync(process.execPath, [
     '--import', 'tsx', '--import', './tests/fixtures/fake-market-net.ts',
     'scripts/analysis/historical-backtest.ts', '--days', '1', '--coins', 'BTC,ETH',
-  ], { env: { ...process.env, HOME: home }, encoding: 'utf8', timeout: 180_000, stdio: ['ignore', 'pipe', 'pipe'] });
+  ], { env: { ...process.env, HOME: home, DOTENV_CONFIG_PATH: '/dev/null' }, encoding: 'utf8', timeout: 180_000, stdio: ['ignore', 'pipe', 'pipe'] });
   assert.match(out, /Backtest historique : \d+ rounds/);
   assert.match(out, /SIGNIFICATIVEMENT meilleur que le marché/);
   assert.match(out, /réglage actuel/);
@@ -135,7 +135,7 @@ test('script de bout en bout contre un faux Polymarket/Binance : détecte un mar
   const again = spawnSync(process.execPath, [
     '--import', 'tsx', '--import', './tests/fixtures/fake-market-net.ts',
     'scripts/analysis/historical-backtest.ts', '--days', '1', '--coins', 'BTC,ETH',
-  ], { env: { ...process.env, HOME: home }, encoding: 'utf8', timeout: 180_000 });
+  ], { env: { ...process.env, HOME: home, DOTENV_CONFIG_PATH: '/dev/null' }, encoding: 'utf8', timeout: 180_000 });
   assert.equal(again.status, 0);
   assert.match(again.stderr, /Rounds à interroger sur Gamma : 0 /);
   assert.match(again.stderr, /Historiques de prix à télécharger : 0/);
@@ -184,7 +184,7 @@ test('contrôle négatif de bout en bout : marché JUSTE → jamais « significa
   const out = execFileSync(process.execPath, [
     '--import', 'tsx', '--import', './tests/fixtures/fake-market-net.ts',
     'scripts/analysis/historical-backtest.ts', '--days', '1', '--coins', 'BTC,ETH',
-  ], { env: { ...process.env, HOME: home, FAKE_MARKET_LAG_MIN: '0' }, encoding: 'utf8', timeout: 180_000, stdio: ['ignore', 'pipe', 'pipe'] });
+  ], { env: { ...process.env, HOME: home, DOTENV_CONFIG_PATH: '/dev/null', FAKE_MARKET_LAG_MIN: '0' }, encoding: 'utf8', timeout: 180_000, stdio: ['ignore', 'pipe', 'pipe'] });
   assert.match(out, /Backtest historique : \d+ rounds/);
   assert.doesNotMatch(out, /SIGNIFICATIVEMENT meilleur que le marché/);
   assert.doesNotMatch(out, /essayer FV_BLEND_MODEL/);

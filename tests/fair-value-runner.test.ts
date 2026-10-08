@@ -647,4 +647,9 @@ test('round jamais réglé : essais espacés après 1 h, une seule alerte après
   env.setNow(end + 8 * 3_600_000);
   await r.tick();
   assert.equal(env.messages.filter(m => /non réglé 6 h/.test(m)).length, 1, 'une seule alerte');
+  // redémarrage : l'alerte est mémorisée dans le registre, pas renvoyée
+  const r2 = env.runner();
+  env.setNow(end + 9 * 3_600_000);
+  await r2.tick();
+  assert.equal(env.messages.filter(m => /non réglé 6 h/.test(m)).length, 1, 'pas de nouvelle alerte après redémarrage');
 });

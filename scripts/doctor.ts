@@ -15,7 +15,7 @@ async function main(): Promise<number> {
   const poly = join(process.env.HOME || homedir(), '.polymarket');
   const checks: Check[] = [...configChecks(process.env), ...fileChecks(poly, process.cwd())];
   console.log('Vérification du réseau (quelques secondes)…\n');
-  checks.push(...await networkChecks((...a: Parameters<typeof fetch>) => fetch(...a), Date.now()));
+  checks.push(...await networkChecks((...a: Parameters<typeof fetch>) => fetch(...a), Date.now(), 6000, Date.now));
   const tg = telegramConfigFromEnv(process.env);
   if (tg) {
     const r = await new TelegramClient({ ...tg, log: () => undefined }).check();

@@ -47,7 +47,9 @@ function slim(r: DecisionRecord): DecisionRecord {
   return {
     t: r.t, slug: intern(r.slug), coin: intern(r.coin), tau: r.tau, spot: 0, strike: 0, sig: 0, pUp: r.pUp, pRaw: r.pRaw, zs: r.zs,
     upAsk: r.upAsk, downAsk: r.downAsk, upAskSz: r.upAskSz, downAskSz: null, upBid: r.upBid, src: '', act: r.act === 'buy' ? 'buy' : 'hold',
-    ...(r.side ? { side: r.side } : {}),
+    // GARDER mv (exclusion des mesures) et tl (loi du modèle) : sans eux, le filtre des
+    // évaluations « saut du spot » et la conversion t4 étaient silencieusement inopérants.
+    ...(r.side ? { side: r.side } : {}), ...(r.mv ? { mv: true as const } : {}), ...(r.tl ? { tl: r.tl } : {}),
   };
 }
 
@@ -60,8 +62,10 @@ function readJournal(): DecisionRecord[] {
   const out: DecisionRecord[] = [];
   let bad = 0;
   for (const f of readdirSync(DIR).filter(f => JOURNAL_FILE_RE.test(f)).sort()) {
-    // jours révolus compressés (.jsonl.gz) par le bot
-    const raw = readFileSync(join(DIR, f));
+    // jours révolus compressés (.jsonl.gz) par le bot ; un fichier qui disparaît pendant la
+    // lecture (compression en cours par le bot) est simplement ignoré
+    let raw: Buffer;
+    try { raw = readFileSync(join(DIR, f)); } catch { continue; }
     const text = f.endsWith('.gz') ? gunzipSync(raw).toString('utf8') : raw.toString('utf8');
     for (const line of text.split('\n')) {
       if (!line.trim()) continue;

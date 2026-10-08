@@ -49,7 +49,9 @@ export function configChecks(env: Env): Check[] {
 
   const capital = paper ? positive(env, 'PAPER_CAPITAL', 'CAPITAL_USD') ?? 50 : positive(env, 'CAPITAL_USD') ?? 250;
   const minOrderRaw = (env.FV_MIN_ORDER_USD ?? '').trim();
-  const minOrder = minOrderRaw !== '' && Number.isFinite(Number(minOrderRaw)) && Number(minOrderRaw) >= 0 ? Number(minOrderRaw) : 1;
+  // même lecture que le bot (bot-with-dashboard.ts) : [0 ; 100], sinon 1
+  const minOrder = minOrderRaw !== '' && Number.isFinite(Number(minOrderRaw)) && Number(minOrderRaw) >= 0 && Number(minOrderRaw) <= 100
+    ? Number(minOrderRaw) : 1;
   const maxStake = capital * 0.01;
   out.push(minOrder > 0 && maxStake < minOrder
     ? err('Capital', `${capital} $ : mise max ${maxStake.toFixed(2)} $ (1 %) < minimum Polymarket ${minOrder} $ → AUCUN pari. Mettre PAPER_CAPITAL=250.`)
@@ -74,11 +76,13 @@ export function configChecks(env: Env): Check[] {
     : ok('Dashboard', local ? `local (${host})` : `exposé sur ${host}, protégé par jeton`));
 
   const cfg = fairValueConfigFromEnv(env);
-  const ignored = FV_ENV.filter(([k, f]) => {
+  const tails = env.FV_TAILS?.trim();
+  const ignoredTails = tails && tails !== 'normal' && tails !== 't4' ? [`FV_TAILS=${tails} (attendu : normal ou t4)`] : [];
+  const ignored = [...ignoredTails, ...FV_ENV.filter(([k, f]) => {
     const raw = env[k];
     if (raw === undefined || raw.trim() === '') return false;
     return Number(raw) !== (cfg[f] as number);
-  }).map(([k]) => `${k}=${env[k]}`);
+  }).map(([k]) => `${k}=${env[k]}`)];
   out.push(ignored.length
     ? warn('Réglages FV', `ignorés (hors bornes ou illisibles, valeur par défaut utilisée) : ${ignored.join(', ')}`)
     : ok('Réglages FV', `edge ≥ ${cfg.minEdge}, p ≥ ${cfg.minProb}, τ ∈ [${cfg.minTauSec}, ${cfg.maxTauSec}] s, confiance ×${cfg.zScale}, mélange ${cfg.blendModel}/${cfg.blendMarket}`));
@@ -117,14 +121,18 @@ export function fileChecks(polyDir: string, repoDir: string): Check[] {
   return out;
 }
 
-async function get(fetchImpl: typeof fetch, url: string, timeoutMs: number): Promise<{ status: number; body: unknown; date: string | null } | null> {
+async function get(
+  fetchImpl: typeof fetch, url: string, timeoutMs: number, clock: () => number = Date.now,
+): Promise<{ status: number; body: unknown; date: string | null; sentAt: number; receivedAt: number } | null> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const sentAt = clock();
   try {
     const res = await fetchImpl(url, { signal: controller.signal, headers: { Accept: 'application/json' } });
+    const receivedAt = clock();
     let body: unknown = null;
     try { body = await res.json(); } catch { /* pas du JSON */ }
-    return { status: res.status, body, date: res.headers.get('date') };
+    return { status: res.status, body, date: res.headers.get('date'), sentAt, receivedAt };
   } catch {
     return null;
   } finally {
@@ -133,7 +141,9 @@ async function get(fetchImpl: typeof fetch, url: string, timeoutMs: number): Pro
 }
 
 /** Accès aux API publiques utilisées par la stratégie, et décalage d'horloge. */
-export async function networkChecks(fetchImpl: typeof fetch, nowMs: number, timeoutMs = 6000): Promise<Check[]> {
+export async function networkChecks(
+  fetchImpl: typeof fetch, nowMs: number, timeoutMs = 6000, clock: () => number = () => nowMs,
+): Promise<Check[]> {
   const out: Check[] = [];
   const slot = slotStart(nowMs);
   const slug = roundSlug('BTC', slot);
@@ -150,22 +160,28 @@ export async function networkChecks(fetchImpl: typeof fetch, nowMs: number, time
     out.push(!b ? err('Carnet CLOB', 'injoignable : aucune évaluation possible')
       : b.status === 200 ? ok('Carnet CLOB', 'carnet du round lu') : err('Carnet CLOB', `HTTP ${b.status}`));
   }
-  let binanceDate: string | null = null;
-  const main = await get(fetchImpl, 'https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&limit=1', timeoutMs);
+  let binance: { date: string | null; sentAt: number; receivedAt: number } | null = null;
+  const main = await get(fetchImpl, 'https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&limit=1', timeoutMs, clock);
   if (main?.status === 200) {
-    binanceDate = main.date;
+    binance = main;
     out.push(ok('Binance', 'api.binance.com joignable'));
   } else {
-    const vision = await get(fetchImpl, 'https://data-api.binance.vision/api/v3/klines?symbol=BTCUSDT&interval=1m&limit=1', timeoutMs);
+    const vision = await get(fetchImpl, 'https://data-api.binance.vision/api/v3/klines?symbol=BTCUSDT&interval=1m&limit=1', timeoutMs, clock);
     if (vision?.status === 200) {
-      binanceDate = vision.date;
+      binance = vision;
       out.push(warn('Binance', `api.binance.com ${main ? `HTTP ${main.status}${main.status === 451 ? ' (pays bloqué)' : ''}` : 'injoignable'} : repli binance.vision OK (le bot l'utilise automatiquement)`));
     } else {
       out.push(err('Binance', 'ni api.binance.com ni binance.vision : spot dégradé (repli Coinbase), à corriger'));
     }
   }
-  if (binanceDate) {
-    const skew = Date.parse(binanceDate) - nowMs; // en-tête HTTP à la seconde près
+  if (binance?.date) {
+    // Décalage mesuré AUTOUR de cette requête (pas depuis le début du diagnostic : les
+    // délais réseau précédents passaient pour un décalage). L'en-tête Date est tronqué à la
+    // seconde : le serveur a répondu entre Date et Date + 1 s.
+    const server = Date.parse(binance.date) + 500;
+    const local = (binance.sentAt + binance.receivedAt) / 2;
+    const slack = (binance.receivedAt - binance.sentAt) / 2 + 500;
+    const skew = Math.abs(server - local) <= slack ? 0 : server - local - Math.sign(server - local) * slack;
     out.push(Math.abs(skew) > 3000
       ? err('Horloge', `décalée d'environ ${(skew / 1000).toFixed(0)} s : le temps restant des rounds est faux → activer NTP (timedatectl set-ntp true)`)
       : ok('Horloge', 'à l\'heure (±1 s)'));

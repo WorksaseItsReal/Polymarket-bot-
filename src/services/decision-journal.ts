@@ -18,9 +18,10 @@ import { appendFile, mkdir, readFile, readdir, rename, unlink, writeFile } from 
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
-import { gzip } from 'node:zlib';
+import { gunzip, gzip } from 'node:zlib';
 
 const gzipAsync = promisify(gzip);
+const gunzipAsync = promisify(gunzip);
 const DAY_MS = 86_400_000;
 
 /** Fichiers du journal : `decisions-AAAA-MM-JJ.jsonl`, compressés ensuite en `.jsonl.gz`
@@ -86,6 +87,7 @@ export class DecisionJournal {
   private readonly minIntervalMs: number;
   private readonly keepDays: number;
   private readonly log: (msg: string) => void;
+  /** Dernière évaluation journalisée (ms) par round et par type de passage. */
   private readonly last = new Map<string, number>();
   private queue: Array<[file: string, line: string]> = [];
   private writing: Promise<void> | null = null;
@@ -101,10 +103,20 @@ export class DecisionJournal {
 
   /** Enregistre une évaluation (non bloquant). Renvoie true si elle a été retenue. */
   record(r: DecisionRecord): boolean {
-    if (r.act !== 'buy' && r.t - (this.last.get(r.slug) ?? -Infinity) < this.minIntervalMs) return false;
-    this.last.set(r.slug, r.t);
+    // Écart minimal de 80 % de `minIntervalMs` (8 s), séparément pour les passages réguliers
+    // et ceux déclenchés par un saut du spot (mv). Avant : 10 s strictes partagées → un
+    // passage à 9,98 s du précédent (gigue réseau) ou une évaluation mv intercalée faisait
+    // perdre ~1 passage régulier sur 3, surtout juste après un saut. (Des tranches fixes
+    // perdent aussi : 30 s et 39,97 s tombent dans la même.)
+    const key = r.mv ? `${r.slug}|mv` : r.slug;
+    if (r.act !== 'buy' && r.t - (this.last.get(key) ?? -Infinity) < 0.8 * this.minIntervalMs) return false;
+    this.last.set(key, r.t);
     if (this.last.size > 500) {
-      for (const [k, t] of this.last) if (r.t - t > 900_000) this.last.delete(k);
+      // rounds terminés depuis plus de 15 min : oubliés
+      for (const k of this.last.keys()) {
+        const s = Number(k.split('|')[0].split('-').pop());
+        if (!Number.isFinite(s) || r.t - (s * 1000 + 300_000) > 900_000) this.last.delete(k);
+      }
     }
     this.queue.push([journalFileName(r.t), JSON.stringify(r)]);
     if (!this.writing) this.writing = this.drain().finally(() => { this.writing = null; });
@@ -146,6 +158,11 @@ export class DecisionJournal {
     if (!Number.isFinite(todayMs)) return;
     try {
       for (const f of await readdir(this.dir)) {
+        // Reste d'une compression interrompue (arrêt brutal) : jamais relu, supprimé.
+        if (/^decisions-.*\.jsonl\.gz\.tmp$/.test(f)) {
+          await unlink(join(this.dir, f)).catch(() => undefined);
+          continue;
+        }
         const m = JOURNAL_FILE_RE.exec(f);
         if (!m) continue;
         const age = todayMs - Date.parse(m[1]);
@@ -157,10 +174,22 @@ export class DecisionJournal {
         // plus petits, ce qui permet de garder des semaines de mesure (~12 Mo/jour sinon).
         if (!m[2] && age >= 2 * DAY_MS) {
           const src = join(this.dir, f);
-          let dst = `${src}.gz`;
+          const content = await readFile(src);
+          // Arrêt brutal entre l'écriture de l'archive et la suppression de l'original :
+          // l'archive existe déjà avec ce contenu → supprimer l'original, ne PAS recréer une
+          // 2e archive identique (le rapport lirait chaque ligne deux fois).
+          const gz = `${src}.gz`;
+          if (existsSync(gz)) {
+            const prev = await readFile(gz).then(b => gunzipAsync(b)).catch(() => null);
+            if (prev && prev.equals(content)) {
+              await unlink(src);
+              continue;
+            }
+          }
+          let dst = gz;
           for (let k = 1; existsSync(dst); k++) dst = join(this.dir, `decisions-${m[1]}.${k}.jsonl.gz`);
           const tmp = `${dst}.tmp`;
-          await writeFile(tmp, await gzipAsync(await readFile(src)));
+          await writeFile(tmp, await gzipAsync(content));
           await rename(tmp, dst);
           await unlink(src);
         }

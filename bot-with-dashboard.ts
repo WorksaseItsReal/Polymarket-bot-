@@ -1363,7 +1363,16 @@ async function setupFairValueStrategy(sdk: PolymarketSDK) {
   // la stratégie n'écrit RIEN — un trade journalisé sans ordre réel fausserait le PnL.
   const tick = (coins?: readonly string[]) => (CONFIG.dryRun && state.paper ? runner.tick(coins) : Promise.resolve(true));
   await tick();
-  setInterval(() => { void tick(); }, FV_POLL_MS);
+  // Passage régulier refusé parce qu'un passage « saut du spot » tient le verrou : nouvel
+  // essai toutes les 0,5 s (au plus 8), sinon tout le passage de 10 s était perdu — pour
+  // les paris comme pour la mesure — précisément quand le marché bouge.
+  const regularTick = async () => {
+    for (let attempt = 0; attempt < 8; attempt++) {
+      if (await tick()) return;
+      await new Promise(r => setTimeout(r, 500));
+    }
+  };
+  setInterval(() => { void regularTick(); }, FV_POLL_MS);
 
   const startedAt = Date.now();
   // Chien de garde : une boucle bloquée (requête sans fin) ou en échec permanent doit se

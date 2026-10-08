@@ -305,8 +305,12 @@ export class FairValueRunner {
         // Toujours rien après 6 h : la position bloque une place (10 au plus) et de
         // l'exposition ; sans alerte, des rounds jamais réglés finiraient par arrêter les
         // paris sans bruit. Une alerte par trade.
-        if (t.status === 'open' && now > t.endMs + 6 * 3_600_000 && !this.unresolvedAlerted.has(t.id)) {
+        if (t.status === 'open' && now > t.endMs + 6 * 3_600_000 && !t.unresolvedAlertedAt && !this.unresolvedAlerted.has(t.id)) {
           this.unresolvedAlerted.add(t.id);
+          this.update(trades => {
+            const x = trades.find(y => y.id === t.id);
+            if (x) x.unresolvedAlertedAt = new Date(now).toISOString();
+          });
           this.d.notify(msgAlert(`round ${t.slug} toujours non réglé 6 h après la fin (${outcome.reason}) : la position reste comptée comme ouverte. Vérifier le marché sur Polymarket.`));
         }
         continue;

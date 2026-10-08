@@ -60,3 +60,24 @@ test('réseau : Gamma + carnet OK, Binance bloqué (451) avec repli, horloge dé
   const down = await networkChecks((async () => { throw new Error('ECONNREFUSED'); }) as typeof fetch, now, 200);
   assert.ok(down.every(c => c.level === 'error'));
 });
+
+test('horloge : des requêtes lentes AVANT Binance ne passent plus pour un décalage', async () => {
+  let t = 1_790_000_100_000;
+  const fetchImpl = (async (u: string | URL | Request) => {
+    const url = String(u);
+    if (url.includes('gamma-api') || url.includes('api.binance.com')) {
+      t += 6000; // Gamma lent, puis api.binance.com qui expire : 12 s perdues avant le repli
+      throw new Error('timeout');
+    }
+    // binance.vision répond tout de suite, à la bonne heure
+    return new Response('[]', { status: 200, headers: { date: new Date(t).toUTCString() } });
+  }) as typeof fetch;
+  const cs = await networkChecks(fetchImpl, t, 6000, () => t);
+  assert.equal(cs.find(c => c.label === 'Horloge')!.level, 'ok', JSON.stringify(cs));
+});
+
+test('configuration : mêmes lectures que le bot (FV_MIN_ORDER_USD > 100 ignoré, FV_TAILS invalide signalé)', () => {
+  const cs = configChecks({ PAPER_CAPITAL: '250', FV_MIN_ORDER_USD: '150', FV_TAILS: 'T4' });
+  assert.equal(cs.find(c => c.label === 'Capital')!.level, 'ok', 'le bot utilise 1 $ (150 hors bornes)');
+  assert.match(cs.find(c => c.label === 'Réglages FV')!.detail, /FV_TAILS=T4/);
+});

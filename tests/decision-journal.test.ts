@@ -120,7 +120,7 @@ test('rapport complet : journal + résultats en cache → le modèle bat un carn
   writeFileSync(join(poly, 'journal', journalFileName(now)), lines.join('\n') + '\n');
   writeFileSync(join(poly, 'outcomes-cache.json'), JSON.stringify(cache));
   const out = execFileSync('npx', ['tsx', 'scripts/analysis/fv-report.ts', '--days', '3'], {
-    env: { ...process.env, HOME: home }, encoding: 'utf8', timeout: 120_000,
+    env: { ...process.env, HOME: home, DOTENV_CONFIG_PATH: '/dev/null' }, encoding: 'utf8', timeout: 120_000,
   });
   assert.match(out, /400 rounds réglés/);
   assert.match(out, /le modèle bat SIGNIFICATIVEMENT le carnet/);
@@ -187,7 +187,7 @@ function negativeControlReport(volFactor: number, seed: number): string {
   writeFileSync(join(poly, 'journal', journalFileName(now)), lines.join('\n') + '\n');
   writeFileSync(join(poly, 'outcomes-cache.json'), JSON.stringify(cache));
   const out = execFileSync('npx', ['tsx', 'scripts/analysis/fv-report.ts', '--days', '3'], {
-    env: { ...process.env, HOME: home }, encoding: 'utf8', timeout: 120_000,
+    env: { ...process.env, HOME: home, DOTENV_CONFIG_PATH: '/dev/null' }, encoding: 'utf8', timeout: 120_000,
   });
   if (process.env.SHOW_REPORT) console.log(out);
   return out;
@@ -239,6 +239,60 @@ test('journal : jours révolus compressés (.jsonl.gz, archive existante jamais 
   const lines = [0, 1, 2].map(i => JSON.stringify(rec({ t: now - 3600_000 + i * 10_000, slug: `btc-updown-5m-${slot}`, pUp: 0.6 })));
   writeFileSync(join(poly, 'journal', `decisions-${new Date(now).toISOString().slice(0, 10)}.jsonl.gz`), gzipSync(lines.join('\n') + '\n'));
   writeFileSync(join(poly, 'outcomes-cache.json'), JSON.stringify({ [`btc-updown-5m-${slot}`]: true }));
-  const out = execFileSync('npx', ['tsx', 'scripts/analysis/fv-report.ts', '--days', '3'], { env: { ...process.env, HOME: home }, encoding: 'utf8', timeout: 120_000 });
+  const out = execFileSync('npx', ['tsx', 'scripts/analysis/fv-report.ts', '--days', '3'], { env: { ...process.env, HOME: home, DOTENV_CONFIG_PATH: '/dev/null' }, encoding: 'utf8', timeout: 120_000 });
   assert.match(out, /Journal : 3 évaluations, 1 rounds, 1 rounds réglés/);
+});
+
+test('journal : une évaluation par tranche fixe de 10 s, passages réguliers et sauts du spot séparés', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'journal-'));
+  const j = new DecisionJournal({ dir });
+  const slot = 1_790_000_100;
+  const slug = `btc-updown-5m-${slot}`;
+  // passages réguliers avec gigue + un saut du spot entre deux
+  const regular = [30, 39.97, 50.02, 60.01, 70.03, 79.99, 90].map(s => j.record(rec({ slug, t: (slot + s) * 1000 })));
+  const move = j.record(rec({ slug, t: (slot + 64.5) * 1000, mv: true }));
+  await j.flush();
+  assert.equal(regular.filter(Boolean).length, 7, 'aucun passage régulier perdu (gigue, saut du spot)');
+  assert.equal(move, true);
+  assert.equal(j.record(rec({ slug, t: (slot + 92) * 1000 })), false, 'même tranche que le passage à 90 s');
+});
+
+test('journal : compression interrompue (archive écrite, original encore là) → pas de doublon', async () => {
+  const { gzipSync } = await import('node:zlib');
+  const dir = mkdtempSync(join(tmpdir(), 'journal-'));
+  const day = 'decisions-2026-10-03.jsonl';
+  writeFileSync(join(dir, day), '{"a":1}\n{"a":2}\n');
+  writeFileSync(join(dir, day + '.gz'), gzipSync('{"a":1}\n{"a":2}\n')); // même contenu : arrêt avant unlink
+  writeFileSync(join(dir, 'decisions-2026-10-02.jsonl.gz.tmp'), 'reste');
+  const j = new DecisionJournal({ dir });
+  j.record(rec({}));
+  await j.flush();
+  assert.equal(existsSync(join(dir, day)), false, 'original supprimé');
+  assert.equal(existsSync(join(dir, 'decisions-2026-10-03.1.jsonl.gz')), false, 'aucune 2e archive identique');
+  assert.equal(existsSync(join(dir, 'decisions-2026-10-02.jsonl.gz.tmp')), false, 'reste temporaire nettoyé');
+});
+
+test('rapport : les évaluations « saut du spot » (mv) sont exclues des mesures (le lecteur ne perd pas le marqueur)', () => {
+  const home = mkdtempSync(join(tmpdir(), 'report-mv-'));
+  const poly = join(home, '.polymarket');
+  mkdirSync(join(poly, 'journal'), { recursive: true });
+  const now = Date.now();
+  const lines: string[] = [];
+  const cache: Record<string, boolean> = {};
+  for (let k = 0; k < 60; k++) {
+    const slot = Math.floor(now / 1000 / 300) * 300 - 3600 * 24 + k * 300;
+    const slug = `btc-updown-5m-${slot}`;
+    cache[slug] = k % 2 === 0;
+    for (const s of [60, 120, 180]) {
+      lines.push(JSON.stringify(rec({ t: (slot + s) * 1000, slug, tau: 300 - s, pUp: 0.5, pRaw: 0.5, upAsk: 0.51, downAsk: 0.51 })));
+      lines.push(JSON.stringify(rec({ t: (slot + s + 5) * 1000, slug, tau: 295 - s, pUp: 0.95, pRaw: 0.95, upAsk: 0.51, downAsk: 0.51, mv: true })));
+    }
+  }
+  writeFileSync(join(poly, 'journal', journalFileName(now)), lines.join('\n') + '\n');
+  writeFileSync(join(poly, 'outcomes-cache.json'), JSON.stringify(cache));
+  const out = execFileSync('npx', ['tsx', 'scripts/analysis/fv-report.ts', '--days', '3'], { env: { ...process.env, HOME: home, DOTENV_CONFIG_PATH: '/dev/null' }, encoding: 'utf8', timeout: 120_000 });
+  assert.match(out, /Journal : 360 évaluations/);
+  assert.match(out, /toutes les évaluations\s+: modèle 0\.2500 \| carnet 0\.2500 \(n=180,/, 'seules les 180 évaluations régulières mesurées');
+  const calib = out.split('2) Calibration')[1].split('2b)')[0];
+  assert.doesNotMatch(calib, /0\.9-1\.0/, 'aucune évaluation mv (p = 0,95) dans la calibration');
 });
