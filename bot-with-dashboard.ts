@@ -28,7 +28,7 @@ import { isSpotCoin, type SpotCoin } from './src/services/spot-price-service.js'
 import { computeStake, MAX_VARIANCE_PCT } from './src/services/stake-sizing.js';
 import { fairValueConfigFromEnv } from './src/services/fair-value.js';
 import { getRoundMarketData } from './src/services/round-market-data.js';
-import { computeStats, fetchRoundOutcome, readLedgerShared, type LedgerStats } from './src/services/paper-ledger.js';
+import { fetchRoundOutcome, ledgerStatsShared, readLedgerShared, type LedgerStats } from './src/services/paper-ledger.js';
 import { FairValueRunner, coinsFromEnv, type ScannedMarket } from './src/strategy/fair-value-runner.js';
 import { RoundDiscovery } from './src/services/round-discovery.js';
 import { SpotStream } from './src/services/spot-stream.js';
@@ -448,7 +448,7 @@ function ledgerPath(): string {
 }
 
 function ledgerStats(): LedgerStats {
-  return computeStats(readLedgerShared(ledgerPath()) ?? []);
+  return ledgerStatsShared(ledgerPath());
 }
 
 // === COMMANDES DU DASHBOARD ===
@@ -953,7 +953,7 @@ function syncRealizedPnl() {
   // compteurs de pertes à zéro serait faux) ; la stratégie, elle, n'ouvre plus rien.
   if (shared === null) return;
   const trades = shared;
-  const st = computeStats(trades);
+  const st = ledgerStatsShared(ledgerPath());
   const v = st.pnl;
   state.totalPnL = v;
   // Pertes du jour / du mois CALENDAIRES (UTC), recalculées à chaque tick depuis le

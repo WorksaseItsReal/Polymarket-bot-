@@ -29,7 +29,7 @@ import {
   type FairValueConfig,
 } from '../services/fair-value.js';
 import {
-  computeStats,
+  ledgerStatsShared,
   loadLedger,
   readLedgerShared,
   recentLossStreak,
@@ -180,9 +180,14 @@ export class FairValueRunner {
 
   // ---------------------------------------------------------------- registre
 
-  /** Trades du registre ; null si le fichier est illisible (alerte une seule fois). */
-  private trades(): LedgerTrade[] | null {
-    const t = loadLedger(this.d.ledgerPath);
+  /**
+   * Trades du registre, en LECTURE SEULE (copie partagée et gelée, relue seulement si le
+   * fichier change) ; null si le fichier est illisible (alerte une seule fois). Avant :
+   * copie profonde à chaque lecture — 33 ms par passage à 5 000 trades, 190 ms à 20 000,
+   * boucle d'événements bloquée d'autant.
+   */
+  private trades(): readonly LedgerTrade[] | null {
+    const t = readLedgerShared(this.d.ledgerPath);
     if (t === null) {
       if (!this.ledgerBrokenWarned) {
         this.ledgerBrokenWarned = true;
@@ -196,7 +201,8 @@ export class FairValueRunner {
   }
 
   private update(fn: (trades: LedgerTrade[]) => void): boolean {
-    const trades = this.trades();
+    if (this.trades() === null) return false; // illisible : alerte, et surtout ne rien écraser
+    const trades = loadLedger(this.d.ledgerPath); // copie modifiable, seulement pour écrire
     if (trades === null) return false;
     fn(trades);
     try {
@@ -209,7 +215,7 @@ export class FairValueRunner {
   }
 
   stats(): LedgerStats {
-    return computeStats(readLedgerShared(this.d.ledgerPath) ?? []);
+    return ledgerStatsShared(this.d.ledgerPath);
   }
 
   private holdLog(id: string, msg: string): void {

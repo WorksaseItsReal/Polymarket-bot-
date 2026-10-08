@@ -70,6 +70,13 @@ export interface LedgerFile {
 // relit et ne le re-parse que s'il a changé (date de modification + taille).
 const memo = new Map<string, { mtimeMs: number; size: number; trades: LedgerTrade[] }>();
 
+/** Gèle la copie partagée : une modification accidentelle corromprait le cache de tous les
+ *  lecteurs ; en mode strict elle lève une erreur au lieu de passer inaperçue. */
+function freezeShared(trades: LedgerTrade[]): LedgerTrade[] {
+  for (const t of trades) if (t && typeof t === 'object') Object.freeze(t);
+  return Object.freeze(trades) as LedgerTrade[];
+}
+
 /**
  * Version PARTAGÉE (en cache) du registre : à ne JAMAIS modifier. [] si absent ; null si
  * présent mais illisible.
@@ -93,12 +100,29 @@ export function readLedgerShared(path: string): readonly LedgerTrade[] | null {
       memo.delete(path);
       return null;
     }
-    memo.set(path, { mtimeMs: st.mtimeMs, size: st.size, trades: data.trades });
-    return data.trades;
+    const trades = freezeShared(data.trades);
+    memo.set(path, { mtimeMs: st.mtimeMs, size: st.size, trades });
+    return trades;
   } catch {
     memo.delete(path);
     return null;
   }
+}
+
+const statsMemo = new WeakMap<readonly LedgerTrade[], LedgerStats>();
+
+/**
+ * Statistiques du registre partagé, recalculées seulement quand le fichier change (la copie
+ * partagée est immuable : son identité suffit comme clé). [] si absent ou illisible.
+ */
+export function ledgerStatsShared(path: string): LedgerStats {
+  const trades = readLedgerShared(path) ?? [];
+  let s = statsMemo.get(trades);
+  if (!s) {
+    s = computeStats(trades);
+    statsMemo.set(trades, s);
+  }
+  return s;
 }
 
 /** Copie modifiable du registre. [] si absent ; null si illisible (ne rien écrire alors). */
@@ -125,7 +149,7 @@ export function saveLedger(path: string, trades: LedgerTrade[]): void {
   renameSync(tmp, path);
   try {
     const st = statSync(path);
-    memo.set(path, { mtimeMs: st.mtimeMs, size: st.size, trades: structuredClone(trades) });
+    memo.set(path, { mtimeMs: st.mtimeMs, size: st.size, trades: freezeShared(structuredClone(trades)) });
   } catch {
     memo.delete(path);
   }

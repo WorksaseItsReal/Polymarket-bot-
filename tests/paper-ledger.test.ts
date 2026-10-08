@@ -146,3 +146,19 @@ test('calibration : issue du round (revente comprise si connue) ; outcomes illis
   const ev = [{ slug: SLUG, markets: [{ closed: true, outcomes: 'pas du json', outcomePrices: '["1","0"]' }] }];
   assert.equal(parseGammaEvent(ev, SLUG).resolved, false);
 });
+
+test('registre partagé : gelé (aucune modification accidentelle), stats recalculées seulement si le fichier change', async () => {
+  const { ledgerStatsShared, readLedgerShared } = await import('../src/services/paper-ledger.ts');
+  const path = join(mkdtempSync(join(tmpdir(), 'ledger-')), 'fv-ledger.json');
+  saveLedger(path, [trade({ id: 'a' })]);
+  const shared = readLedgerShared(path)!;
+  assert.ok(Object.isFrozen(shared) && Object.isFrozen(shared[0]));
+  assert.throws(() => { (shared[0] as { stake: number }).stake = 99; }, TypeError);
+  const s1 = ledgerStatsShared(path);
+  assert.equal(ledgerStatsShared(path), s1, 'fichier inchangé : même objet, pas de recalcul');
+  const copy = loadLedger(path)!;
+  copy[0].stake = 7; // la copie de travail reste modifiable
+  saveLedger(path, [...copy, trade({ id: 'b' })]);
+  assert.notEqual(ledgerStatsShared(path), s1, 'fichier modifié : stats recalculées');
+  assert.equal(readLedgerShared(path)!.length, 2);
+});
