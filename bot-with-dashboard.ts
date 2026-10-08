@@ -1165,13 +1165,23 @@ function activateTelegram(client: TelegramClient, detail: string) {
 
   // Bilan périodique, seulement s'il s'est passé quelque chose depuis le précédent.
   const everyMin = Math.min(24 * 60, Math.max(15, Number(process.env.TELEGRAM_SUMMARY_MIN ?? '') || 60));
-  let lastKey = '';
+  let lastTradesKey = '';
+  let lastShadowN = 0;
+  let lastSentAt = 0;
   setInterval(() => {
     const st = ledgerStats();
     const sh = shadowTracker?.stats();
-    const key = `${st.n}|${st.open}|${sh?.n ?? 0}`;
-    if (key === lastKey || (st.n === 0 && st.open === 0 && !sh?.n)) return;
-    lastKey = key;
+    const tradesKey = `${st.n}|${st.open}`;
+    // Nouveaux trades : bilan à la période choisie. Seule la mesure « modèle vs carnet » a
+    // avancé (elle avance à chaque round) : au plus un bilan toutes les 6 h, pour ne pas
+    // envoyer 24 messages par jour sans aucun trade.
+    const tradesChanged = tradesKey !== lastTradesKey;
+    const shadowOnly = !tradesChanged && (sh?.n ?? 0) !== lastShadowN && Date.now() - lastSentAt >= 6 * 3_600_000;
+    if (!tradesChanged && !shadowOnly) return;
+    if (st.n === 0 && st.open === 0 && !sh?.n) return;
+    lastTradesKey = tradesKey;
+    lastShadowN = sh?.n ?? 0;
+    lastSentAt = Date.now();
     notify(msgSummary(st, CONFIG.capital.totalUsd, sh));
   }, everyMin * 60_000);
 }

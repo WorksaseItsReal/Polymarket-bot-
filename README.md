@@ -246,7 +246,7 @@ Le bot envoie lui-même ses notifications (`src/services/telegram.ts`,
 | `TELEGRAM_BOT_TOKEN` | Token donné par **@BotFather** (`123456789:ABC…`). |
 | `TELEGRAM_CHAT_ID` | Ton chat (nombre) ou un groupe (`-100…`). Trouvable via **@userinfobot**. |
 | `TELEGRAM_ENABLED` | `false` pour couper sans retirer le token. |
-| `TELEGRAM_SUMMARY_MIN` | Période du bilan (défaut 60, bornée 15–1440). Envoyé seulement s'il y a du nouveau. |
+| `TELEGRAM_SUMMARY_MIN` | Période du bilan (défaut 60, bornée 15–1440). Envoyé seulement s'il y a de nouveaux trades ; sinon (seule la mesure « modèle vs carnet » a avancé) au plus toutes les 6 h. |
 | `TELEGRAM_TZ` | Fuseau des heures de round (défaut `Europe/Paris`). |
 
 **Au démarrage**, la connexion est vérifiée (`getMe` + `getChat`) et le log dit exactement quoi

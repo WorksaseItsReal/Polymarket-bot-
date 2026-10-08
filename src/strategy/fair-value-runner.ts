@@ -170,6 +170,7 @@ export class FairValueRunner {
   consecutiveTickFailures = 0;
   /** Dernière fois qu'au moins un marché 5 min a été trouvé (0 = jamais). */
   lastMarketsFoundAt = 0;
+  private lastPauseLog = -Infinity;
   private ledgerBrokenWarned = false;
 
   constructor(deps: RunnerDeps) {
@@ -477,7 +478,17 @@ export class FairValueRunner {
 
         const block = gateBlock ?? this.d.entryBlock?.() ?? null;
         if (block) {
-          this.holdLog(market.conditionId, `   ↳ ${ctx} → signal ${decision.side} ignoré : entrées bloquées (${block})`);
+          if (gateBlock) {
+            // Pause de risque (peut durer des jours) : une ligne toutes les 10 min au total,
+            // pas une par marché et par minute.
+            const t = this.d.now();
+            if (t - this.lastPauseLog >= 600_000) {
+              this.lastPauseLog = t;
+              this.d.log('SIGNAL', `   ↳ signaux ignorés : entrées bloquées (${block}) — l'évaluation et le journal continuent`);
+            }
+          } else {
+            this.holdLog(market.conditionId, `   ↳ ${ctx} → signal ${decision.side} ignoré : entrées bloquées (${block})`);
+          }
           continue;
         }
 

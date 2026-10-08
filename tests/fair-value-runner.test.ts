@@ -616,3 +616,13 @@ test('spot relu sans latence simulée : l\'achat se fait sur un carnet relu, jam
   const t = loadLedger(env.ledgerPath)!;
   assert.ok(t.length === 0 || t[0].costPerShare > 0.7, `jamais exécuté au vieux prix de 0,50 : ${JSON.stringify(t[0]?.costPerShare)}`);
 });
+
+test('pause de risque longue : une ligne de journal toutes les 10 min, pas une par marché et par minute', async () => {
+  const env = setup({ canTrade: () => false });
+  const r = env.runner();
+  for (let k = 0; k < 6; k++) {
+    env.setNow((SLOT + 100 + k * 30) * 1000);
+    await r.tick();
+  }
+  assert.equal(env.logs.filter(l => /entrées bloquées \(pause de risque\)/.test(l)).length, 1);
+});
