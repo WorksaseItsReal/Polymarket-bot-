@@ -81,3 +81,14 @@ test('configuration : mêmes lectures que le bot (FV_MIN_ORDER_USD > 100 ignoré
   assert.equal(cs.find(c => c.label === 'Capital')!.level, 'ok', 'le bot utilise 1 $ (150 hors bornes)');
   assert.match(cs.find(c => c.label === 'Réglages FV')!.detail, /FV_TAILS=T4/);
 });
+
+test('réglages du bot : valeurs ramenées ou ignorées signalées (comme le bot les lit)', () => {
+  const cs = configChecks({ PAPER_CAPITAL: '250', FV_POLL_SEC: '1', FV_FILL_DELAY_MS: '0', FV_COINS: 'BTC,ADA', FV_EXIT_EDGE: '2' });
+  const d = cs.find(c => c.label === 'Réglages du bot')!;
+  assert.equal(d.level, 'warn');
+  assert.match(d.detail, /FV_POLL_SEC=1 → 5/);
+  assert.match(d.detail, /aucune latence simulée/);
+  assert.match(d.detail, /ADA inconnu/);
+  assert.match(d.detail, /FV_EXIT_EDGE=2 ignoré/);
+  assert.equal(configChecks({ PAPER_CAPITAL: '250', FV_POLL_SEC: '10', FV_COINS: 'btc,eth' }).find(c => c.label === 'Réglages du bot')!.level, 'ok');
+});

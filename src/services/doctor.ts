@@ -76,6 +76,7 @@ export function configChecks(env: Env): Check[] {
     : ok('Dashboard', local ? `local (${host})` : `exposé sur ${host}, protégé par jeton`));
 
   const cfg = fairValueConfigFromEnv(env);
+  out.push(botSettingsCheck(env, cfg.minEdge));
   const tails = env.FV_TAILS?.trim();
   const ignoredTails = tails && tails !== 'normal' && tails !== 't4' ? [`FV_TAILS=${tails} (attendu : normal ou t4)`] : [];
   const ignored = [...ignoredTails, ...FV_ENV.filter(([k, f]) => {
@@ -87,6 +88,46 @@ export function configChecks(env: Env): Check[] {
     ? warn('Réglages FV', `ignorés (hors bornes ou illisibles, valeur par défaut utilisée) : ${ignored.join(', ')}`)
     : ok('Réglages FV', `edge ≥ ${cfg.minEdge}, p ≥ ${cfg.minProb}, τ ∈ [${cfg.minTauSec}, ${cfg.maxTauSec}] s, confiance ×${cfg.zScale}, mélange ${cfg.blendModel}/${cfg.blendMarket}`));
   return out;
+}
+
+/**
+ * Réglages lus par bot-with-dashboard.ts (mêmes bornes et mêmes défauts) : une valeur hors
+ * bornes est ramenée ou ignorée SANS message côté bot — on le dit ici.
+ */
+function botSettingsCheck(env: Env, minEdge: number): Check {
+  const notes: string[] = [];
+  const raw = (k: string) => (env[k] ?? '').trim();
+  const clampNote = (k: string, lo: number, hi: number, def: number) => {
+    const r = raw(k);
+    if (r === '') return;
+    const v = Number(r) || def;
+    const eff = Math.min(hi, Math.max(lo, v));
+    if (!Number.isFinite(Number(r)) || eff !== Number(r)) notes.push(`${k}=${r} → ${eff} (bornes ${lo}–${hi})`);
+  };
+  clampNote('FV_POLL_SEC', 5, 300, 10);
+  clampNote('FV_MOVE_BPS', 1, 50, 3);
+  clampNote('TELEGRAM_SUMMARY_MIN', 15, 1440, 60);
+  clampNote('FV_JOURNAL_KEEP_DAYS', 1, 365, 30);
+  const delay = raw('FV_FILL_DELAY_MS');
+  if (delay !== '') {
+    const v = Number(delay);
+    if (!(Number.isFinite(v) && v >= 0 && v <= 10_000)) notes.push(`FV_FILL_DELAY_MS=${delay} ignoré → 1000`);
+    else if (v === 0) notes.push('FV_FILL_DELAY_MS=0 : aucune latence simulée, le papier sera plus optimiste que le réel');
+  }
+  const exit = raw('FV_EXIT_EDGE');
+  if (exit !== '') {
+    const v = Number(exit);
+    if (!(Number.isFinite(v) && v >= 0 && v <= 0.5)) notes.push(`FV_EXIT_EDGE=${exit} ignoré → ${minEdge}`);
+  }
+  const coins = raw('FV_COINS');
+  if (coins !== '') {
+    const known = ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE'];
+    const wanted = coins.split(',').map(c => c.trim().toUpperCase()).filter(Boolean);
+    const unknown = wanted.filter(c => !known.includes(c));
+    if (unknown.length) notes.push(`FV_COINS : ${unknown.join(', ')} inconnu(s), ignoré(s)`);
+    if (!wanted.some(c => known.includes(c))) notes.push('FV_COINS sans crypto valide → les 5 sont tradées');
+  }
+  return notes.length ? warn('Réglages du bot', notes.join(' ; ')) : ok('Réglages du bot', 'valeurs reconnues');
 }
 
 export function fileChecks(polyDir: string, repoDir: string): Check[] {
