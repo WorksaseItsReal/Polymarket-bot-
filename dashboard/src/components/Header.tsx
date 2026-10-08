@@ -41,11 +41,13 @@ export function Header({ state, config, connected, onHistoryClick, onPositionsCl
   const isPaused = state?.isPaused ?? false;
   const isDryRun = config?.dryRun ?? true;
 
-  // Mock wallet address (in real app, this would come from config/state)
-  const walletAddress = '0xaF98e0638671abD5140Ad981Ff4c01869F3410de';
-  const shortWallet = `${walletAddress.slice(0, 6)}...${walletAddress.slice(-4)}`;
+  // Adresse réelle du bot, envoyée par le bot. Avant : une adresse codée en dur venue du
+  // dépôt d'origine (celle d'un inconnu), présentée comme « le » wallet avec un bouton copier.
+  const walletAddress = config?.walletAddress ?? '';
+  const shortWallet = walletAddress ? `${walletAddress.slice(0, 6)}...${walletAddress.slice(-4)}` : '';
 
   const copyWallet = async () => {
+    if (!walletAddress) return;
     await navigator.clipboard.writeText(walletAddress);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
@@ -167,7 +169,7 @@ export function Header({ state, config, connected, onHistoryClick, onPositionsCl
           <div className="w-px h-10 bg-white/10" />
 
           {/* Wallet */}
-          <button
+          {walletAddress && <button
             onClick={copyWallet}
             className="flex items-center gap-2 px-3 py-2 rounded-lg bg-poly-dark/50 border border-poly-border hover:border-poly-purple/50 transition-all group"
           >
@@ -178,7 +180,7 @@ export function Header({ state, config, connected, onHistoryClick, onPositionsCl
             <span className="text-gray-500 group-hover:text-gray-300 transition-colors">
               {copied ? '✓' : '📋'}
             </span>
-          </button>
+          </button>}
         </div>
       </div>
     </header>

@@ -28,6 +28,18 @@ export interface BotState {
   arbTrades: number;
   dipArbTrades: number;
   directTrades: number;
+  /** Paris de la stratégie juste valeur (session en cours). */
+  fairValueTrades?: number;
+  /** Statistiques RÉELLES du registre papier (toutes sessions), source de vérité. */
+  ledger?: {
+    trades: number;
+    wins: number;
+    losses: number;
+    open: number;
+    winRate: number | null;
+    pnl: number;
+    tStat: number | null;
+  };
   arbProfit: number;
 
   // Tracked data
@@ -160,6 +172,8 @@ export interface BotConfig {
     enabled: boolean;
   };
   dryRun: boolean;
+  /** Adresse du wallet du bot (absente en papier avec une clé éphémère). */
+  walletAddress?: string;
 }
 
 export type LogLevel =

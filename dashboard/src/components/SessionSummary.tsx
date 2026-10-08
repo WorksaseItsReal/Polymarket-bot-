@@ -5,15 +5,17 @@ interface SessionSummaryProps {
 }
 
 export function SessionSummary({ state }: SessionSummaryProps) {
-  const trades = state?.tradesExecuted ?? 0;
-  const totalPnL = state?.totalPnL ?? 0;
+  // Chiffres RÉELS du registre (toutes sessions). Avant : gains/pertes « estimés » à partir
+  // du PnL (inventés), et une moyenne PnL total ÷ trades de la session (faussée après un
+  // redémarrage).
+  const ledger = state?.ledger;
+  const trades = ledger?.trades ?? 0;
+  const totalPnL = ledger?.pnl ?? state?.totalPnL ?? 0;
   const avgProfit = trades > 0 ? totalPnL / trades : 0;
-  
-  // Calculate estimated wins/losses based on P&L
-  const estimatedWins = trades > 0 ? Math.round(trades * 0.5 + (totalPnL > 0 ? totalPnL / 10 : totalPnL / 20)) : 0;
-  const wins = Math.max(0, Math.min(trades, estimatedWins));
-  const losses = Math.max(0, trades - wins);
-  const winRate = trades > 0 ? (wins / trades) * 100 : 0;
+  const wins = ledger?.wins ?? 0;
+  const losses = ledger?.losses ?? 0;
+  const winRate = ledger?.winRate != null ? ledger.winRate * 100 : 0;
+  const fairValueTrades = state?.fairValueTrades ?? 0;
 
   const arbProfit = state?.arbProfit ?? 0;
   const smartMoneyTrades = state?.smartMoneyTrades ?? 0;
@@ -99,6 +101,13 @@ export function SessionSummary({ state }: SessionSummaryProps) {
               <span className="text-gray-300">Smart Money</span>
             </div>
             <span className="font-mono text-gray-400">{smartMoneyTrades} trades</span>
+          </div>
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <span className="w-2 h-2 rounded-full bg-blue-400" />
+              <span className="text-gray-300">Juste valeur</span>
+            </div>
+            <span className="font-mono text-gray-400">{fairValueTrades} trades</span>
           </div>
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">

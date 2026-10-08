@@ -8,7 +8,7 @@ import assert from 'node:assert/strict';
 import { connect } from 'node:net';
 import { once } from 'node:events';
 import WebSocket from 'ws';
-import { dashboardEmitter, originAllowed, startDashboard, stopDashboard } from '../src/dashboard/server.ts';
+import { dashboardEmitter, hostAllowed, originAllowed, startDashboard, stopDashboard } from '../src/dashboard/server.ts';
 
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
@@ -36,14 +36,14 @@ test('requête malformée → 400, le serveur (et donc le bot) reste debout', as
   await once(srv, 'listening');
   const port = (srv.address() as { port: number }).port;
   try {
-    const bad = await rawRequest(port, 'GET http://[ HTTP/1.1\r\nHost: x\r\n\r\n');
+    const bad = await rawRequest(port, 'GET http://[ HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n');
     assert.match(bad, /^HTTP\/1\.1 400/);
-    const enc = await rawRequest(port, 'GET /%E0%A4%A HTTP/1.1\r\nHost: x\r\n\r\n');
+    const enc = await rawRequest(port, 'GET /%E0%A4%A HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n');
     assert.match(enc, /^HTTP\/1\.1 (400|404)/);
     const res = await fetch(`http://127.0.0.1:${port}/health`);
     assert.equal(res.status, 200);
     assert.equal(res.headers.get('access-control-allow-origin'), null, 'plus de CORS *');
-    const trav = await rawRequest(port, 'GET /../../package.json HTTP/1.1\r\nHost: x\r\n\r\n');
+    const trav = await rawRequest(port, 'GET /../../package.json HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n');
     assert.doesNotMatch(trav, /"name": "@catalyst-team\/poly-sdk"/, 'aucun fichier hors dashboard/dist');
   } finally {
     await stopDashboard();
@@ -83,25 +83,64 @@ test('WebSocket : Origin étranger refusé ; jeton exigé ; commandes relayées 
   }
 });
 
-test('exposé au réseau SANS jeton : lecture seule, commandes refusées', async () => {
-  const srv = startDashboard(0, { host: '0.0.0.0' });
+test('exposé au réseau SANS jeton : repli sur l\'écoute locale (rien n\'est lisible depuis le réseau)', async () => {
+  const warns: string[] = [];
+  const warn = console.warn;
+  console.warn = (...m: unknown[]) => { warns.push(m.join(' ')); };
+  try {
+    const srv = startDashboard(0, { host: '0.0.0.0' });
+    await once(srv, 'listening');
+    assert.equal((srv.address() as { address: string }).address, '127.0.0.1');
+    assert.ok(warns.some(w => /exige DASHBOARD_TOKEN/.test(w)));
+  } finally {
+    console.warn = warn;
+    await stopDashboard();
+  }
+});
+
+test('DNS rebinding : sans jeton, un en-tête Host étranger est refusé (HTTP et WebSocket)', async () => {
+  assert.equal(hostAllowed('127.0.0.1:3001', false), true);
+  assert.equal(hostAllowed('localhost:3001', false), true);
+  assert.equal(hostAllowed('[::1]:3001', false), true);
+  assert.equal(hostAllowed('attacker.example', false), false);
+  assert.equal(hostAllowed(undefined, false), false);
+  assert.equal(hostAllowed('attacker.example', true), true, 'avec jeton, le jeton protège');
+  const srv = startDashboard(0, { host: '127.0.0.1' });
   await once(srv, 'listening');
   const port = (srv.address() as { port: number }).port;
   const cmds: unknown[] = [];
   const onCmd = (c: unknown) => cmds.push(c);
   dashboardEmitter.on('command', onCmd);
-  const warn = console.warn;
-  console.warn = () => undefined;
+  try {
+    const http = await rawRequest(port, 'GET /api/status HTTP/1.1\r\nHost: attacker.example\r\nConnection: close\r\n\r\n');
+    assert.match(http, /^HTTP\/1\.1 403/);
+    const ok = await rawRequest(port, `GET /api/status HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nConnection: close\r\n\r\n`);
+    assert.match(ok, /^HTTP\/1\.1 200/);
+    const opened = await new Promise<boolean>(resolve => {
+      const ws = new WebSocket(`ws://127.0.0.1:${port}/`, { headers: { Host: 'attacker.example' }, origin: 'http://attacker.example' });
+      ws.on('open', () => { ws.send(JSON.stringify({ type: 'command', command: 'toggleDryRun', payload: { enabled: false } })); setTimeout(() => { ws.close(); resolve(true); }, 50); });
+      ws.on('error', () => resolve(false));
+    });
+    assert.equal(opened, false);
+    assert.deepEqual(cmds, []);
+  } finally {
+    dashboardEmitter.off('command', onCmd);
+    await stopDashboard();
+  }
+});
+
+test('message WebSocket géant refusé (pas de blocage de la boucle d\'événements)', async () => {
+  const srv = startDashboard(0, { host: '127.0.0.1' });
+  await once(srv, 'listening');
+  const port = (srv.address() as { port: number }).port;
   try {
     const ws = new WebSocket(`ws://127.0.0.1:${port}/`);
     await once(ws, 'open');
-    ws.send(JSON.stringify({ type: 'command', command: 'toggleDryRun', payload: { enabled: false } }));
-    await sleep(100);
-    ws.close();
-    assert.deepEqual(cmds, []);
+    const closed = once(ws, 'close');
+    ws.send('x'.repeat(100_000));
+    const [code] = await closed;
+    assert.equal(code, 1009, 'message trop gros');
   } finally {
-    console.warn = warn;
-    dashboardEmitter.off('command', onCmd);
     await stopDashboard();
   }
 });

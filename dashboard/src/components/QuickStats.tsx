@@ -12,7 +12,8 @@ export function QuickStats({ state, config }: QuickStatsProps) {
   const totalPnL = realizedPnL + unrealizedPnL;
 
   const dailyPnL = state?.dailyPnL ?? 0;
-  const trades = state?.tradesExecuted ?? 0;
+  // Statistiques RÉELLES du registre (toutes sessions) quand le bot les envoie.
+  const trades = state?.ledger?.trades ?? state?.tradesExecuted ?? 0;
   const activeStrategies = [
     config?.smartMoney?.enabled,
     config?.arbitrage?.enabled,
@@ -20,7 +21,8 @@ export function QuickStats({ state, config }: QuickStatsProps) {
     config?.directTrading?.enabled,
   ].filter(Boolean).length;
 
-  const winRate = trades > 0 ? Math.min(100, Math.max(0, 50 + (realizedPnL / (trades * 2)))) : 0;
+  // Avant : taux « estimé » à partir du PnL (inventé). Maintenant : le vrai, ou « — ».
+  const winRate = state?.ledger?.winRate != null ? state.ledger.winRate * 100 : null;
 
   const formatPnL = (value: number) => {
     const formatted = Math.abs(value).toLocaleString(undefined, {
@@ -74,7 +76,7 @@ export function QuickStats({ state, config }: QuickStatsProps) {
           <div>
             <div className="text-xs text-gray-500 uppercase tracking-wider">Win Rate</div>
             <div className="text-lg font-bold font-mono text-purple-400">
-              {winRate.toFixed(0)}%
+              {winRate === null ? '—' : `${winRate.toFixed(0)}%`}
             </div>
           </div>
         </div>

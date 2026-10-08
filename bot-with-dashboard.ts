@@ -204,6 +204,7 @@ const state: BotState = {
   arbTrades: 0,
   dipArbTrades: 0,
   directTrades: 0,
+  fairValueTrades: 0,
   arbProfit: 0,
   followedWallets: [],
   positions: [],
@@ -390,6 +391,7 @@ function recordTrade(profit: number, strategy: string, creditPnl = true) {
   else if (strategy === 'arbitrage') state.arbTrades++;
   else if (strategy === 'dipArb') state.dipArbTrades++;
   else if (strategy === 'direct') state.directTrades++;
+  else if (strategy === 'fairValue') state.fairValueTrades = (state.fairValueTrades ?? 0) + 1;
 
   updateDashboard();
 }
@@ -955,6 +957,7 @@ function syncRealizedPnl() {
   const trades = shared;
   const st = ledgerStatsShared(ledgerPath());
   const v = st.pnl;
+  state.ledger = { trades: st.n, wins: st.wins, losses: st.losses, open: st.open, winRate: st.winRate, pnl: st.pnl, tStat: st.tStat };
   state.totalPnL = v;
   // Pertes du jour / du mois CALENDAIRES (UTC), recalculées à chaque tick depuis le
   // registre : avant, ces compteurs n'étaient jamais alimentés en papier (aucun PnL
@@ -992,7 +995,7 @@ async function updateBalances() {
     // SIMULATION: Mock balances
     // Base 10,000 + whatever PnL we've made in this session
     state.usdcEBalance = CONFIG.capital.totalUsd + state.totalPnL;
-    state.maticBalance = 100;
+    state.maticBalance = 0; // papier : aucun gaz (avant : 100 fictifs affichés)
 
     // Only verify once/log sparsely
     if (Math.random() < 0.05) { // Occasional log
@@ -1279,7 +1282,7 @@ async function setupFairValueStrategy(sdk: PolymarketSDK) {
         : `mise suspendue : baisse ≥ 20 % depuis le plus haut. Arrêt de risque maintenu jusqu'à décision manuelle (analyser le journal, puis archiver ~/.polymarket/fv-ledger.json ou ajuster PAPER_CAPITAL)`);
     },
     onTradeOpened: e => {
-      simulateTrade(e.winProfit, 'dipArb', e.description);
+      simulateTrade(e.winProfit, 'fairValue', e.description);
       // Journal historique (lu par les outils externes paperbot-pnl.py / recap).
       logLearning({
         roundId: e.market.slug, market: e.market.name?.slice(0, 40), side: e.trade.side === 'UP' ? 'YES' : 'NO',
@@ -1551,12 +1554,34 @@ async function setupPortfolioManager(sdk: PolymarketSDK) {
 // === PROCESS : erreurs non gérées et arrêt propre ===
 let shuttingDown = false;
 /** Arrêt propre : coupe le flux spot, vide la file Telegram et le journal (≤ 5 s). */
+/**
+ * Bilan de la session pour la page « Historique » du dashboard (avant : jamais enregistré,
+ * page toujours vide). PnL = trades réglés PENDANT la session, pas le cumul du registre.
+ */
+function recordSessionHistory(): void {
+  try {
+    const recs: TradeRecord[] = (readLedgerShared(ledgerPath()) ?? [])
+      .filter(t => t.status !== 'open' && typeof t.pnl === 'number' && Date.parse(t.resolvedAt ?? '') >= state.startTime)
+      .slice(-500)
+      .map(t => ({
+        id: t.id, timestamp: t.resolvedAt as string, strategy: 'fairValue', market: t.slug, side: 'BUY',
+        size: t.stake, price: t.costPerShare, profit: t.pnl as number,
+      }));
+    if (!recs.length && !state.tradesExecuted) return; // redémarrage sans activité : rien à garder
+    const sessionPnl = recs.reduce((a, r) => a + r.profit, 0);
+    addSession(createSessionFromState(state.startTime, { ...state, totalPnL: sessionPnl }, CONFIG, recs));
+  } catch (err) {
+    log('WARN', `Historique de session non enregistré (${String((err as Error)?.message ?? err).slice(0, 120)})`);
+  }
+}
+
 async function shutdown(reason: string, code: number): Promise<void> {
   if (shuttingDown) return;
   shuttingDown = true;
   log(code ? 'ERROR' : 'INFO', `Arrêt du bot (${reason})`);
   try { spotStream?.stop(); } catch { /* déjà arrêté */ }
   notify(code ? msgAlert(`bot arrêté sur erreur (${reason}) — PM2 va le relancer`) : `🛑 Bot arrêté (${reason})`);
+  recordSessionHistory();
   await Promise.race([
     Promise.all([telegram?.flush(), decisionJournal?.flush()]),
     new Promise(r => setTimeout(r, 5000)),
@@ -1592,7 +1617,9 @@ async function main() {
   const dashPort = Number(process.env.DASHBOARD_PORT ?? '') || 3001;
   const dashHost = process.env.DASHBOARD_HOST || '127.0.0.1';
   startDashboard(dashPort, { host: dashHost, token: process.env.DASHBOARD_TOKEN || undefined });
-  console.log(`\n🌐 Dashboard: http://${dashHost === '0.0.0.0' ? '<ip-du-serveur>' : dashHost}:${dashPort}\n`);
+  // Sans jeton, le serveur se replie sur 127.0.0.1 même si DASHBOARD_HOST=0.0.0.0.
+  const dashExposed = dashHost === '0.0.0.0' && !!process.env.DASHBOARD_TOKEN;
+  console.log(`\n🌐 Dashboard: http://${dashExposed ? '<ip-du-serveur>' : dashHost === '0.0.0.0' ? '127.0.0.1' : dashHost}:${dashPort}\n`);
 
   // En papier, une clé absente ou factice (placeholder de .env.example) ne doit pas
   // empêcher le démarrage : clé éphémère sans fonds, et AUCUNE dérivation de clé API
@@ -1680,7 +1707,11 @@ async function main() {
       + 'sans effet sur la stratégie papier, on continue (le WebSocket se reconnecte seul).');
   }
 
-  log('INFO', `Wallet: ${sdk.tradingService.getAddress()}`);
+  log('INFO', `Wallet: ${sdk.tradingService.getAddress()}${ephemeralKey ? ' (éphémère, sans fonds)' : ''}`);
+  if (!ephemeralKey) {
+    const cfgNow = dashboardEmitter.getConfig();
+    if (cfgNow) dashboardEmitter.updateConfig({ ...cfgNow, walletAddress: sdk.tradingService.getAddress() });
+  }
 
   // Handle Dashboard Commands (enregistré APRÈS la création du SDK : avant, une bascule
   // reçue pendant le démarrage touchait `sdk` encore non initialisé → ReferenceError).
@@ -1769,7 +1800,9 @@ async function main() {
   await setupDirectTrading(sdk);
 
   // Setup Portfolio Manager (Persistence)
-  await setupPortfolioManager(sdk);
+  // En papier, les positions et le PnL latent du VRAI wallet (s'il y a une clé) se
+  // mélangeaient au PnL papier dans le dashboard (« Total P&L »). Pas de synchro en papier.
+  if (!CONFIG.dryRun) await setupPortfolioManager(sdk);
 
   // Listen for commands from dashboard
   onDashboardCommand(async ({ command, payload }) => {
@@ -1819,6 +1852,12 @@ async function main() {
 
     if (command === 'toggleStrategy') {
       const { strategy, enabled } = payload;
+      // Liste fermée et booléen strict : avant, `enabled: "false"` ACTIVAIT DipArb (chaîne
+      // non vide) et n'importe quelle clé de CONFIG ayant un `enabled` était modifiable.
+      if (!['smartMoney', 'arbitrage', 'dipArb', 'directTrading'].includes(strategy) || typeof enabled !== 'boolean') {
+        log('WARN', `Commande toggleStrategy ignorée (stratégie ou valeur invalide : ${String(strategy).slice(0, 40)}, ${String(enabled).slice(0, 10)})`);
+        return;
+      }
       const strategyName = strategy as keyof typeof CONFIG;
 
       if (CONFIG[strategyName] && typeof (CONFIG[strategyName] as any).enabled !== 'undefined') {

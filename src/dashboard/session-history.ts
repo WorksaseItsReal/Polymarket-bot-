@@ -14,7 +14,7 @@ const __dirname = dirname(__filename);
 export interface TradeRecord {
   id: string;
   timestamp: string;
-  strategy: 'smartMoney' | 'arbitrage' | 'dipArb' | 'direct';
+  strategy: 'smartMoney' | 'arbitrage' | 'dipArb' | 'direct' | 'fairValue';
   market: string;
   side: 'BUY' | 'SELL';
   size: number;

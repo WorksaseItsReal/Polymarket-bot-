@@ -24,7 +24,9 @@ function broadcast(message: WebSocketMessage): void {
   if (!wss) return;
   const data = JSON.stringify(message);
   wss.clients.forEach((client) => {
-    if (client.readyState === WebSocket.OPEN) {
+    // Client trop lent (> 1 Mo en attente) : on saute ce message plutôt que d'accumuler
+    // en mémoire sans limite.
+    if (client.readyState === WebSocket.OPEN && client.bufferedAmount < 1_000_000) {
       // ⚠️ `send()` peut lever si la socket est fermée entre le test de
       // `readyState` et l'appel. Sans ce try/catch, l'exception remonte dans le
       // handler synchrone de `dashboardEmitter.emit('state', …)` — donc dans le
@@ -77,9 +79,30 @@ export function originAllowed(origin: string | undefined, hostHeader: string | u
   }
 }
 
+/**
+ * Sans jeton, seul un en-tête Host LOCAL est accepté. Sinon un site visité par l'opérateur
+ * peut, par « DNS rebinding », faire pointer son propre nom vers 127.0.0.1 : l'Origin et le
+ * Host sont alors tous deux à son nom, et le contrôle d'Origin seul ne voit rien.
+ */
+export function hostAllowed(hostHeader: string | undefined, tokenSet: boolean): boolean {
+  if (tokenSet) return true;
+  try {
+    const h = new URL(`http://${hostHeader ?? ''}`).hostname;
+    return h === '127.0.0.1' || h === 'localhost' || h === '[::1]';
+  } catch {
+    return false;
+  }
+}
+
 export function startDashboard(port = 3001, opts: DashboardOptions = {}): http.Server {
-  const host = opts.host || '127.0.0.1';
+  let host = opts.host || '127.0.0.1';
   const token = opts.token || '';
+  // Exposé au réseau SANS jeton : avant, état et journaux restaient lisibles par tout le
+  // réseau (seules les commandes étaient refusées). On se replie sur l'écoute locale.
+  if (!isLoopback(host) && !token) {
+    console.warn(`[Dashboard] DASHBOARD_HOST=${host} exige DASHBOARD_TOKEN : écoute limitée à 127.0.0.1 (tunnel SSH pour y accéder).`);
+    host = '127.0.0.1';
+  }
   // Commandes (bascule de mode, fermeture de position…) : autorisées en local, ou avec jeton.
   const commandsAllowed = isLoopback(host) || !!token;
   if (!commandsAllowed) {
@@ -107,6 +130,11 @@ export function startDashboard(port = 3001, opts: DashboardOptions = {}): http.S
     if (req.method !== 'GET' && req.method !== 'HEAD') {
       res.writeHead(405);
       res.end();
+      return;
+    }
+    if (!hostAllowed(req.headers.host, !!token)) {
+      res.writeHead(403, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'hôte non autorisé' }));
       return;
     }
 
@@ -205,10 +233,13 @@ export function startDashboard(port = 3001, opts: DashboardOptions = {}): http.S
 
   wss = new WebSocketServer({
     server,
+    // Les commandes font quelques centaines d'octets : un message géant ne doit pas pouvoir
+    // bloquer la boucle d'événements (défaut de la librairie : 100 Mo).
+    maxPayload: 16 * 1024,
     verifyClient: (info: { origin?: string; req: http.IncomingMessage }) => {
       try {
         const url = new URL(info.req.url || '/', 'http://localhost');
-        return originAllowed(info.origin, info.req.headers.host) && tokenOk(url);
+        return hostAllowed(info.req.headers.host, !!token) && originAllowed(info.origin, info.req.headers.host) && tokenOk(url);
       } catch {
         return false;
       }

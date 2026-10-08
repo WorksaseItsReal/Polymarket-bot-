@@ -72,6 +72,9 @@ export function useWebSocket() {
       };
 
       ws.onclose = () => {
+        // Socket remplacée ou composant démonté : ne pas reconnecter (avant : une fermeture
+        // tardive relançait une 2e connexion → chaque journal affiché deux fois).
+        if (wsRef.current !== ws) return;
         console.log('[Dashboard] Disconnected, reconnecting...');
         setConnected(false);
         wsRef.current = null;
@@ -99,9 +102,9 @@ export function useWebSocket() {
       if (reconnectTimeoutRef.current) {
         clearTimeout(reconnectTimeoutRef.current);
       }
-      if (wsRef.current) {
-        wsRef.current.close();
-      }
+      const ws = wsRef.current;
+      wsRef.current = null; // avant close() : son onclose saura qu'il ne doit pas reconnecter
+      ws?.close();
     };
   }, [connect]);
 

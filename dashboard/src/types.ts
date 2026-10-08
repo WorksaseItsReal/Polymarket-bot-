@@ -36,6 +36,18 @@ export interface BotState {
   arbTrades: number;
   dipArbTrades: number;
   directTrades: number;
+  /** Paris de la stratégie juste valeur (session en cours). */
+  fairValueTrades?: number;
+  /** Statistiques RÉELLES du registre papier (toutes sessions), source de vérité. */
+  ledger?: {
+    trades: number;
+    wins: number;
+    losses: number;
+    open: number;
+    winRate: number | null;
+    pnl: number;
+    tStat: number | null;
+  };
   arbProfit: number;
   followedWallets: string[];
   activeArbMarket: string | null;
@@ -125,6 +137,8 @@ export interface BotConfig {
     enabled: boolean;
   };
   dryRun: boolean;
+  /** Adresse du wallet du bot (absente en papier avec une clé éphémère). */
+  walletAddress?: string;
 }
 
 export type LogLevel =
@@ -139,7 +153,8 @@ export type LogLevel =
   | 'SWAP'
   | 'BRIDGE'
   | 'KLINE'
-  | 'TREND';
+  | 'TREND'
+  | 'LEARN';
 
 export interface LogEntry {
   id: string;
@@ -160,7 +175,7 @@ export interface DashboardData {
 export interface TradeRecord {
   id: string;
   timestamp: string;
-  strategy: 'smartMoney' | 'arbitrage' | 'dipArb' | 'direct';
+  strategy: 'smartMoney' | 'arbitrage' | 'dipArb' | 'direct' | 'fairValue';
   market: string;
   side: 'BUY' | 'SELL';
   size: number;
