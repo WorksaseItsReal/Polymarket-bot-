@@ -383,3 +383,43 @@ export function describeBlend(fit: BlendFit | null, current: { blendModel: numbe
   }
   return out;
 }
+
+export interface BookStats {
+  coin: string;
+  /** évaluations avec ask ET bid du token Up */
+  n: number;
+  /** écart achat/vente médian du token Up (en prix, 0,01 = 1 ct) */
+  medianSpread: number;
+  /** part des évaluations où bid Up = 1 − ask Down (carnets miroirs, à 0,5 ct près) */
+  mirrorShare: number | null;
+  /** taille médiane au meilleur ask Up (parts) */
+  medianAskSize: number | null;
+}
+
+const median = (xs: number[]) => {
+  if (!xs.length) return null;
+  const s = [...xs].sort((a, b) => a - b);
+  const m = Math.floor(s.length / 2);
+  return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+};
+
+/** Coût réel d'un aller-retour et profondeur, par coin (journaux avec bids seulement). */
+export function bookStats(records: DecisionRecord[]): BookStats[] {
+  const by = new Map<string, DecisionRecord[]>();
+  for (const r of records) {
+    if (r.upAsk == null || r.upBid == null) continue;
+    (by.get(r.coin) ?? by.set(r.coin, []).get(r.coin)!).push(r);
+  }
+  return [...by.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([coin, rs]) => {
+    const mirror = rs.filter(r => r.downAsk != null);
+    return {
+      coin,
+      n: rs.length,
+      medianSpread: median(rs.map(r => (r.upAsk as number) - (r.upBid as number))) as number,
+      mirrorShare: mirror.length
+        ? mirror.filter(r => Math.abs((r.upBid as number) - (1 - (r.downAsk as number))) < 0.005).length / mirror.length
+        : null,
+      medianAskSize: median(rs.filter(r => r.upAskSz != null).map(r => r.upAskSz as number)),
+    };
+  });
+}

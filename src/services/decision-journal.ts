@@ -37,6 +37,11 @@ export interface DecisionRecord {
   /** Taille (parts) au meilleur ask. */
   upAskSz: number | null;
   downAskSz: number | null;
+  /** Meilleurs bids et tailles (absents des anciens journaux) : spread réel, analyse maker. */
+  upBid?: number | null;
+  downBid?: number | null;
+  upBidSz?: number | null;
+  downBidSz?: number | null;
   /** Source du spot (ex. binance+ws). */
   src: string;
   /** 'buy' si un pari a été pris, sinon 'hold'. */

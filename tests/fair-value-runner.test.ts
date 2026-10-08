@@ -232,7 +232,7 @@ test('journal : chaque évaluation est transmise (abstention puis pari), avec as
     onEvaluation: r => evals.push({ ...r }),
     getBook: async id => {
       const ask = id === 'UP' ? (fair ? Math.ceil(p * 100) / 100 : 0.6) : 0.41;
-      return { asks: [{ price: ask, size: 50 }], bids: [] };
+      return { asks: [{ price: ask, size: 50 }], bids: id === 'UP' ? [{ price: 0.3, size: 7 }, { price: 0.55, size: 12 }] : [] };
     },
   });
   const r = env.runner();
@@ -241,6 +241,9 @@ test('journal : chaque évaluation est transmise (abstention puis pari), avec as
   assert.equal(evals[0].act, 'hold');
   assert.equal(evals[0].slug, MARKET.slug);
   assert.equal(evals[0].upAskSz, 50);
+  assert.equal(evals[0].upBid, 0.55, 'meilleur bid = le plus haut');
+  assert.equal(evals[0].upBidSz, 12);
+  assert.equal(evals[0].downBid, null, 'pas de bid');
   assert.ok(Math.abs((evals[0].pUp as number) - p) < 1e-12);
   fair = false;
   env.setNow((SLOT + 190) * 1000);
@@ -512,4 +515,12 @@ test('sortie avec mélange : le seuil de revente suit la même probabilité qu\'
   assert.equal(await sell(DEFAULT_FAIR_VALUE_CONFIG), 'sold', 'modèle seul : 0,70 > 0,50 + marge → revente');
   assert.equal(await sell({ ...DEFAULT_FAIR_VALUE_CONFIG, blendModel: 0.05, blendMarket: 1 }), 'open',
     'carnet jugé informé (≈ 0,80) : vendre à 0,70 serait brader la position');
+});
+
+test('bestLevel : plus bas ask, plus haut bid ; niveaux vides ou hors ]0 ; 1[ ignorés', async () => {
+  const { bestLevel } = await import('../src/strategy/fair-value-runner.ts');
+  const lv = [{ price: 0.6, size: 5 }, { price: 0.4, size: 0 }, { price: 0.5, size: 3 }, { price: 1, size: 9 }, { price: 0, size: 9 }];
+  assert.deepEqual(bestLevel(lv, 'ask'), { price: 0.5, size: 3 });
+  assert.deepEqual(bestLevel(lv, 'bid'), { price: 0.6, size: 5 });
+  assert.equal(bestLevel([], 'bid'), null);
 });

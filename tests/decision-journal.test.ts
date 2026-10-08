@@ -128,3 +128,20 @@ test('rapport complet : journal + résultats en cache → le modèle bat un carn
   assert.match(out, /1b\) Mélange modèle \+ carnet/);
   if (process.env.SHOW_REPORT) console.log(out);
 });
+
+test('analyse : statistiques de carnet par coin (écart, miroir, profondeur) ; anciens journaux ignorés', async () => {
+  const { bookStats } = await import('../src/analysis/fv-analysis.ts');
+  const base = rec({ t: 1, slug: 's', tau: 100, spot: 1, sig: 1, pUp: 0.5, upAsk: 0.52, downAsk: 0.5 });
+  const stats = bookStats([
+    { ...base, upBid: 0.5, upAskSz: 10 },
+    { ...base, upBid: 0.48, upAskSz: 30 },
+    { ...base, upBid: 0.5, upAskSz: 20, coin: 'ETH' },
+    { ...base }, // ancien journal : pas de bid
+  ]);
+  assert.equal(stats.length, 2);
+  const btc = stats.find(s => s.coin === base.coin)!;
+  assert.equal(btc.n, 2);
+  assert.ok(Math.abs(btc.medianSpread - 0.03) < 1e-9);
+  assert.equal(btc.mirrorShare, 0.5, 'bid 0,50 = 1 − ask Down 0,50 ; bid 0,48 non');
+  assert.equal(btc.medianAskSize, 20);
+});

@@ -134,6 +134,16 @@ export const LOSS_STREAK_WINDOW_MS = 6 * 3_600_000;
 const SLUG_RE = /^(btc|eth|sol|xrp|doge)-updown-5m-(\d{9,})$/;
 
 /** Début du round (s) si le slug est EXACTEMENT `<coin>-updown-5m-<slot>` du bon coin. */
+/** Meilleur niveau d'un côté du carnet (prix le plus bas pour les asks, le plus haut pour les bids). */
+export function bestLevel(levels: BookLevel[], side: 'ask' | 'bid'): BookLevel | null {
+  let best: BookLevel | null = null;
+  for (const l of levels) {
+    if (!(l.price > 0 && l.price < 1 && l.size > 0)) continue;
+    if (best === null || (side === 'ask' ? l.price < best.price : l.price > best.price)) best = l;
+  }
+  return best;
+}
+
 export function slotOf(market: Pick<ScannedMarket, 'slug' | 'underlying'>): number | null {
   const m = SLUG_RE.exec(market.slug);
   if (!m || m[1] !== market.underlying.toLowerCase()) return null;
@@ -328,9 +338,9 @@ export class FairValueRunner {
         const book = await this.d.getBook(pos.tokenId);
         // Même probabilité qu'à l'entrée : mélange éventuel avec le prix du marché du côté
         // détenu (milieu bid/ask de son token).
-        const bestBid = book.bids.filter(l => l.price > 0 && l.size > 0).reduce((m, l) => Math.max(m, l.price), 0);
-        const bestAsk = book.asks.filter(l => l.price > 0 && l.size > 0).reduce((m, l) => Math.min(m, l.price), 1);
-        const midHeld = bestBid > 0 && bestAsk < 1 ? (bestBid + bestAsk) / 2 : null;
+        const bid = bestLevel(book.bids, 'bid');
+        const ask = bestLevel(book.asks, 'ask');
+        const midHeld = bid && ask && ask.price < 1 ? (bid.price + ask.price) / 2 : null;
         const pHeld = blendWithMarket(pos.side === 'UP' ? pUp : 1 - pUp, midHeld, cfg);
         if (pHeld === null) continue;
         const floor = pHeld + this.d.exitEdge; // prix net minimal de l'ordre de vente
@@ -413,16 +423,17 @@ export class FairValueRunner {
         const nowBook = this.d.now();
         tauSec = (endMs - nowBook) / 1000;
         if (tauSec < cfg.minTauSec || tauSec > cfg.maxTauSec) continue;
-        const bestAsk = (b: Book) => b.asks
-          .filter(l => l.price > 0 && l.size > 0)
-          .reduce<BookLevel | null>((m, l) => (m === null || l.price < m.price ? l : m), null);
-        const upBest = bestAsk(upBook);
-        const downBest = bestAsk(downBook);
+        const upBest = bestLevel(upBook.asks, 'ask');
+        const downBest = bestLevel(downBook.asks, 'ask');
+        const upBid = bestLevel(upBook.bids, 'bid');
+        const downBid = bestLevel(downBook.bids, 'bid');
         const decision = decide({ ...data, tauSec, upAsk: upBest?.price ?? null, downAsk: downBest?.price ?? null }, cfg);
         rec = {
           t: now, slug: market.slug, coin, tau: Math.round(tauSec * 10) / 10, spot: data.spot, strike: data.strike,
           sig: data.sigmaPerSqrtSec, pUp: decision.pUp, pRaw: decision.pRaw ?? null, upAsk: upBest?.price ?? null, downAsk: downBest?.price ?? null,
-          upAskSz: upBest?.size ?? null, downAskSz: downBest?.size ?? null, src: data.source, act: 'hold',
+          upAskSz: upBest?.size ?? null, downAskSz: downBest?.size ?? null,
+          upBid: upBid?.price ?? null, downBid: downBid?.price ?? null, upBidSz: upBid?.size ?? null, downBidSz: downBid?.size ?? null,
+          src: data.source, act: 'hold',
         };
         const ctx = `${coin} spot ${data.spot} vs strike ${data.strike} (${data.source}), `
           + `σ1m ${(data.sigmaPerSqrtSec * Math.sqrt(60) * 100).toFixed(3)} %, τ ${Math.round(tauSec)} s`;

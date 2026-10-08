@@ -18,7 +18,7 @@ import type { DecisionRecord } from '../../src/services/decision-journal.js';
 import { fetchRoundOutcome } from '../../src/services/paper-ledger.js';
 import { fairValueConfigFromEnv } from '../../src/services/fair-value.js';
 import {
-  applyBlend, brier, byRound, calibration, describeBlend, fitBlend, fitZScale, halves, marketProbUp, rawModelProb, replay,
+  applyBlend, bookStats, brier, byRound, calibration, describeBlend, fitBlend, fitZScale, halves, marketProbUp, rawModelProb, replay,
   thresholdGrid, type ResolvedRecord,
 } from '../../src/analysis/fv-analysis.js';
 
@@ -164,6 +164,18 @@ async function main() {
   for (const [lo, hi] of [[45, 90], [90, 150], [150, 210], [210, 270]]) {
     const rs = rounds.map(l => l.filter(r => r.tau >= lo && r.tau < hi)).filter(l => l.length);
     fmtRow(`τ ${lo}-${hi}`, rs);
+  }
+
+  // 3c. Carnet : coût d'un aller-retour et profondeur
+  const books = bookStats(records);
+  if (books.length) {
+    console.log('\n3c) Carnet du token Up (écart achat/vente, profondeur au meilleur ask)');
+    for (const b of books) {
+      console.log(`   ${b.coin.padEnd(5)} n=${String(b.n).padStart(6)}  écart médian ${(b.medianSpread * 100).toFixed(1)} ct`
+        + `  | taille médiane ${b.medianAskSize === null ? '—' : b.medianAskSize.toFixed(0)} parts`
+        + `  | carnets miroirs ${pct(b.mirrorShare, 0)}`);
+    }
+    console.log('   Un écart large rend la revente coûteuse ; une taille faible limite la mise réellement exécutable.');
   }
 
   // 4. Trades réellement pris
