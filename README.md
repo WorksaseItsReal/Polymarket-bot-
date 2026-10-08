@@ -188,7 +188,8 @@ Tout vit dans **`~/.polymarket/`** (`/root/.polymarket/`) :
 | Fichier | Contenu | Statut |
 |---|---|---|
 | `fv-ledger.json` | **Registre de la stratégie juste valeur — SOURCE DE VÉRITÉ du bot.** Un trade par round : mise, coût par part, `modelProb`, statut (`open`/`won`/`lost`/`sold`), PnL. Le bot y lit son PnL, son drawdown, sa série de pertes et ses positions ouvertes ; il résout lui-même les rounds (Gamma `events?slug=`). Écriture atomique, jamais écrasé s'il est illisible. | **Autorité (stratégie)** |
-| `journal/decisions-*.jsonl` | Toutes les évaluations (pari ou abstention), 10 jours, pour `fv-report.ts`. | Analyse |
+| `journal/decisions-*.jsonl(.gz)` | Toutes les évaluations (pari ou abstention), 30 jours (jours révolus compressés), pour `fv-report.ts`. | Analyse |
+| `session-history.json` | Bilan de chaque session (page « History » du dashboard), écrit à l'arrêt. | Affichage |
 | `fv-shadow.json` | Agrégats « modèle vs carnet » (bilan Telegram). | Mesure continue |
 | `fv-guard.json` | Présent = **arrêt de sécurité actif** (perte significative). Le supprimer pour reprendre. | Garde-fou |
 | `outcomes-cache.json` | Résultats des rounds déjà réglés (cache du rapport). | Cache |

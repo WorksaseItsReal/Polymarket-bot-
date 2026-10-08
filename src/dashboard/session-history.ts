@@ -4,11 +4,8 @@
  */
 
 import { existsSync, renameSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
-import { join, dirname } from 'path';
-import { fileURLToPath } from 'url';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
+import { join } from 'path';
+import { homedir } from 'os';
 
 // Types
 export interface TradeRecord {
@@ -75,16 +72,17 @@ export interface HistoryData {
   overallWinRate: number;
 }
 
-// History file path
-const DATA_DIR = join(__dirname, '../../data');
-const HISTORY_FILE = join(DATA_DIR, 'session-history.json');
+// Historique dans ~/.polymarket, avec les autres données du bot. Avant : `data/` DANS le
+// dépôt — le fichier modifié à chaque arrêt bloquait les `git pull` et finissait commité.
+const dataDir = () => join(process.env.HOME || homedir(), '.polymarket');
+const historyFile = () => join(dataDir(), 'session-history.json');
 
 /**
  * Ensure data directory exists
  */
 function ensureDataDir(): void {
-  if (!existsSync(DATA_DIR)) {
-    mkdirSync(DATA_DIR, { recursive: true });
+  if (!existsSync(dataDir())) {
+    mkdirSync(dataDir(), { recursive: true });
   }
 }
 
@@ -94,12 +92,12 @@ function ensureDataDir(): void {
 export function loadHistory(): HistoryData {
   ensureDataDir();
   
-  if (!existsSync(HISTORY_FILE)) {
+  if (!existsSync(historyFile())) {
     return emptyHistory();
   }
 
   try {
-    const data = readFileSync(HISTORY_FILE, 'utf-8');
+    const data = readFileSync(historyFile(), 'utf-8');
     const parsed = JSON.parse(data) as Partial<HistoryData> | null;
     // ⚠️ Le fichier peut être tronqué (kill pendant un write), édité à la main
     // ou hérité d'un ancien format. Sans normalisation, `history.sessions.reduce`
@@ -150,9 +148,9 @@ export function saveHistory(history: HistoryData): void {
   
   try {
     // Écriture atomique : un arrêt pendant l'écriture ne laisse jamais un fichier tronqué.
-    const tmp = `${HISTORY_FILE}.tmp-${process.pid}`;
+    const tmp = `${historyFile()}.tmp-${process.pid}`;
     writeFileSync(tmp, JSON.stringify(history, null, 2));
-    renameSync(tmp, HISTORY_FILE);
+    renameSync(tmp, historyFile());
     console.log('[SessionHistory] History saved successfully');
   } catch (error) {
     console.error('[SessionHistory] Error saving history:', error);
@@ -165,9 +163,9 @@ export function saveHistory(history: HistoryData): void {
 export function addSession(session: SessionSummary): void {
   // Fichier présent mais illisible : on ne l'écrase pas (avant : un fichier tronqué était
   // remplacé par la seule nouvelle session, tout l'historique perdu). On le met de côté.
-  if (existsSync(HISTORY_FILE)) {
+  if (existsSync(historyFile())) {
     try {
-      JSON.parse(readFileSync(HISTORY_FILE, 'utf-8'));
+      JSON.parse(readFileSync(historyFile(), 'utf-8'));
     } catch (e) {
       // Mis de côté seulement s'il est CORROMPU ; une erreur de lecture passagère (fichiers
       // ouverts, droits) ne doit pas faire disparaître un historique valide.
@@ -176,7 +174,7 @@ export function addSession(session: SessionSummary): void {
         return;
       }
       try {
-        renameSync(HISTORY_FILE, `${HISTORY_FILE}.illisible-${Date.now()}`);
+        renameSync(historyFile(), `${historyFile()}.illisible-${Date.now()}`);
       } catch (err) {
         console.error('[SessionHistory] historique corrompu non déplaçable, session non enregistrée :', (err as Error).message);
         return;

@@ -18,6 +18,10 @@ logs/
 paperbot.log
 paperbot.error.log
 
+# Données d'exécution écrites dans le dépôt par d'anciennes versions (aujourd'hui dans
+# ~/.polymarket) : jamais versionnées, sinon elles bloquent les `git pull` sur le serveur.
+data/
+
 # Sauvegardes locales de donnees (historique de trades, registre PnL)
 *.bak
 *.bak-*

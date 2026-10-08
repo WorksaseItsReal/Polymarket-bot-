@@ -60,6 +60,10 @@ test('bot complet sur faux réseau : évalue, journalise, parie et règle, dashb
   if (process.env.SHOW_TELEGRAM) for (const m of tg) console.log('---\n' + m.text);
 
   const poly = join(home, '.polymarket');
+  // Historique de session : dans ~/.polymarket, JAMAIS dans le dépôt (un fichier versionné
+  // modifié à chaque arrêt bloquait les `git pull` du serveur).
+  assert.ok(existsSync(join(poly, 'session-history.json')), 'historique de session enregistré à l\'arrêt');
+  assert.ok(!existsSync(join(process.cwd(), 'data', 'session-history.json')), 'rien d\'écrit dans le dépôt');
   const jfiles = readdirSync(join(poly, 'journal'));
   const lines = jfiles.flatMap(f => readFileSync(join(poly, 'journal', f), 'utf8').split('\n').filter(Boolean)).map(l => JSON.parse(l));
   assert.ok(lines.length >= 5, `journal : ${lines.length} évaluations`);
