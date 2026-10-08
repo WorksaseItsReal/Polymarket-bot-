@@ -64,6 +64,12 @@ export interface FairValueConfig {
    *  confiant, > 1 plus confiant. À fixer d'après `scripts/analysis/fv-report.ts` (estimé
    *  par maximum de vraisemblance sur les rounds réglés), jamais au jugé. */
   zScale: number;
+  /** Mélange avec le prix du marché : logit(p) = blendModel·logit(p_modèle) + blendMarket·logit(p_marché).
+   *  (1, 0) = modèle seul (défaut). À fixer d'après les rapports (estimation + validation hors
+   *  échantillon), jamais au jugé. Si le marché sait déjà tout, le mélange tend vers lui et
+   *  les edges disparaissent : c'est voulu. */
+  blendModel: number;
+  blendMarket: number;
   /** Distribution des rendements : 'normal' (défaut) ou 't4'.
    *  ⚠️ À variance égale, la t4 est PLUS confiante que la normale pour |z| < 2
    *  (F(1) = 0,885 contre 0,841) — précisément la zone où le bot parie. Elle n'est donc
@@ -84,6 +90,8 @@ export const DEFAULT_FAIR_VALUE_CONFIG: FairValueConfig = {
   maxAsk: 0.92,
   tails: 'normal',
   zScale: 1,
+  blendModel: 1,
+  blendMarket: 0,
 };
 
 /** Probabilité modèle bornée : jamais 0 ni 1 (un modèle n'est jamais certain). */
@@ -372,7 +380,10 @@ export interface FairValueDecision {
   side: Side | null;
   /** Raison lisible (FR), chiffres inclus. */
   reason: string;
+  /** P(Up) utilisée pour décider (après mélange éventuel avec le marché). */
   pUp: number | null;
+  /** P(Up) du modèle seul (avant mélange). */
+  pRaw?: number | null;
   quotes: SideQuote[];
   best: SideQuote | null;
 }
@@ -380,6 +391,30 @@ export interface FairValueDecision {
 export interface DecisionInput extends ProbUpInput {
   upAsk: number | null;
   downAsk: number | null;
+}
+
+const logit = (p: number) => Math.log(p / (1 - p));
+const sigmoid = (x: number) => 1 / (1 + Math.exp(-x));
+
+/** Probabilité implicite du carnet pour « Up » : milieu entre ask Up et 1 − ask Down. */
+export function bookMidUp(upAsk: number | null, downAsk: number | null): number | null {
+  if (!(upAsk && upAsk > 0 && upAsk < 1 && downAsk && downAsk > 0 && downAsk < 1)) return null;
+  return Math.min(PROB_CEIL, Math.max(PROB_FLOOR, (upAsk + (1 - downAsk)) / 2));
+}
+
+/**
+ * Applique le mélange modèle/marché (même formule pour Up ou pour le côté détenu :
+ * logit(1−p) = −logit(p)). Sans mélange configuré, renvoie pModel. null si le mélange
+ * exige un prix de marché absent.
+ */
+export function blendWithMarket(pModel: number, pMarket: number | null, cfg: FairValueConfig): number | null {
+  const a = cfg.blendModel ?? 1;
+  const b = cfg.blendMarket ?? 0;
+  if (a === 1 && b === 0) return pModel;
+  if (b !== 0 && pMarket === null) return null;
+  const clampP = (p: number) => Math.min(PROB_CEIL, Math.max(PROB_FLOOR, p));
+  const x = a * logit(clampP(pModel)) + (b !== 0 ? b * logit(clampP(pMarket as number)) : 0);
+  return clampP(sigmoid(x));
 }
 
 export function decide(input: DecisionInput, cfg: FairValueConfig = DEFAULT_FAIR_VALUE_CONFIG): FairValueDecision {
@@ -399,8 +434,10 @@ export function decide(input: DecisionInput, cfg: FairValueConfig = DEFAULT_FAIR
     return none(`τ=${Math.round(input.tauSec)} s > ${cfg.maxTauSec} s (trop tôt dans le round)`);
   }
 
-  const pUp = probUp(input, cfg);
-  if (pUp === null) return none('entrées du modèle invalides (spot/strike/vol/τ)');
+  const pRaw = probUp(input, cfg);
+  if (pRaw === null) return none('entrées du modèle invalides (spot/strike/vol/τ)');
+  const pUp = blendWithMarket(pRaw, bookMidUp(input.upAsk, input.downAsk), cfg);
+  if (pUp === null) return none('mélange modèle/marché configuré mais carnet incomplet', { pRaw });
 
   const quotes: SideQuote[] = [];
   const add = (side: Side, prob: number, ask: number | null) => {
@@ -410,7 +447,7 @@ export function decide(input: DecisionInput, cfg: FairValueConfig = DEFAULT_FAIR
   };
   add('UP', pUp, input.upAsk);
   add('DOWN', 1 - pUp, input.downAsk);
-  if (quotes.length === 0) return none('aucun ask exploitable', { pUp });
+  if (quotes.length === 0) return none('aucun ask exploitable', { pUp, pRaw });
 
   const inBounds = quotes.filter(q => q.ask >= cfg.minAsk && q.ask <= cfg.maxAsk);
   const eligible = inBounds.filter(q => q.prob >= cfg.minProb);
@@ -421,15 +458,15 @@ export function decide(input: DecisionInput, cfg: FairValueConfig = DEFAULT_FAIR
   const summary = quotes.map(fmt).join(' | ');
 
   if (!inBounds.length) {
-    return none(`asks hors bornes [${cfg.minAsk}, ${cfg.maxAsk}] (${summary})`, { pUp, quotes, best });
+    return none(`asks hors bornes [${cfg.minAsk}, ${cfg.maxAsk}] (${summary})`, { pUp, pRaw, quotes, best });
   }
   if (!eligible.length) {
-    return none(`aucun côté avec p_modèle ≥ ${cfg.minProb} (${summary})`, { pUp, quotes, best });
+    return none(`aucun côté avec p_modèle ≥ ${cfg.minProb} (${summary})`, { pUp, pRaw, quotes, best });
   }
   if (!(best.edge >= cfg.minEdge)) {
-    return none(`edge ${(best.edge * 100).toFixed(1)}pt < ${(cfg.minEdge * 100).toFixed(1)}pt requis (${summary})`, { pUp, quotes, best });
+    return none(`edge ${(best.edge * 100).toFixed(1)}pt < ${(cfg.minEdge * 100).toFixed(1)}pt requis (${summary})`, { pUp, pRaw, quotes, best });
   }
-  return { side: best.side, reason: `edge ${(best.edge * 100).toFixed(1)}pt ≥ ${(cfg.minEdge * 100).toFixed(1)}pt (${summary})`, pUp, quotes, best };
+  return { side: best.side, reason: `edge ${(best.edge * 100).toFixed(1)}pt ≥ ${(cfg.minEdge * 100).toFixed(1)}pt (${summary})`, pUp, pRaw, quotes, best };
 }
 
 /**
@@ -457,6 +494,8 @@ export function fairValueConfigFromEnv(env: Record<string, string | undefined>):
     maxAsk: num('FV_MAX_ASK', d.maxAsk, 0.01, 0.99),
     tails: env.FV_TAILS === 't4' ? 't4' : 'normal',
     zScale: num('FV_Z_SCALE', d.zScale, 0.3, 2),
+    blendModel: num('FV_BLEND_MODEL', d.blendModel, 0, 3),
+    blendMarket: num('FV_BLEND_MARKET', d.blendMarket, 0, 3),
   };
   if (cfg.minTauSec > cfg.maxTauSec) { cfg.minTauSec = d.minTauSec; cfg.maxTauSec = d.maxTauSec; }
   if (cfg.minAsk > cfg.maxAsk) { cfg.minAsk = d.minAsk; cfg.maxAsk = d.maxAsk; }

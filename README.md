@@ -151,6 +151,7 @@ Variables (nom → rôle) :
 | `FV_STRIKE_NOISE_SEC` | `10` | Incertitude du strike (open de bougie 1 min ≠ point Chainlink), en secondes de variance. |
 | `FV_TWAP_WINDOW_SEC` | `0` | Résolution ponctuelle (règle officielle : prix Chainlink à la fin vs au début). |
 | `FV_Z_SCALE` | `1` | Calibration à un paramètre de la confiance du modèle (< 1 : moins confiant). **Ne le changer que sur la suggestion du rapport** (`fv-report.ts`, section 2b, avec intervalle de confiance). |
+| `FV_BLEND_MODEL` / `FV_BLEND_MARKET` | `1` / `0` | Mélange avec le carnet : `logit(p) = a·logit(p_modèle) + b·logit(p_carnet)`. `1 / 0` = modèle seul. **Ne le changer que si le rapport le valide hors échantillon** (section 1b). Si le carnet sait déjà tout, le mélange tend vers lui et le bot cesse de parier — c'est voulu. |
 | `FV_TAILS` | `normal` | Loi des rendements. `t4` est **plus** confiante pour \|z\| < 2 (pas plus prudente). |
 | `FV_POLL_SEC` | `10` | Période de scrutation de fond (bornée à [5 ; 300] s). |
 | `FV_MIN_ORDER_USD` | `1` | Minimum d'un achat au marché sur Polymarket : un pari papier plus petit n'est pas pris (il ne serait pas reproductible en réel). Avec le plafond de 1 %, il faut `PAPER_CAPITAL` ≥ 100 $ (250 $ recommandé). |
@@ -304,7 +305,8 @@ En continu (évaluation sur mouvement du spot + passage de fond toutes les ~10 s
    évaluation immédiate du coin (au plus une toutes les 1,5 s). Flux absent ou figé → pas de
    mise. L'horloge du serveur est contrôlée contre les horodatages Binance (alerte si décalée).
 3. **Probabilité** : `P(Up) = Φ(ln(S/K) / √(σ²·(τ + bruit_strike) + basis²))` — résolution
-   ponctuelle Chainlink (« Up » si prix final ≥ prix d'ouverture).
+   ponctuelle Chainlink (« Up » si prix final ≥ prix d'ouverture). Optionnellement mélangée
+   au prix du carnet (`FV_BLEND_*`, désactivé par défaut, à régler seulement sur preuve).
 4. **Coût réel** d'une part = ask + frais taker `0,07·p·(1−p)`. Edge = P(côté) − coût.
    Entrée seulement si **P(côté) ≥ `FV_MIN_PROB` (0,60)**, edge ≥ `FV_MIN_EDGE`,
    τ ∈ [45 ; 270] s et ask ∈ [0,08 ; 0,92].
@@ -313,7 +315,8 @@ En continu (évaluation sur mouvement du spot + passage de fond toutes les ~10 s
    **série de pertes réelle** lus dans `fv-ledger.json`).
 6. **Exécution simulée réaliste** : la mise consomme le carnet niveau par niveau (VWAP) ; si la
    profondeur manque ou si l'edge au VWAP passe sous le seuil → pas de mise.
-7. **Sortie** : on garde jusqu'à la résolution, sauf si `bid − frais > p_modèle + FV_EXIT_EDGE`
+7. **Sortie** : on garde jusqu'à la résolution, sauf si `bid − frais > p + FV_EXIT_EDGE`
+   (`p` = même probabilité qu'à l'entrée, mélange avec le carnet compris s'il est configuré)
    (le marché paie plus que la position ne vaut). Plus de TP/SL en % (vendre au bid coûte
    spread + frais, et le stop-loss était inerte sur un binaire).
 
@@ -332,7 +335,8 @@ npx tsx scripts/analysis/historical-backtest.ts --days 3     # réseau requis, r
 
 Rejoue le modèle sur les rounds des derniers jours (prix Polymarket minute par minute,
 bougies Binance, résolutions Gamma) : Brier modèle vs marché à τ = 240/180/120/60 s, par coin,
-comparaison de 3 estimateurs de volatilité, calibration, `FV_Z_SCALE` suggéré, seuils rejoués
+comparaison de 3 estimateurs de volatilité, calibration, `FV_Z_SCALE` suggéré, mélange
+modèle/marché estimé et validé hors échantillon, seuils rejoués
 sur des asks **reconstitués** (indicatif). ⚠️ Si le prix historique est un dernier prix
 échangé, il peut être en retard et le test **surestime** l'avantage : c'est un filtre rapide
 (« pas d'edge ici → inutile d'attendre »), pas une preuve. La preuve vient du journal en direct.
@@ -350,6 +354,10 @@ npx tsx scripts/analysis/fv-report.ts --days 7
 Le rapport règle les rounds (cache `~/.polymarket/outcomes-cache.json`) et répond dans l'ordre :
 1. **Le modèle prédit-il mieux que le carnet ?** (score de Brier). Si non : aucun seuil ne
    rendra la stratégie rentable.
+   1b. **Le carnet sait-il quelque chose que le modèle ignore ?** Estimation du mélange
+   `FV_BLEND_MODEL` / `FV_BLEND_MARKET`, ajusté sur la 1re moitié des rounds et jugé sur la 2e
+   (jamais vue). N'est suggéré que s'il bat le modèle seul hors échantillon (t < −2) ; si le
+   poids du modèle tombe vers 0, le rapport conclut qu'il n'y a pas d'edge.
 2. **Est-il calibré ?** (« 70 % » gagne-t-il ~70 % du temps ?)
 3. **Quels seuils (`FV_MIN_EDGE` × `FV_MIN_PROB`) auraient rapporté**, avec l'EV sur chaque
    moitié de l'échantillon : ne retenir qu'un réglage positif sur les deux moitiés.

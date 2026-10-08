@@ -16,11 +16,18 @@
  * Fonctions PURES.
  */
 
-import { effectiveCostPerShare, normCdf, normInv } from '../services/fair-value.js';
+import {
+  DEFAULT_FAIR_VALUE_CONFIG, blendWithMarket, bookMidUp, effectiveCostPerShare, normCdf, normInv,
+} from '../services/fair-value.js';
 import type { DecisionRecord } from '../services/decision-journal.js';
 
 export interface ResolvedRecord extends DecisionRecord {
   upWon: boolean;
+}
+
+/** Probabilité du modèle SEUL (avant mélange) ; les anciens journaux n'ont que pUp. */
+export function rawModelProb(r: Pick<DecisionRecord, 'pUp' | 'pRaw'>): number | null {
+  return r.pRaw ?? r.pUp;
 }
 
 /** Probabilité « Up » implicite du carnet : milieu entre l'ask Up et (1 − ask Down). */
@@ -166,10 +173,11 @@ export function fitZScale(rounds: ResolvedRecord[][], tauRef = 150): ZScaleFit |
   for (const list of rounds) {
     let best: ResolvedRecord | null = null;
     for (const r of list) {
-      if (r.pUp === null) continue;
+      if (rawModelProb(r) === null) continue;
       if (!best || Math.abs(r.tau - tauRef) < Math.abs(best.tau - tauRef)) best = r;
     }
-    const z = best ? normInv(Math.min(0.999, Math.max(0.001, best.pUp as number))) : null;
+    // FV_Z_SCALE agit sur le modèle seul : on calibre la probabilité AVANT mélange.
+    const z = best ? normInv(Math.min(0.999, Math.max(0.001, rawModelProb(best) as number))) : null;
     if (best && z !== null) pts.push({ z, y: best.upWon ? 1 : 0 });
   }
   if (pts.length < 30) return null;
@@ -195,4 +203,183 @@ export function fitZScale(rounds: ResolvedRecord[][], tauRef = 150): ZScaleFit |
   while (hi < 3 && inside(hi + 0.005)) hi += 0.005;
   const r3 = (x: number) => Math.round(x * 1000) / 1000;
   return { n: pts.length, m: r3(m), lo: r3(lo), hi: r3(hi) };
+}
+
+const logit = (p: number) => Math.log(p / (1 - p));
+const clampP = (p: number) => Math.min(0.99, Math.max(0.01, p));
+
+export interface BlendPoint {
+  slug: string;
+  /** logit de la probabilité du modèle seul */
+  lm: number;
+  /** logit de la probabilité implicite du carnet */
+  lk: number;
+  y: 0 | 1;
+  /** poids = 1 / nombre d'évaluations du round (chaque round compte pour 1) */
+  w: number;
+}
+
+/** Points exploitables pour le mélange (modèle seul ET carnet connus, τ dans les bornes). */
+export function blendPoints(rounds: ResolvedRecord[][], opts: { minTau?: number; maxTau?: number } = {}): BlendPoint[] {
+  const out: BlendPoint[] = [];
+  for (const list of rounds) {
+    const pts: Array<Omit<BlendPoint, 'w'>> = [];
+    for (const r of list) {
+      if (opts.minTau !== undefined && r.tau < opts.minTau) continue;
+      if (opts.maxTau !== undefined && r.tau > opts.maxTau) continue;
+      const pm = rawModelProb(r);
+      const pk = bookMidUp(r.upAsk, r.downAsk);
+      if (pm === null || !Number.isFinite(pm) || pk === null) continue;
+      pts.push({ slug: r.slug, lm: logit(clampP(pm)), lk: logit(pk), y: r.upWon ? 1 : 0 });
+    }
+    for (const p of pts) out.push({ ...p, w: 1 / pts.length });
+  }
+  return out;
+}
+
+const blendProb = (pt: Pick<BlendPoint, 'lm' | 'lk'>, a: number, b: number) => clampP(1 / (1 + Math.exp(-(a * pt.lm + b * pt.lk))));
+
+/** Log-vraisemblance pondérée du mélange (a, b). */
+function blendLogLik(pts: BlendPoint[], a: number, b: number): number {
+  let s = 0;
+  for (const pt of pts) {
+    const p = blendProb(pt, a, b);
+    s += pt.w * (pt.y ? Math.log(p) : Math.log(1 - p));
+  }
+  return s;
+}
+
+/** (a, b) ∈ [0, 3]² maximisant la vraisemblance : grille 0,1 puis affinage à 0,01. */
+export function fitBlendParams(pts: BlendPoint[]): { a: number; b: number } {
+  let best = { a: 1, b: 0, ll: blendLogLik(pts, 1, 0) };
+  const scan = (a0: number, a1: number, b0: number, b1: number, step: number) => {
+    for (let a = a0; a <= a1 + 1e-9; a += step) {
+      for (let b = b0; b <= b1 + 1e-9; b += step) {
+        const aa = Math.min(3, Math.max(0, a));
+        const bb = Math.min(3, Math.max(0, b));
+        const ll = blendLogLik(pts, aa, bb);
+        if (ll > best.ll) best = { a: aa, b: bb, ll };
+      }
+    }
+  };
+  scan(0, 3, 0, 3, 0.1);
+  const { a, b } = best;
+  scan(a - 0.1, a + 0.1, b - 0.1, b + 0.1, 0.01);
+  const r2 = (x: number) => Math.round(x * 100) / 100;
+  return { a: r2(best.a), b: r2(best.b) };
+}
+
+export interface BlendScore {
+  rounds: number;
+  brierModel: number;
+  brierMarket: number;
+  brierBlend: number;
+  /** t apparié PAR ROUND de (Brier mélange − Brier modèle) ; négatif = mélange meilleur. */
+  tVsModel: number | null;
+  /** idem contre le carnet seul. */
+  tVsMarket: number | null;
+}
+
+/** Scores de Brier par round (chaque round compte pour 1) du modèle, du carnet et du mélange. */
+export function scoreBlend(pts: BlendPoint[], a: number, b: number): BlendScore | null {
+  const per = new Map<string, { m: number; k: number; x: number; w: number }>();
+  for (const pt of pts) {
+    const r = per.get(pt.slug) ?? { m: 0, k: 0, x: 0, w: 0 };
+    r.m += pt.w * (blendProb(pt, 1, 0) - pt.y) ** 2;
+    r.k += pt.w * (blendProb(pt, 0, 1) - pt.y) ** 2;
+    r.x += pt.w * (blendProb(pt, a, b) - pt.y) ** 2;
+    r.w += pt.w;
+    per.set(pt.slug, r);
+  }
+  const rows = [...per.values()].map(r => ({ m: r.m / r.w, k: r.k / r.w, x: r.x / r.w }));
+  if (!rows.length) return null;
+  const mean = (xs: number[]) => xs.reduce((s, v) => s + v, 0) / xs.length;
+  const tStat = (ds: number[]) => {
+    if (ds.length < 2) return null;
+    const m = mean(ds);
+    const v = ds.reduce((s, d) => s + (d - m) ** 2, 0) / (ds.length - 1);
+    return v > 0 ? m / Math.sqrt(v / ds.length) : null;
+  };
+  return {
+    rounds: rows.length,
+    brierModel: mean(rows.map(r => r.m)),
+    brierMarket: mean(rows.map(r => r.k)),
+    brierBlend: mean(rows.map(r => r.x)),
+    tVsModel: tStat(rows.map(r => r.x - r.m)),
+    tVsMarket: tStat(rows.map(r => r.x - r.k)),
+  };
+}
+
+export interface BlendFit {
+  /** rounds utilisés pour l'estimation sur tout l'échantillon */
+  rounds: number;
+  /** réglage estimé sur TOUT l'échantillon (celui à configurer si la validation passe) */
+  a: number;
+  b: number;
+  /** estimé sur la 1re moitié chronologique, évalué sur la 2e (jamais vue). */
+  oos: (BlendScore & { a: number; b: number }) | null;
+}
+
+/**
+ * Mélange modèle/marché : logit(p) = a·logit(p_modèle) + b·logit(p_carnet).
+ *   (1, 0) = modèle seul ; (0, 1) = carnet seul (aucun edge possible).
+ * Le résultat n'a de valeur que si le mélange bat le modèle sur la moitié NON utilisée
+ * pour l'estimer (oos.tVsModel nettement négatif).
+ */
+export function fitBlend(rounds: ResolvedRecord[][], opts: { minTau?: number; maxTau?: number } = {}): BlendFit | null {
+  const all = blendPoints(rounds, opts);
+  const nRounds = new Set(all.map(p => p.slug)).size;
+  if (nRounds < 60) return null;
+  const full = fitBlendParams(all);
+  const [h1, h2] = halves(rounds);
+  const p1 = blendPoints(h1, opts);
+  const p2 = blendPoints(h2, opts);
+  let oos: BlendFit['oos'] = null;
+  if (new Set(p1.map(p => p.slug)).size >= 30 && new Set(p2.map(p => p.slug)).size >= 30) {
+    const fit1 = fitBlendParams(p1);
+    const sc = scoreBlend(p2, fit1.a, fit1.b);
+    if (sc) oos = { ...sc, ...fit1 };
+  }
+  return { rounds: nRounds, a: full.a, b: full.b, oos };
+}
+
+/** Rejoue avec un mélange donné : pUp devient la probabilité mélangée (pRaw conservé). */
+export function applyBlend(rounds: ResolvedRecord[][], a: number, b: number): ResolvedRecord[][] {
+  const cfg = { ...DEFAULT_FAIR_VALUE_CONFIG, blendModel: a, blendMarket: b };
+  return rounds.map(list => list.map(r => {
+    const raw = rawModelProb(r);
+    const pUp = raw === null ? null : blendWithMarket(raw, bookMidUp(r.upAsk, r.downAsk), cfg);
+    return { ...r, pRaw: raw, pUp };
+  }));
+}
+
+/** Lignes de rapport (FR) pour un mélange estimé ; partagées par les deux scripts. */
+export function describeBlend(fit: BlendFit | null, current: { blendModel: number; blendMarket: number }): string[] {
+  const f4 = (x: number) => x.toFixed(4);
+  const f1 = (x: number | null) => (x === null ? '—' : x.toFixed(1));
+  if (!fit) return ['   échantillon insuffisant (< 60 rounds avec modèle et carnet) : rien à estimer.'];
+  const out = [`   estimé sur ${fit.rounds} rounds : logit(p) = ${fit.a}·logit(p_modèle) + ${fit.b}·logit(p_carnet)`];
+  const o = fit.oos;
+  if (!o) {
+    out.push('   validation impossible (< 30 rounds par moitié) : ne rien changer.');
+    return out;
+  }
+  out.push(`   validation : estimé sur la 1re moitié (${o.a} / ${o.b}), mesuré sur la 2e (${o.rounds} rounds jamais vus)`);
+  out.push(`     Brier  modèle ${f4(o.brierModel)} | carnet ${f4(o.brierMarket)} | mélange ${f4(o.brierBlend)}`
+    + `   (t mélange−modèle ${f1(o.tVsModel)}, mélange−carnet ${f1(o.tVsMarket)})`);
+  const isCurrent = current.blendModel === fit.a && current.blendMarket === fit.b;
+  if (o.tVsModel !== null && o.tVsModel < -2) {
+    if (fit.a < 0.15) {
+      out.push('   → le modèle n\'ajoute presque rien au carnet : AUCUN edge crédible. Ne pas trader cette stratégie.');
+    } else {
+      out.push(isCurrent
+        ? '   → mélange validé hors échantillon, et c\'est déjà le réglage actuel.'
+        : `   → mélange validé hors échantillon : essayer FV_BLEND_MODEL=${fit.a} FV_BLEND_MARKET=${fit.b}`
+          + ` (actuel ${current.blendModel} / ${current.blendMarket}), puis re-mesurer.`);
+    }
+  } else {
+    out.push('   → pas d\'amélioration significative hors échantillon (t ≥ −2) : garder le réglage actuel'
+      + ` (${current.blendModel} / ${current.blendMarket}).`);
+  }
+  return out;
 }

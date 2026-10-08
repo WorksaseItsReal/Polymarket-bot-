@@ -18,7 +18,8 @@ import type { DecisionRecord } from '../../src/services/decision-journal.js';
 import { fetchRoundOutcome } from '../../src/services/paper-ledger.js';
 import { fairValueConfigFromEnv } from '../../src/services/fair-value.js';
 import {
-  brier, byRound, calibration, fitZScale, halves, marketProbUp, replay, thresholdGrid, type ResolvedRecord,
+  applyBlend, brier, byRound, calibration, describeBlend, fitBlend, fitZScale, halves, marketProbUp, rawModelProb, replay,
+  thresholdGrid, type ResolvedRecord,
 } from '../../src/analysis/fv-analysis.js';
 
 function arg(name: string): string | undefined {
@@ -85,12 +86,13 @@ async function main() {
   if (!rounds.length) return;
 
   // 1. Modèle vs marché (une évaluation par round : la première, pour ne pas sur-pondérer)
+  // (modèle SEUL, avant un éventuel mélange avec le carnet)
   const first = rounds.map(l => l[0]);
-  const bm = brier(first, r => r.pUp);
+  const bm = brier(first, rawModelProb);
   const bk = brier(first, marketProbUp);
   console.log('1) Le modèle prédit-il mieux que le carnet ? (Brier, plus bas = meilleur)');
   console.log(`   1re évaluation de chaque round : modèle ${num(bm.score, 4)} | carnet ${num(bk.score, 4)} (n=${bm.n} rounds)`);
-  const am = brier(resolved, r => r.pUp);
+  const am = brier(resolved, rawModelProb);
   const ak = brier(resolved, marketProbUp);
   console.log(`   toutes les évaluations         : modèle ${num(am.score, 4)} | carnet ${num(ak.score, 4)} (n=${am.n}, corrélées au sein d'un round)`);
   if (bm.score !== null && bk.score !== null) {
@@ -99,10 +101,23 @@ async function main() {
       : '   → le carnet prédit au moins aussi bien : PAS d\'edge exploitable, quel que soit le seuil.');
   }
 
+  // 1b. Mélange modèle + carnet
+  console.log('\n1b) Mélange modèle + carnet (le carnet contient-il une information que le modèle ignore ?)');
+  const params = { feeRate: cfg.takerFeeRate, minAsk: cfg.minAsk, maxAsk: cfg.maxAsk, minTau: cfg.minTauSec, maxTau: cfg.maxTauSec };
+  const blend = fitBlend(rounds, { minTau: cfg.minTauSec, maxTau: cfg.maxTauSec });
+  for (const line of describeBlend(blend, cfg)) console.log(line);
+  if (blend?.oos) {
+    const h2 = halves(rounds)[1];
+    const raw = replay(applyBlend(h2, 1, 0), cfg.minEdge, cfg.minProb, params);
+    const mixed = replay(applyBlend(h2, blend.oos.a, blend.oos.b), cfg.minEdge, cfg.minProb, params);
+    console.log(`     seuils actuels sur la 2e moitié : modèle seul EV/$ ${num(raw.evPerDollar, 4)} (n=${raw.n})`
+      + ` | mélange EV/$ ${num(mixed.evPerDollar, 4)} (n=${mixed.n})`);
+  }
+
   // 2. Calibration
-  console.log('\n2) Calibration du modèle (toutes évaluations)');
+  console.log('\n2) Calibration du modèle seul (toutes évaluations)');
   console.log('   tranche     n      p moyen   Up réel');
-  for (const b of calibration(resolved, r => r.pUp)) {
+  for (const b of calibration(resolved, rawModelProb)) {
     console.log(`   ${b.lo.toFixed(1)}-${b.hi.toFixed(1)}  ${String(b.n).padStart(6)}   ${pct(b.meanP)}   ${pct(b.freqUp)}`);
   }
 
@@ -117,8 +132,7 @@ async function main() {
       : `   → le modèle est ${fit.m < 1 ? 'SUR-confiant' : 'SOUS-confiant'} : essayer FV_Z_SCALE=${suggested} (actuel ${cfg.zScale}), puis re-mesurer.`);
   }
 
-  // 3. Seuils
-  const params = { feeRate: cfg.takerFeeRate, minAsk: cfg.minAsk, maxAsk: cfg.maxAsk, minTau: cfg.minTauSec, maxTau: cfg.maxTauSec };
+  // 3. Seuils (probabilité utilisée par le bot, mélange compris s'il est configuré)
   const edges = [0, 0.02, 0.04, 0.06, 0.08, 0.1];
   const probs = [0.5, 0.55, 0.6, 0.65, 0.7, 0.8];
   const [h1, h2] = halves(rounds);
@@ -161,7 +175,7 @@ async function main() {
 
   const out = arg('json');
   if (out) {
-    writeFileSync(out, JSON.stringify({ brierModel: bm, brierMarket: bk, calibration: calibration(resolved, r => r.pUp), grid: thresholdGrid(rounds, edges, probs, params) }, null, 2));
+    writeFileSync(out, JSON.stringify({ brierModel: bm, brierMarket: bk, blend, calibration: calibration(resolved, rawModelProb), grid: thresholdGrid(rounds, edges, probs, params) }, null, 2));
     console.log(`\nJSON écrit : ${out}`);
   }
 }

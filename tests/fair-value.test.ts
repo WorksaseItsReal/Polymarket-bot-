@@ -245,3 +245,73 @@ test('prix limite : stable numériquement même avec un taux de frais minuscule'
     close(0.8 - effectiveCostPerShare(lim, r), 0.04, 1e-12);
   }
 });
+
+test('mélange modèle/carnet : identité par défaut, carnet seul, symétrie, carnet manquant', async () => {
+  const { blendWithMarket, bookMidUp } = await import('../src/services/fair-value.ts');
+  close(bookMidUp(0.61, 0.41)!, 0.6, 1e-12);
+  assert.equal(bookMidUp(null, 0.41), null);
+  assert.equal(bookMidUp(0.61, 1), null);
+  assert.equal(blendWithMarket(0.8, null, CFG), 0.8, '(1, 0) : modèle seul, carnet inutile');
+  const market = { ...CFG, blendModel: 0, blendMarket: 1 };
+  close(blendWithMarket(0.8, 0.6, market)!, 0.6, 1e-12);
+  assert.equal(blendWithMarket(0.8, null, market), null, 'mélange configuré sans carnet → pas de probabilité');
+  const mix = { ...CFG, blendModel: 0.7, blendMarket: 0.5 };
+  const up = blendWithMarket(0.8, 0.6, mix)!;
+  close(blendWithMarket(0.2, 0.4, mix)!, 1 - up, 1e-12); // même formule pour le côté Down
+  assert.ok(up > 0.6 && up < 0.8 + 1e-9, `${up}`);
+  assert.equal(fairValueConfigFromEnv({ FV_BLEND_MODEL: '0.7', FV_BLEND_MARKET: '0.4' }).blendMarket, 0.4);
+  assert.equal(fairValueConfigFromEnv({ FV_BLEND_MARKET: '-1' }).blendMarket, 0, 'hors bornes → défaut');
+});
+
+test('decide avec mélange : un carnet jugé informé efface l\'edge ; pRaw garde le modèle seul', () => {
+  const base = { spot: 100.12, strike: 100, sigmaPerSqrtSec: SIGMA, tauSec: 120, upAsk: 0.6, downAsk: 0.41 };
+  const raw = decide(base);
+  assert.equal(raw.side, 'UP');
+  assert.equal(raw.pRaw, raw.pUp);
+  const trusting = decide(base, { ...CFG, blendModel: 0.05, blendMarket: 1 });
+  assert.equal(trusting.side, null, trusting.reason);
+  assert.equal(trusting.pRaw, raw.pUp);
+  assert.ok(trusting.pUp! < raw.pUp!);
+  const noBook = decide({ ...base, downAsk: null }, { ...CFG, blendMarket: 0.5 });
+  assert.equal(noBook.side, null);
+  assert.match(noBook.reason, /carnet incomplet/);
+});
+
+test('fitBlend : retrouve le poids du carnet, et ne le valide que hors échantillon', async () => {
+  const { applyBlend, byRound, describeBlend, fitBlend } = await import('../src/analysis/fv-analysis.ts');
+  let seed = 11;
+  const rnd = () => ((seed = (seed * 1103515245 + 12345) % 2 ** 31) / 2 ** 31);
+  const gauss = () => Math.sqrt(-2 * Math.log(rnd() + 1e-12)) * Math.cos(2 * Math.PI * rnd());
+  const sig = (x: number) => 1 / (1 + Math.exp(-x));
+  const world = (a: number, b: number) => {
+    const recs = [];
+    for (let i = 0; i < 4000; i++) {
+      const lm = Math.max(-3, Math.min(3, 1.2 * gauss()));
+      const lk = Math.max(-3, Math.min(3, 1.2 * gauss()));
+      const pk = sig(lk);
+      const upWon = rnd() < sig(a * lm + b * lk);
+      recs.push({
+        t: i, slug: `s${i}`, coin: 'BTC', tau: 150, spot: 1, strike: 1, sig: 1, pUp: sig(lm),
+        upAsk: pk + 0.01, downAsk: 1 - pk + 0.01, upAskSz: null, downAskSz: null, src: 't', act: 'hold' as const, upWon,
+      });
+    }
+    return byRound(recs);
+  };
+  const both = fitBlend(world(0.6, 0.8))!;
+  assert.ok(Math.abs(both.a - 0.6) < 0.2 && Math.abs(both.b - 0.8) < 0.2, `${both.a} / ${both.b}`);
+  assert.ok(both.oos!.tVsModel! < -2, 'le mélange bat le modèle seul sur la moitié jamais vue');
+  assert.match(describeBlend(both, CFG).join('\n'), /essayer FV_BLEND_MODEL=/);
+
+  const modelOnly = fitBlend(world(1, 0))!;
+  assert.ok(modelOnly.b < 0.2, `${modelOnly.b}`);
+  assert.match(describeBlend(modelOnly, CFG).join('\n'), /garder le réglage actuel/);
+
+  const marketKnows = fitBlend(world(0, 1))!;
+  assert.match(describeBlend(marketKnows, CFG).join('\n'), /AUCUN edge crédible/);
+
+  assert.equal(fitBlend(world(1, 0).slice(0, 40)), null, 'trop peu de rounds');
+
+  const r = world(1, 0).slice(0, 3);
+  assert.deepEqual(applyBlend(r, 1, 0).map(l => l[0].pUp), r.map(l => l[0].pUp));
+  for (const [l] of applyBlend(r, 0, 1)) close(l.pUp!, (l.upAsk! + 1 - l.downAsk!) / 2, 1e-9);
+});

@@ -28,8 +28,10 @@ export interface DecisionRecord {
   strike: number;
   /** Volatilité par √seconde. */
   sig: number;
-  /** Probabilité modèle de « Up ». */
+  /** Probabilité de « Up » utilisée pour décider (après mélange éventuel avec le marché). */
   pUp: number | null;
+  /** Probabilité du modèle seul (avant mélange) ; absente des anciens journaux. */
+  pRaw?: number | null;
   upAsk: number | null;
   downAsk: number | null;
   /** Taille (parts) au meilleur ask. */

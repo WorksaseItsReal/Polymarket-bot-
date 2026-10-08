@@ -21,7 +21,9 @@ import {
   compareBrier, evaluateRound, toResolvedRecords, VOL_VARIANTS, LIVE_VARIANT, type BacktestPoint, type PricePoint,
 } from '../../src/analysis/historical-backtest.js';
 import { fetchKlinesRange, fetchPriceHistory, fetchRoundsMeta, mapLimit, type RoundMeta } from '../../src/analysis/historical-data.js';
-import { byRound, calibration, fitZScale, halves, replay, thresholdGrid } from '../../src/analysis/fv-analysis.js';
+import {
+  applyBlend, byRound, calibration, describeBlend, fitBlend, fitZScale, halves, replay, thresholdGrid,
+} from '../../src/analysis/fv-analysis.js';
 
 function arg(name: string): string | undefined {
   const i = process.argv.indexOf(`--${name}`);
@@ -147,12 +149,20 @@ async function main() {
       + (fit.lo <= 1 && fit.hi >= 1 ? ' → compatible avec FV_Z_SCALE actuel' : ` → essayer FV_Z_SCALE=${Math.round(cfg.zScale * fit.m * 100) / 100}`));
   }
 
-  // D. Seuils (indicatif)
+  // C bis. Mélange modèle + marché
+  console.log('\n3b) Mélange modèle + marché (les prix contiennent-ils une information que le modèle ignore ?)');
+  const blend = fitBlend(rounds, { minTau: cfg.minTauSec, maxTau: cfg.maxTauSec });
+  for (const l of describeBlend(blend, cfg)) console.log(l);
+  console.log('   ⚠️ Avec un dernier prix échangé périmé, le marché paraît moins informatif : le poids estimé du');
+  console.log('   marché est alors SOUS-évalué. Confirmer sur le journal en direct (fv-report) avant de régler.');
+
+  // D. Seuils (indicatif) — avec le mélange configuré, comme le bot
   const params = { feeRate: cfg.takerFeeRate, minAsk: cfg.minAsk, maxAsk: cfg.maxAsk, minTau: cfg.minTauSec, maxTau: cfg.maxTauSec };
-  const [h1, h2] = halves(rounds);
+  const decisionRounds = applyBlend(rounds, cfg.blendModel, cfg.blendMarket);
+  const [h1, h2] = halves(decisionRounds);
   console.log('\n4) Seuils rejoués sur asks RECONSTITUÉS (prix + 0,5 ct, frais inclus) — INDICATIF');
   console.log('   edge  pmin      n      WR     EV/$      t  | moitié 1   moitié 2');
-  for (const r of thresholdGrid(rounds, [0.02, 0.04, 0.06, 0.08, 0.1], [0.5, 0.6, 0.7], params)) {
+  for (const r of thresholdGrid(decisionRounds, [0.02, 0.04, 0.06, 0.08, 0.1], [0.5, 0.6, 0.7], params)) {
     if (r.n < 10) continue;
     const a = replay(h1, r.minEdge, r.minProb, params);
     const b = replay(h2, r.minEdge, r.minProb, params);
@@ -164,7 +174,7 @@ async function main() {
 
   const out = arg('json');
   if (out) {
-    writeFileSync(out, JSON.stringify({ comparison: all, byTau: [240, 180, 120, 60].map(t => ({ tau: t, ...compareBrier(points.filter(p => p.tau === t)) })), fit }, null, 2));
+    writeFileSync(out, JSON.stringify({ comparison: all, byTau: [240, 180, 120, 60].map(t => ({ tau: t, ...compareBrier(points.filter(p => p.tau === t)) })), fit, blend }, null, 2));
     console.log(`\nJSON écrit : ${out}`);
   }
 }

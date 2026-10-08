@@ -494,3 +494,22 @@ test('minimum d\'ordre : alerte seulement si la cause est le capital, pas un pla
   assert.equal(below.length, 0, 'cause temporaire (exposition) : pas d\'alerte « monter le capital »');
   assert.ok(env.logs.some(l => /mise réduite/.test(l)));
 });
+
+test('sortie avec mélange : le seuil de revente suit la même probabilité qu\'à l\'entrée', async () => {
+  const sell = async (cfg: typeof DEFAULT_FAIR_VALUE_CONFIG) => {
+    const env = setup();
+    const r = env.runner();
+    await r.tick();
+    assert.equal(loadLedger(env.ledgerPath)![0].status, 'open');
+    // Spot revenu au strike (modèle seul : UP vaut ~0,5) ; carnet UP : bid 0,70 / ask 0,90 (milieu 0,80).
+    env.deps.cfg = cfg;
+    env.deps.getRoundData = async () => ({ spot: 100, strike: 100, sigmaPerSqrtSec: SIGMA, source: 'test', candleAgeMs: 0 });
+    env.deps.getBook = async () => ({ asks: [{ price: 0.9, size: 1000 }], bids: [{ price: 0.7, size: 1000 }] });
+    env.setNow((SLOT + 200) * 1000);
+    await r.tick();
+    return loadLedger(env.ledgerPath)![0].status;
+  };
+  assert.equal(await sell(DEFAULT_FAIR_VALUE_CONFIG), 'sold', 'modèle seul : 0,70 > 0,50 + marge → revente');
+  assert.equal(await sell({ ...DEFAULT_FAIR_VALUE_CONFIG, blendModel: 0.05, blendMarket: 1 }), 'open',
+    'carnet jugé informé (≈ 0,80) : vendre à 0,70 serait brader la position');
+});

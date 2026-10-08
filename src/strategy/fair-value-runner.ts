@@ -19,6 +19,7 @@
 import {
   binaryPayoff,
   decide,
+  blendWithMarket,
   estimateFill,
   estimateSell,
   maxBuyPriceForEdge,
@@ -324,9 +325,16 @@ export class FairValueRunner {
         const data = await this.d.getRoundData(pos.coin, pos.slotSec, now);
         const pUp = data ? probUp({ ...data, tauSec }, cfg) : null;
         if (pUp === null) continue;
-        const pHeld = pos.side === 'UP' ? pUp : 1 - pUp;
+        const book = await this.d.getBook(pos.tokenId);
+        // Même probabilité qu'à l'entrée : mélange éventuel avec le prix du marché du côté
+        // détenu (milieu bid/ask de son token).
+        const bestBid = book.bids.filter(l => l.price > 0 && l.size > 0).reduce((m, l) => Math.max(m, l.price), 0);
+        const bestAsk = book.asks.filter(l => l.price > 0 && l.size > 0).reduce((m, l) => Math.min(m, l.price), 1);
+        const midHeld = bestBid > 0 && bestAsk < 1 ? (bestBid + bestAsk) / 2 : null;
+        const pHeld = blendWithMarket(pos.side === 'UP' ? pUp : 1 - pUp, midHeld, cfg);
+        if (pHeld === null) continue;
         const floor = pHeld + this.d.exitEdge; // prix net minimal de l'ordre de vente
-        const sale = estimateSell((await this.d.getBook(pos.tokenId)).bids, pos.shares, cfg.takerFeeRate, floor);
+        const sale = estimateSell(book.bids, pos.shares, cfg.takerFeeRate, floor);
         if (sale.complete) candidates.push({ pos, floor, pHeld });
       } catch {
         /* carnet ou flux indisponible : on garde la position */
@@ -413,7 +421,7 @@ export class FairValueRunner {
         const decision = decide({ ...data, tauSec, upAsk: upBest?.price ?? null, downAsk: downBest?.price ?? null }, cfg);
         rec = {
           t: now, slug: market.slug, coin, tau: Math.round(tauSec * 10) / 10, spot: data.spot, strike: data.strike,
-          sig: data.sigmaPerSqrtSec, pUp: decision.pUp, upAsk: upBest?.price ?? null, downAsk: downBest?.price ?? null,
+          sig: data.sigmaPerSqrtSec, pUp: decision.pUp, pRaw: decision.pRaw ?? null, upAsk: upBest?.price ?? null, downAsk: downBest?.price ?? null,
           upAskSz: upBest?.size ?? null, downAskSz: downBest?.size ?? null, src: data.source, act: 'hold',
         };
         const ctx = `${coin} spot ${data.spot} vs strike ${data.strike} (${data.source}), `
