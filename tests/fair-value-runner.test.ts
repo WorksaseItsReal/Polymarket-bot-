@@ -13,7 +13,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { DEFAULT_FAIR_VALUE_CONFIG, probUp } from '../src/services/fair-value.ts';
+import { DEFAULT_FAIR_VALUE_CONFIG, blendWithMarket, probUp } from '../src/services/fair-value.ts';
 import { loadLedger, type RoundOutcome } from '../src/services/paper-ledger.ts';
 import type { RoundMarketData } from '../src/services/round-market-data.ts';
 import { FairValueRunner, slotOf, type Book, type RunnerDeps, type ScannedMarket } from '../src/strategy/fair-value-runner.ts';
@@ -499,22 +499,46 @@ test('minimum d\'ordre : alerte seulement si la cause est le capital, pas un pla
 });
 
 test('sortie avec mélange : le seuil de revente suit la même probabilité qu\'à l\'entrée', async () => {
-  const sell = async (cfg: typeof DEFAULT_FAIR_VALUE_CONFIG) => {
+  const sell = async (cfg: typeof DEFAULT_FAIR_VALUE_CONFIG, books: Record<string, Book>) => {
     const env = setup();
     const r = env.runner();
     await r.tick();
     assert.equal(loadLedger(env.ledgerPath)![0].status, 'open');
-    // Spot revenu au strike (modèle seul : UP vaut ~0,5) ; carnet UP : bid 0,70 / ask 0,90 (milieu 0,80).
+    // Spot revenu au strike : le modèle seul donne UP ≈ 0,5.
     env.deps.cfg = cfg;
     env.deps.getRoundData = async () => ({ spot: 100, strike: 100, sigmaPerSqrtSec: SIGMA, source: 'test', candleAgeMs: 0 });
-    env.deps.getBook = async () => ({ asks: [{ price: 0.9, size: 1000 }], bids: [{ price: 0.7, size: 1000 }] });
+    const reads: string[] = [];
+    env.deps.getBook = async id => { reads.push(id); return books[id]; };
     env.setNow((SLOT + 200) * 1000);
     await r.tick();
-    return loadLedger(env.ledgerPath)![0].status;
+    return { status: loadLedger(env.ledgerPath)![0].status, reads };
   };
-  assert.equal(await sell(DEFAULT_FAIR_VALUE_CONFIG), 'sold', 'modèle seul : 0,70 > 0,50 + marge → revente');
-  assert.equal(await sell({ ...DEFAULT_FAIR_VALUE_CONFIG, blendModel: 0.05, blendMarket: 1 }), 'open',
-    'carnet jugé informé (≈ 0,80) : vendre à 0,70 serait brader la position');
+  // Carnets miroirs : UP bid 0,70 / ask 0,90 ; DOWN ask 0,30 → prix du carnet pour UP = 0,80.
+  const mirror = { UP: { asks: [{ price: 0.9, size: 1000 }], bids: [{ price: 0.7, size: 1000 }] }, DOWN: { asks: [{ price: 0.3, size: 1000 }], bids: [] } };
+  const raw = await sell(DEFAULT_FAIR_VALUE_CONFIG, mirror);
+  assert.equal(raw.status, 'sold', 'modèle seul : 0,70 > 0,50 + marge → revente');
+  assert.ok(raw.reads.every(id => id === 'UP'), 'sans mélange : le carnet DOWN n\'est jamais lu');
+  const trusting = { ...DEFAULT_FAIR_VALUE_CONFIG, blendModel: 0.05, blendMarket: 1 };
+  assert.equal((await sell(trusting, mirror)).status, 'open', 'carnet jugé informé (≈ 0,80) : vendre à 0,70 serait brader');
+  // Carnets NON miroirs (scénario de la revue) : spot sous le strike, mélange partiel.
+  // Milieu bid/ask du token UP = 0,61 ; formule d'entrée = (ask UP 0,62 + 1 − ask DOWN 0,30)/2 = 0,66.
+  const partial = { ...DEFAULT_FAIR_VALUE_CONFIG, blendModel: 0.5, blendMarket: 1 };
+  const pRaw = probUp({ spot: 99.956, strike: 100, sigmaPerSqrtSec: SIGMA, tauSec: 100 })!;
+  const netBid = 0.6 - DEFAULT_FAIR_VALUE_CONFIG.takerFeeRate * 0.6 * 0.4;
+  assert.ok(netBid > blendWithMarket(pRaw, 0.61, partial)! + 0.04, 'l\'ancienne formule aurait revendu');
+  assert.ok(netBid < blendWithMarket(pRaw, 0.66, partial)! + 0.04, 'la formule d\'entrée dit : garder');
+  const skew = { UP: { asks: [{ price: 0.62, size: 1000 }], bids: [{ price: 0.6, size: 1000 }] }, DOWN: { asks: [{ price: 0.3, size: 1000 }], bids: [] } };
+  const env = setup();
+  const r = env.runner();
+  await r.tick();
+  env.deps.cfg = partial;
+  env.deps.getRoundData = async () => ({ spot: 99.956, strike: 100, sigmaPerSqrtSec: SIGMA, source: 'test', candleAgeMs: 0 });
+  const reads: string[] = [];
+  env.deps.getBook = async id => { reads.push(id); return skew[id as 'UP' | 'DOWN']; };
+  env.setNow((SLOT + 200) * 1000);
+  await r.tick();
+  assert.equal(loadLedger(env.ledgerPath)![0].status, 'open', 'même probabilité qu\'à l\'entrée → pas de revente à 0,60');
+  assert.ok(reads.includes('DOWN'), 'mélange actif : l\'autre carnet est lu');
 });
 
 test('bestLevel : plus bas ask, plus haut bid ; niveaux vides ou hors ]0 ; 1[ ignorés', async () => {

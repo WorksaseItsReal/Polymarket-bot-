@@ -22,7 +22,7 @@ import {
 } from '../../src/analysis/historical-backtest.js';
 import { fetchKlinesRange, fetchPriceHistory, fetchRoundsMeta, mapLimit, type RoundMeta } from '../../src/analysis/historical-data.js';
 import {
-  applyBlend, byRound, calibration, describeBlend, fitBlend, fitZScale, halves, replay, thresholdGrid,
+  applyBlend, blendVerdict, byRound, calibration, describeBlend, fitBlend, fitZScale, halves, replay, thresholdGrid,
 } from '../../src/analysis/fv-analysis.js';
 
 function arg(name: string): string | undefined {
@@ -144,14 +144,18 @@ async function main() {
   }
   const rounds = byRound(recs);
   const fit = fitZScale(rounds);
+  const blend = fitBlend(rounds, { minTau: cfg.minTauSec, maxTau: cfg.maxTauSec });
   if (fit) {
     console.log(`   Calibration à un paramètre : multiplicateur ${fit.m} (IC95 ${fit.lo}–${fit.hi})`
-      + (fit.lo <= 1 && fit.hi >= 1 ? ' → compatible avec FV_Z_SCALE actuel' : ` → essayer FV_Z_SCALE=${Math.round(cfg.zScale * fit.m * 100) / 100}`));
+      + (fit.lo <= 1 && fit.hi >= 1
+        ? ' → compatible avec FV_Z_SCALE actuel'
+        : blendVerdict(blend, cfg) === 'apply'
+          ? ' → déjà incluse dans le mélange proposé en 3b (l\'un OU l\'autre, jamais les deux)'
+          : ` → essayer FV_Z_SCALE=${Math.round(cfg.zScale * fit.m * 100) / 100}`));
   }
 
   // C bis. Mélange modèle + marché
   console.log('\n3b) Mélange modèle + marché (les prix contiennent-ils une information que le modèle ignore ?)');
-  const blend = fitBlend(rounds, { minTau: cfg.minTauSec, maxTau: cfg.maxTauSec });
   for (const l of describeBlend(blend, cfg)) console.log(l);
   console.log('   ⚠️ Avec un dernier prix échangé périmé, le marché paraît moins informatif : le poids estimé du');
   console.log('   marché est alors SOUS-évalué. Confirmer sur le journal en direct (fv-report) avant de régler.');

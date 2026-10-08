@@ -307,7 +307,7 @@ test('fitBlend : retrouve le poids du carnet, et ne le valide que hors échantil
   assert.match(describeBlend(modelOnly, CFG).join('\n'), /garder le réglage actuel/);
 
   const marketKnows = fitBlend(world(0, 1))!;
-  assert.match(describeBlend(marketKnows, CFG).join('\n'), /AUCUN edge crédible/);
+  assert.match(describeBlend(marketKnows, CFG).join('\n'), /AUCUN edge démontré/);
 
   assert.equal(fitBlend(world(1, 0).slice(0, 40)), null, 'trop peu de rounds');
 
@@ -344,4 +344,26 @@ test('fitBlendParams : optimum exact, y compris contraint sur un bord (poids né
   assert.equal(f2.b, 0);
   isLocalMax(edge, f2.a, f2.b);
   assert.deepEqual(fitBlendParams([]), { a: 1, b: 0 }, 'aucune donnée : modèle seul');
+});
+
+test('verdict du mélange : carnet = vérité, modèle = copie bruitée et peu confiante → jamais « essayer »', async () => {
+  const { blendVerdict, byRound, describeBlend, fitBlend } = await import('../src/analysis/fv-analysis.ts');
+  const sig = (x: number) => 1 / (1 + Math.exp(-x));
+  for (const seed0 of [1, 2, 3, 4, 5]) {
+    let seed = seed0 * 7919;
+    const rnd = () => ((seed = (seed * 1103515245 + 12345) % 2 ** 31) / 2 ** 31);
+    const gauss = () => Math.sqrt(-2 * Math.log(rnd() + 1e-12)) * Math.cos(2 * Math.PI * rnd());
+    const recs = [];
+    for (let i = 0; i < 400; i++) {
+      const lk = Math.max(-3, Math.min(3, 1.2 * gauss())); // le carnet connaît la vraie probabilité
+      const lm = 0.4 * (lk + 0.8 * gauss()); // le modèle n'en sait pas plus (bruit, sous-confiance)
+      const pk = sig(lk);
+      recs.push({
+        t: i, slug: `s${i}`, coin: 'BTC', tau: 150, spot: 1, strike: 1, sig: 1, pUp: sig(lm),
+        upAsk: pk + 0.01, downAsk: 1 - pk + 0.01, upAskSz: null, downAskSz: null, src: 't', act: 'hold' as const, upWon: rnd() < pk,
+      });
+    }
+    const fit = fitBlend(byRound(recs));
+    assert.notEqual(blendVerdict(fit, { blendModel: 1, blendMarket: 0 }), 'apply', describeBlend(fit, { blendModel: 1, blendMarket: 0 }).join('\n'));
+  }
 });

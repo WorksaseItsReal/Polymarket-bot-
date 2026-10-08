@@ -403,6 +403,25 @@ export function applyBlend(rounds: ResolvedRecord[][], a: number, b: number): Re
   }));
 }
 
+export type BlendVerdict = 'insufficient' | 'noEdge' | 'keep' | 'apply' | 'current';
+
+/**
+ * Verdict sur un mélange estimé, jugé HORS ÉCHANTILLON :
+ *   - noEdge : même le meilleur mélange ne bat pas le carnet (t ≥ −2) → aucun edge démontré ;
+ *   - apply / current : il bat le carnet ET le modèle seul → à essayer (ou déjà en place) ;
+ *   - keep : il bat le carnet mais pas le modèle seul → garder le réglage actuel.
+ * (Pas de seuil sur le poids `a` : il dépend de l'échelle de confiance du modèle.)
+ */
+export function blendVerdict(fit: BlendFit | null, current: { blendModel: number; blendMarket: number }): BlendVerdict {
+  const o = fit?.oos;
+  if (!fit || !o) return 'insufficient';
+  if (o.tVsMarket === null || o.tVsMarket > -2) return 'noEdge';
+  if (o.tVsModel !== null && o.tVsModel < -2) {
+    return current.blendModel === fit.a && current.blendMarket === fit.b ? 'current' : 'apply';
+  }
+  return 'keep';
+}
+
 /** Lignes de rapport (FR) pour un mélange estimé ; partagées par les deux scripts. */
 export function describeBlend(fit: BlendFit | null, current: { blendModel: number; blendMarket: number }): string[] {
   const f4 = (x: number) => x.toFixed(4);
@@ -417,21 +436,22 @@ export function describeBlend(fit: BlendFit | null, current: { blendModel: numbe
   out.push(`   validation : estimé sur la 1re moitié (${o.a} / ${o.b}), mesuré sur la 2e (${o.rounds} rounds jamais vus)`);
   out.push(`     Brier  modèle ${f4(o.brierModel)} | carnet ${f4(o.brierMarket)} | mélange ${f4(o.brierBlend)}`
     + `   (t mélange−modèle ${f1(o.tVsModel)}, mélange−carnet ${f1(o.tVsMarket)})`);
-  const isCurrent = current.blendModel === fit.a && current.blendMarket === fit.b;
-  if (o.tVsModel !== null && o.tVsModel < -2) {
-    if (fit.a < 0.15) {
-      out.push('   → le modèle n\'ajoute presque rien au carnet : AUCUN edge crédible. Ne pas trader cette stratégie.');
-    } else {
-      out.push(isCurrent
-        ? '   → mélange validé hors échantillon, et c\'est déjà le réglage actuel.'
-        : `   → mélange validé hors échantillon : essayer FV_BLEND_MODEL=${fit.a} FV_BLEND_MARKET=${fit.b}`
-          + ` (actuel ${current.blendModel} / ${current.blendMarket}), puis re-mesurer.`
-          + '\n     Un seul réglage à la fois : ce mélange corrige déjà la confiance du modèle (ne pas changer'
-          + ' FV_Z_SCALE en même temps, les deux corrections s\'additionneraient).');
-    }
-  } else {
-    out.push('   → pas d\'amélioration significative hors échantillon (t ≥ −2) : garder le réglage actuel'
-      + ` (${current.blendModel} / ${current.blendMarket}).`);
+  switch (blendVerdict(fit, current)) {
+    case 'noEdge':
+      out.push('   → hors échantillon, même le meilleur mélange ne bat pas le carnet (t ≥ −2) : AUCUN edge démontré.'
+        + '\n     Ne pas régler le mélange pour « trouver » un edge, et ne pas passer en réel.');
+      break;
+    case 'current':
+      out.push('   → mélange validé hors échantillon, et c\'est déjà le réglage actuel.');
+      break;
+    case 'apply':
+      out.push(`   → mélange validé hors échantillon (bat le modèle seul ET le carnet) : essayer FV_BLEND_MODEL=${fit.a}`
+        + ` FV_BLEND_MARKET=${fit.b} (actuel ${current.blendModel} / ${current.blendMarket}), puis re-mesurer.`
+        + '\n     Il corrige déjà la confiance du modèle : ne PAS changer FV_Z_SCALE en même temps.');
+      break;
+    default:
+      out.push('   → pas d\'amélioration significative sur le modèle seul hors échantillon : garder le réglage actuel'
+        + ` (${current.blendModel} / ${current.blendMarket}).`);
   }
   return out;
 }

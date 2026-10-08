@@ -20,6 +20,7 @@ import {
   binaryPayoff,
   decide,
   blendWithMarket,
+  bookMidUp,
   estimateFill,
   estimateSell,
   maxBuyPriceForEdge,
@@ -336,13 +337,21 @@ export class FairValueRunner {
         const pUp = data ? probUp({ ...data, tauSec }, cfg) : null;
         if (pUp === null) continue;
         const book = await this.d.getBook(pos.tokenId);
-        // Même probabilité qu'à l'entrée : mélange éventuel avec le prix du marché du côté
-        // détenu (milieu bid/ask de son token).
-        const bid = bestLevel(book.bids, 'bid');
-        const ask = bestLevel(book.asks, 'ask');
-        const midHeld = bid && ask && ask.price < 1 ? (bid.price + ask.price) / 2 : null;
-        const pHeld = blendWithMarket(pos.side === 'UP' ? pUp : 1 - pUp, midHeld, cfg);
-        if (pHeld === null) continue;
+        // Même probabilité qu'à l'entrée, même formule : avec un mélange actif, prix du
+        // carnet = milieu entre l'ask Up et 1 − l'ask Down (il faut donc l'autre carnet,
+        // lu seulement dans ce cas : sans mélange, aucun appel de plus).
+        let marketUp: number | null = null;
+        if ((cfg.blendMarket ?? 0) !== 0) {
+          const m = this.markets.find(x => x.slug === pos.slug);
+          const otherId = m ? (pos.side === 'UP' ? m.downTokenId : m.upTokenId) : null;
+          if (!otherId) continue; // round introuvable : on garde la position
+          const heldAsk = bestLevel(book.asks, 'ask')?.price ?? null;
+          const otherAsk = bestLevel((await this.d.getBook(otherId)).asks, 'ask')?.price ?? null;
+          marketUp = pos.side === 'UP' ? bookMidUp(heldAsk, otherAsk) : bookMidUp(otherAsk, heldAsk);
+        }
+        const pUsed = blendWithMarket(pUp, marketUp, cfg);
+        if (pUsed === null) continue;
+        const pHeld = pos.side === 'UP' ? pUsed : 1 - pUsed;
         const floor = pHeld + this.d.exitEdge; // prix net minimal de l'ordre de vente
         const sale = estimateSell(book.bids, pos.shares, cfg.takerFeeRate, floor);
         if (sale.complete) candidates.push({ pos, floor, pHeld });
@@ -458,7 +467,9 @@ export class FairValueRunner {
         const stakeRes = computeStake({
           capital: equity,
           entryPrice: q.cost,
-          // Probabilité du MODÈLE, shrinkée de moitié vers le prix par computeStake (λ = 0,5).
+          // Probabilité de décision (modèle, ou mélange modèle/carnet s'il est configuré), shrinkée
+          // de moitié vers le prix par computeStake (λ = 0,5) — prudence voulue, même si elle se cumule
+          // avec le mélange.
           bookProb: q.prob,
           consecutiveLosses: recentLossStreak(readLedgerShared(this.d.ledgerPath) ?? [], now, LOSS_STREAK_WINDOW_MS),
           drawdownCurrent: peakCapital > 0 ? stats.drawdownNow / peakCapital : 0,
