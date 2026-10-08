@@ -8,7 +8,9 @@
  *   - Binance klines (fetch) : bougies 1 min cohérentes avec ce spot ;
  *   - Gamma events?slug= (fetch) : rounds <coin>-updown-5m-<slot>, réglés 10 s après la fin ;
  *   - CLOB /book (axios, utilisé par le client Polymarket) : juste valeur d'un spot vu avec
- *     FAKE_BOOK_LAG_SEC (défaut 30) secondes de retard, ±1 ct, profondeur 200 parts.
+ *     FAKE_BOOK_LAG_SEC (défaut 30) secondes de retard, ±1 ct, profondeur 200 parts ;
+ *   - Telegram (fetch) : getMe/getChat/sendMessage ; messages écrits dans FAKE_TELEGRAM_LOG,
+ *     HTML refusé (400) s'il est invalide, comme le vrai.
  * Tout le reste répond 404.
  */
 import axios from 'axios';
@@ -77,8 +79,37 @@ function gammaEvent(slug: string) {
   };
 }
 
-globalThis.fetch = (async (input: string | URL | Request) => {
+// Faux Telegram : messages enregistrés (une ligne JSON par envoi) dans FAKE_TELEGRAM_LOG ;
+// le HTML est vérifié comme le ferait Telegram (balises autorisées, bien fermées).
+const TG_LOG = process.env.FAKE_TELEGRAM_LOG;
+const TG_TAGS = new Set(['b', 'i', 'u', 's', 'code', 'pre', 'a']);
+function htmlProblem(text: string): string | null {
+  const stack: string[] = [];
+  for (const m of text.matchAll(/<(\/?)([a-zA-Z]+)[^>]*>/g)) {
+    const tag = m[2].toLowerCase();
+    if (!TG_TAGS.has(tag)) return `balise non supportée <${tag}>`;
+    if (m[1]) { if (stack.pop() !== tag) return `balise </${tag}> mal fermée`; } else stack.push(tag);
+  }
+  if (stack.length) return `balise <${stack[stack.length - 1]}> non fermée`;
+  if (/&(?!(amp|lt|gt|quot);)/.test(text)) return 'entité & non échappée';
+  return null;
+}
+
+globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
   const url = String(input instanceof Request ? input.url : input);
+  if (url.startsWith('https://api.telegram.org/bot')) {
+    const method = url.split('/').pop();
+    if (method === 'getMe') return json({ ok: true, result: { id: 1, is_bot: true, username: 'faux_bot' } });
+    if (method === 'getChat') return json({ ok: true, result: { id: 42, type: 'private' } });
+    if (method === 'sendMessage') {
+      const body = JSON.parse(String(init?.body ?? '{}')) as { text?: string; parse_mode?: string };
+      const problem = body.parse_mode === 'HTML' ? htmlProblem(body.text ?? '') : null;
+      if (TG_LOG) (await import('node:fs')).appendFileSync(TG_LOG, JSON.stringify({ text: body.text, html: body.parse_mode === 'HTML', problem }) + '\n');
+      if (problem) return json({ ok: false, error_code: 400, description: `Bad Request: can't parse entities: ${problem}` }, 400);
+      return json({ ok: true, result: { message_id: 1 } });
+    }
+    return json({ ok: false, error_code: 404, description: 'Not Found' }, 404);
+  }
   if (url.includes('gamma-api.polymarket.com/events')) {
     const slugs = [...url.matchAll(/slug=([^&]+)/g)].map(x => decodeURIComponent(x[1]));
     return json(slugs.map(gammaEvent).filter(Boolean));

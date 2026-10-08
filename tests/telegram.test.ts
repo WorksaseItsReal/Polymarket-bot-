@@ -289,3 +289,12 @@ test('critères avant le réel : en attente, remplis, ou échoués — jamais de
   assert.match(goLiveLine(overconf, { n: 2000, brierModel: 0.2, brierMarket: 0.21, tDiff: -2.5 }), /calibration ❌ \(50 % pour 68 % annoncés\)/);
   assert.match(msgSummary(good, 250), /Avant le réel/);
 });
+
+test('accords : « 1 trade », « 2 trades » (bilan et fiabilité)', async () => {
+  const { plural } = await import('../src/services/telegram-messages.ts');
+  assert.equal(plural(0, 'trade'), '0 trade');
+  assert.equal(plural(1, 'trade'), '1 trade');
+  assert.equal(plural(2, 'trade'), '2 trades');
+  assert.match(msgSummary(stats([-0.8]), 250), /1 trade ·/);
+  assert.match(reliability({ n: 1, tStat: null }), /\(1 trade, il en faut/);
+});

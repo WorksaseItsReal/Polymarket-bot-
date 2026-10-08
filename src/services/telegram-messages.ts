@@ -65,8 +65,13 @@ export function duration(sec: number): string {
 const SIDE_LABEL: Record<'UP' | 'DOWN', string> = { UP: '⬆️ HAUSSE', DOWN: '⬇️ BAISSE' };
 
 /** Verdict statistique honnête du PnL. */
+/** « 0 trade », « 1 trade », « 2 trades » (règle française : pluriel à partir de 2). */
+export function plural(n: number, word: string): string {
+  return `${n} ${word}${Math.abs(n) >= 2 ? 's' : ''}`;
+}
+
 export function reliability(stats: Pick<LedgerStats, 'n' | 'tStat'>): string {
-  if (stats.n < 30 || stats.tStat === null) return `trop tôt pour conclure (${stats.n} trades, il en faut ≥ 200)`;
+  if (stats.n < 30 || stats.tStat === null) return `trop tôt pour conclure (${plural(stats.n, 'trade')}, il en faut ≥ 200)`;
   const t = stats.tStat.toFixed(1).replace('.', ',');
   if (stats.tStat >= 2 && stats.n >= 200) return `t = ${t} → gain statistiquement significatif ✅`;
   if (stats.tStat <= -2) return `t = ${t} → perte statistiquement significative ⚠️`;
@@ -75,7 +80,7 @@ export function reliability(stats: Pick<LedgerStats, 'n' | 'tStat'>): string {
 
 function balanceLine(stats: LedgerStats): string {
   const wr = stats.winRate === null ? '—' : pct(stats.winRate);
-  return `${stats.n} trades · ${stats.wins} ✅ / ${stats.losses} ❌ (${wr}) · PnL ${money(stats.pnl)}`;
+  return `${plural(stats.n, 'trade')} · ${stats.wins} ✅ / ${stats.losses} ❌ (${wr}) · PnL ${money(stats.pnl)}`;
 }
 
 export interface StartupInfo {

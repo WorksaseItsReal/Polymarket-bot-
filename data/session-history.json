@@ -1,6 +1,596 @@
 {
   "sessions": [
     {
+      "id": "session-1791451557680",
+      "startTime": "2026-10-08T09:25:57.680Z",
+      "endTime": "2026-10-08T09:37:11.900Z",
+      "durationMs": 674220,
+      "totalPnL": 12.308051417888608,
+      "startingBalance": 0,
+      "endingBalance": 0,
+      "totalTrades": 3,
+      "wins": 2,
+      "losses": 1,
+      "winRate": 66.66666666666666,
+      "avgProfitPerTrade": 4.10268380596287,
+      "largestWin": 10.50495627127198,
+      "largestLoss": -0.8203501042129062,
+      "strategyStats": {
+        "smartMoney": {
+          "trades": 0,
+          "profit": 0
+        },
+        "arbitrage": {
+          "trades": 0,
+          "profit": 0
+        },
+        "dipArb": {
+          "trades": 0,
+          "profit": 0
+        },
+        "direct": {
+          "trades": 0,
+          "profit": 0
+        }
+      },
+      "walletPerformance": [],
+      "onChainOps": {
+        "splits": 0,
+        "merges": 0,
+        "redeems": 0,
+        "swaps": 0
+      },
+      "trades": [
+        {
+          "id": "0x0000000000000000000000000000000000000000000000000000179145150004",
+          "timestamp": "2026-10-08T09:28:26.380Z",
+          "strategy": "fairValue",
+          "market": "doge-updown-5m-1791451500",
+          "side": "BUY",
+          "size": 10,
+          "price": 0.5474370000000001,
+          "profit": -0.8203501042129062
+        },
+        {
+          "id": "0x0000000000000000000000000000000000000000000000000000179145150001",
+          "timestamp": "2026-10-08T09:31:26.200Z",
+          "strategy": "fairValue",
+          "market": "eth-updown-5m-1791451500",
+          "side": "BUY",
+          "size": 9.99,
+          "price": 0.48743699999999995,
+          "profit": 10.50495627127198
+        },
+        {
+          "id": "0x0000000000000000000000000000000000000000000000000000179145150003",
+          "timestamp": "2026-10-08T09:31:26.200Z",
+          "strategy": "fairValue",
+          "market": "xrp-updown-5m-1791451500",
+          "side": "BUY",
+          "size": 9.99,
+          "price": 0.7920119999999999,
+          "profit": 2.6234452508295334
+        }
+      ],
+      "dryRun": true,
+      "strategies": {
+        "smartMoney": false,
+        "arbitrage": false,
+        "dipArb": false,
+        "direct": false
+      }
+    },
+    {
+      "id": "session-1791451556000",
+      "startTime": "2026-10-08T09:25:56.000Z",
+      "endTime": "2026-10-08T09:37:13.640Z",
+      "durationMs": 677640,
+      "totalPnL": 15.903641813357696,
+      "startingBalance": 0,
+      "endingBalance": 0,
+      "totalTrades": 4,
+      "wins": 3,
+      "losses": 1,
+      "winRate": 75,
+      "avgProfitPerTrade": 3.975910453339424,
+      "largestWin": 8.324810727079097,
+      "largestLoss": -0.8041974351798018,
+      "strategyStats": {
+        "smartMoney": {
+          "trades": 0,
+          "profit": 0
+        },
+        "arbitrage": {
+          "trades": 0,
+          "profit": 0
+        },
+        "dipArb": {
+          "trades": 0,
+          "profit": 0
+        },
+        "direct": {
+          "trades": 0,
+          "profit": 0
+        }
+      },
+      "walletPerformance": [],
+      "onChainOps": {
+        "splits": 0,
+        "merges": 0,
+        "redeems": 0,
+        "swaps": 0
+      },
+      "trades": [
+        {
+          "id": "0x0000000000000000000000000000000000000000000000000000179145150004",
+          "timestamp": "2026-10-08T09:28:22.360Z",
+          "strategy": "fairValue",
+          "market": "doge-updown-5m-1791451500",
+          "side": "BUY",
+          "size": 10,
+          "price": 0.557388,
+          "profit": -0.8041974351798018
+        },
+        {
+          "id": "0x0000000000000000000000000000000000000000000000000000179145150001",
+          "timestamp": "2026-10-08T09:31:22.200Z",
+          "strategy": "fairValue",
+          "market": "eth-updown-5m-1791451500",
+          "side": "BUY",
+          "size": 9.99,
+          "price": 0.597052,
+          "profit": 6.742210929701264
+        },
+        {
+          "id": "0x0000000000000000000000000000000000000000000000000000179145150003",
+          "timestamp": "2026-10-08T09:31:22.200Z",
+          "strategy": "fairValue",
+          "market": "xrp-updown-5m-1791451500",
+          "side": "BUY",
+          "size": 9.99,
+          "price": 0.858925,
+          "profit": 1.6408175917571377
+        },
+        {
+          "id": "0x0000000000000000000000000000000000000000000000000000179145180002",
+          "timestamp": "2026-10-08T09:36:22.220Z",
+          "strategy": "fairValue",
+          "market": "sol-updown-5m-1791451800",
+          "side": "BUY",
+          "size": 10.07,
+          "price": 0.5474370000000001,
+          "profit": 8.324810727079097
+        }
+      ],
+      "dryRun": true,
+      "strategies": {
+        "smartMoney": false,
+        "arbitrage": false,
+        "dipArb": false,
+        "direct": false
+      }
+    },
+    {
+      "id": "session-1791451564720",
+      "startTime": "2026-10-08T09:26:04.720Z",
+      "endTime": "2026-10-08T09:37:03.800Z",
+      "durationMs": 659080,
+      "totalPnL": 34.62752948329567,
+      "startingBalance": 0,
+      "endingBalance": 0,
+      "totalTrades": 6,
+      "wins": 6,
+      "losses": 0,
+      "winRate": 100,
+      "avgProfitPerTrade": 5.771254913882611,
+      "largestWin": 9.047173516994539,
+      "largestLoss": 0,
+      "strategyStats": {
+        "smartMoney": {
+          "trades": 0,
+          "profit": 0
+        },
+        "arbitrage": {
+          "trades": 0,
+          "profit": 0
+        },
+        "dipArb": {
+          "trades": 0,
+          "profit": 0
+        },
+        "direct": {
+          "trades": 0,
+          "profit": 0
+        }
+      },
+      "walletPerformance": [],
+      "onChainOps": {
+        "splits": 0,
+        "merges": 0,
+        "redeems": 0,
+        "swaps": 0
+      },
+      "trades": [
+        {
+          "id": "0x0000000000000000000000000000000000000000000000000000179145150001",
+          "timestamp": "2026-10-08T09:31:50.360Z",
+          "strategy": "fairValue",
+          "market": "eth-updown-5m-1791451500",
+          "side": "BUY",
+          "size": 10,
+          "price": 0.527493,
+          "profit": 8.95759754157875
+        },
+        {
+          "id": "0x0000000000000000000000000000000000000000000000000000179145150004",
+          "timestamp": "2026-10-08T09:31:50.360Z",
+          "strategy": "fairValue",
+          "market": "doge-updown-5m-1791451500",
+          "side": "BUY",
+          "size": 10,
+          "price": 0.8494079999999999,
+          "profit": 1.7729053646775181
+        },
+        {
+          "id": "0x0000000000000000000000000000000000000000000000000000179145180004",
+          "timestamp": "2026-10-08T09:36:50.380Z",
+          "strategy": "fairValue",
+          "market": "doge-updown-5m-1791451800",
+          "side": "BUY",
+          "size": 10.1,
+          "price": 0.527493,
+          "profit": 9.047173516994539
+        },
+        {
+          "id": "0x0000000000000000000000000000000000000000000000000000179145180000",
+          "timestamp": "2026-10-08T09:36:50.380Z",
+          "strategy": "fairValue",
+          "market": "btc-updown-5m-1791451800",
+          "side": "BUY",
+          "size": 10.1,
+          "price": 0.567325,
+          "profit": 7.702846692812761
+        },
+        {
+          "id": "0x0000000000000000000000000000000000000000000000000000179145180001",
+          "timestamp": "2026-10-08T09:36:50.380Z",
+          "strategy": "fairValue",
+          "market": "eth-updown-5m-1791451800",
+          "side": "BUY",
+          "size": 10.1,
+          "price": 0.7244130000000001,
+          "profit": 3.8423229566559396
+        },
+        {
+          "id": "0x0000000000000000000000000000000000000000000000000000179145180002",
+          "timestamp": "2026-10-08T09:36:50.380Z",
+          "strategy": "fairValue",
+          "market": "sol-updown-5m-1791451800",
+          "side": "BUY",
+          "size": 10.1,
+          "price": 0.753468,
+          "profit": 3.304683410576162
+        }
+      ],
+      "dryRun": true,
+      "strategies": {
+        "smartMoney": false,
+        "arbitrage": false,
+        "dipArb": false,
+        "direct": false
+      }
+    },
+    {
+      "id": "session-1791451253240",
+      "startTime": "2026-10-08T09:20:53.240Z",
+      "endTime": "2026-10-08T10:20:35.200Z",
+      "durationMs": 3581960,
+      "totalPnL": 67.28658709565595,
+      "startingBalance": 0,
+      "endingBalance": 0,
+      "totalTrades": 27,
+      "wins": 20,
+      "losses": 6,
+      "winRate": 76.92307692307693,
+      "avgProfitPerTrade": 2.587945657525229,
+      "largestWin": 26.094493669770994,
+      "largestLoss": -10.72,
+      "strategyStats": {
+        "smartMoney": {
+          "trades": 0,
+          "profit": 0
+        },
+        "arbitrage": {
+          "trades": 0,
+          "profit": 0
+        },
+        "dipArb": {
+          "trades": 0,
+          "profit": 0
+        },
+        "direct": {
+          "trades": 0,
+          "profit": 0
+        }
+      },
+      "walletPerformance": [],
+      "onChainOps": {
+        "splits": 0,
+        "merges": 0,
+        "redeems": 0,
+        "swaps": 0
+      },
+      "trades": [
+        {
+          "id": "0x0000000000000000000000000000000000000000000000000000179145120004",
+          "timestamp": "2026-10-08T09:23:18.880Z",
+          "strategy": "fairValue",
+          "market": "doge-updown-5m-1791451200",
+          "side": "BUY",
+          "size": 10,
+          "price": 0.507493,
+          "profit": 0.4962038885265425
+        },
+        {
+          "id": "0x0000000000000000000000000000000000000000000000000000179145120001",
+          "timestamp": "2026-10-08T09:26:18.820Z",
+          "strategy": "fairValue",
+          "market": "eth-updown-5m-1791451200",
+          "side": "BUY",
+          "size": 10,
+          "price": 0.6167999999999999,
+          "profit": 6.212710765239951
+        },
+        {
+          "id": "0x0000000000000000000000000000000000000000000000000000179145150001",
+          "timestamp": "2026-10-08T09:31:18.840Z",
+          "strategy": "fairValue",
+          "market": "eth-updown-5m-1791451500",
+          "side": "BUY",
+          "size": 10.06,
+          "price": 0.527493,
+          "profit": 9.011343126828224
+        },
+        {
+          "id": "0x0000000000000000000000000000000000000000000000000000179145150002",
+          "timestamp": "2026-10-08T09:31:18.840Z",
+          "strategy": "fairValue",
+          "market": "sol-updown-5m-1791451500",
+          "side": "BUY",
+          "size": 10.06,
+          "price": 0.537472,
+          "profit": 8.657254108120982
+        },
+        {
+          "id": "0x0000000000000000000000000000000000000000000000000000179145150003",
+          "timestamp": "2026-10-08T09:31:18.840Z",
+          "strategy": "fairValue",
+          "market": "xrp-updown-5m-1791451500",
+          "side": "BUY",
+          "size": 10.06,
+          "price": 0.830332,
+          "profit": 2.0556356734414667
+        },
+        {
+          "id": "0x0000000000000000000000000000000000000000000000000000179145180004",
+          "timestamp": "2026-10-08T09:36:18.860Z",
+          "strategy": "fairValue",
+          "market": "doge-updown-5m-1791451800",
+          "side": "BUY",
+          "size": 10.26,
+          "price": 0.263125,
+          "profit": -10.26
+        },
+        {
+          "id": "0x0000000000000000000000000000000000000000000000000000179145210000",
+          "timestamp": "2026-10-08T09:41:18.860Z",
+          "strategy": "fairValue",
+          "market": "btc-updown-5m-1791452100",
+          "side": "BUY",
+          "size": 10.16,
+          "price": 0.8398769999999999,
+          "profit": 1.9370094430494014
+        },
+        {
+          "id": "0x0000000000000000000000000000000000000000000000000000179145210001",
+          "timestamp": "2026-10-08T09:41:18.860Z",
+          "strategy": "fairValue",
+          "market": "eth-updown-5m-1791452100",
+          "side": "BUY",
+          "size": 10.16,
+          "price": 0.772768,
+          "profit": 2.9875423412977753
+        },
+        {
+          "id": "0x0000000000000000000000000000000000000000000000000000179145240003",
+          "timestamp": "2026-10-08T09:46:18.860Z",
+          "strategy": "fairValue",
+          "market": "xrp-updown-5m-1791452400",
+          "side": "BUY",
+          "size": 10.21,
+          "price": 0.6561279999999999,
+          "profit": 5.350988099882951
+        },
+        {
+          "id": "0x0000000000000000000000000000000000000000000000000000179145270001",
+          "timestamp": "2026-10-08T09:51:18.900Z",
+          "strategy": "fairValue",
+          "market": "eth-updown-5m-1791452700",
+          "side": "BUY",
+          "size": 10.26,
+          "price": 0.839877,
+          "profit": 1.9560744966227208
+        },
+        {
+          "id": "0x0000000000000000000000000000000000000000000000000000179145270004",
+          "timestamp": "2026-10-08T09:51:18.900Z",
+          "strategy": "fairValue",
+          "market": "doge-updown-5m-1791452700",
+          "side": "BUY",
+          "size": 10.26,
+          "price": 0.606933,
+          "profit": 6.644666577694737
+        },
+        {
+          "id": "0x0000000000000000000000000000000000000000000000000000179145300000",
+          "timestamp": "2026-10-08T09:53:19.260Z",
+          "strategy": "fairValue",
+          "market": "btc-updown-5m-1791453000",
+          "side": "BUY",
+          "size": 10.35,
+          "price": 0.6757080000000001,
+          "profit": -3.2653350263723393
+        },
+        {
+          "id": "0x0000000000000000000000000000000000000000000000000000179145300001",
+          "timestamp": "2026-10-08T09:56:18.980Z",
+          "strategy": "fairValue",
+          "market": "eth-updown-5m-1791453000",
+          "side": "BUY",
+          "size": 10.35,
+          "price": 0.8112,
+          "profit": 2.4088757396449694
+        },
+        {
+          "id": "0x0000000000000000000000000000000000000000000000000000179145330000",
+          "timestamp": "2026-10-08T10:01:19.000Z",
+          "strategy": "fairValue",
+          "market": "btc-updown-5m-1791453300",
+          "side": "BUY",
+          "size": 10.34,
+          "price": 0.685477,
+          "profit": 4.744386492909317
+        },
+        {
+          "id": "0x0000000000000000000000000000000000000000000000000000179145330002",
+          "timestamp": "2026-10-08T10:01:19.000Z",
+          "strategy": "fairValue",
+          "market": "sol-updown-5m-1791453300",
+          "side": "BUY",
+          "size": 10.34,
+          "price": 0.6952320000000001,
+          "profit": 4.532733130811009
+        },
+        {
+          "id": "0x0000000000000000000000000000000000000000000000000000179145330004",
+          "timestamp": "2026-10-08T10:01:19.000Z",
+          "strategy": "fairValue",
+          "market": "doge-updown-5m-1791453300",
+          "side": "BUY",
+          "size": 10.34,
+          "price": 0.283797,
+          "profit": 26.094493669770994
+        },
+        {
+          "id": "0x0000000000000000000000000000000000000000000000000000179145330003",
+          "timestamp": "2026-10-08T10:01:19.000Z",
+          "strategy": "fairValue",
+          "market": "xrp-updown-5m-1791453300",
+          "side": "BUY",
+          "size": 10.34,
+          "price": 0.782397,
+          "profit": 2.8757970953365106
+        },
+        {
+          "id": "0x0000000000000000000000000000000000000000000000000000179145360002",
+          "timestamp": "2026-10-08T10:06:19.000Z",
+          "strategy": "fairValue",
+          "market": "sol-updown-5m-1791453600",
+          "side": "BUY",
+          "size": 10.72,
+          "price": 0.685477,
+          "profit": -10.72
+        },
+        {
+          "id": "0x0000000000000000000000000000000000000000000000000000179145360004",
+          "timestamp": "2026-10-08T10:06:19.000Z",
+          "strategy": "fairValue",
+          "market": "doge-updown-5m-1791453600",
+          "side": "BUY",
+          "size": 10.72,
+          "price": 0.753468,
+          "profit": -10.72
+        },
+        {
+          "id": "0x0000000000000000000000000000000000000000000000000000179145360001",
+          "timestamp": "2026-10-08T10:06:19.000Z",
+          "strategy": "fairValue",
+          "market": "eth-updown-5m-1791453600",
+          "side": "BUY",
+          "size": 10.72,
+          "price": 0.5673250000000001,
+          "profit": 8.175694707619089
+        },
+        {
+          "id": "0x0000000000000000000000000000000000000000000000000000179145360003",
+          "timestamp": "2026-10-08T10:06:19.000Z",
+          "strategy": "fairValue",
+          "market": "xrp-updown-5m-1791453600",
+          "side": "BUY",
+          "size": 10.72,
+          "price": 0.5274930000000001,
+          "profit": 9.602544564572417
+        },
+        {
+          "id": "0x0000000000000000000000000000000000000000000000000000179145390002",
+          "timestamp": "2026-10-08T10:11:19.040Z",
+          "strategy": "fairValue",
+          "market": "sol-updown-5m-1791453900",
+          "side": "BUY",
+          "size": 10.68,
+          "price": 0.5772480000000001,
+          "profit": -10.68
+        },
+        {
+          "id": "0x0000000000000000000000000000000000000000000000000000179145420004",
+          "timestamp": "2026-10-08T10:13:19.200Z",
+          "strategy": "fairValue",
+          "market": "doge-updown-5m-1791454200",
+          "side": "BUY",
+          "size": 10.58,
+          "price": 0.782397,
+          "profit": -3.3768774164522615
+        },
+        {
+          "id": "0x0000000000000000000000000000000000000000000000000000179145420001",
+          "timestamp": "2026-10-08T10:16:19.040Z",
+          "strategy": "fairValue",
+          "market": "eth-updown-5m-1791454200",
+          "side": "BUY",
+          "size": 10.54,
+          "price": 0.467325,
+          "profit": 12.013897180762854
+        },
+        {
+          "id": "0x0000000000000000000000000000000000000000000000000000179145450002",
+          "timestamp": "2026-10-08T10:18:19.320Z",
+          "strategy": "fairValue",
+          "market": "sol-updown-5m-1791454500",
+          "side": "BUY",
+          "size": 10.66,
+          "price": 0.8207730000000001,
+          "profit": 0.12752678267925432
+        },
+        {
+          "id": "0x0000000000000000000000000000000000000000000000000000179145450003",
+          "timestamp": "2026-10-08T10:18:19.320Z",
+          "strategy": "fairValue",
+          "market": "xrp-updown-5m-1791454500",
+          "side": "BUY",
+          "size": 10.66,
+          "price": 0.8494079999999999,
+          "profit": 0.42342165366937934
+        }
+      ],
+      "dryRun": true,
+      "strategies": {
+        "smartMoney": false,
+        "arbitrage": false,
+        "dipArb": false,
+        "direct": false
+      }
+    },
+    {
       "id": "session-1791451254980",
       "startTime": "2026-10-08T09:20:54.980Z",
       "endTime": "2026-10-08T09:32:10.640Z",
@@ -391,8 +981,8 @@
       }
     }
   ],
-  "totalSessions": 4,
-  "totalProfit": 46.385990562147434,
-  "totalTrades": 19,
-  "overallWinRate": 84.21052631578947
+  "totalSessions": 8,
+  "totalProfit": 176.51180037234536,
+  "totalTrades": 59,
+  "overallWinRate": 79.66101694915254
 }
