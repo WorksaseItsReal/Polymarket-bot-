@@ -23,6 +23,10 @@ module.exports = {
     // Laisser au bot le temps d'écrire le journal et d'envoyer le message d'arrêt (≤ 5 s)
     // avant que PM2 ne le tue (défaut PM2 : 1,6 s).
     kill_timeout: 7000,
+    // Filet de sécurité : le bot tient en ~110 Mo (tas 14 Mo après GC, soak de 10 h simulées) ;
+    // au-delà de 400 Mo, quelque chose fuit → relance propre (SIGINT, registre intact) plutôt
+    // qu'un serveur qui s'asphyxie.
+    max_memory_restart: '400M',
     env: {
       NODE_ENV: 'production',
     },

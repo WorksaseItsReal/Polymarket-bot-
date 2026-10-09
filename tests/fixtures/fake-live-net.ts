@@ -46,15 +46,19 @@ function rng(seed: number) {
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
 }
-const paths = COINS.map((_, i) => ({ p: [100] as number[], r: rng(1000 + i) }));
+// Un prix par seconde simulée, en fenêtre glissante de 2 à 4 h (les bougies et le TWAP ne
+// regardent jamais plus d'une heure en arrière) : un soak de plusieurs heures simulées ne fait
+// pas grossir le faux réseau — sinon on mesurait SA mémoire en croyant mesurer celle du bot.
+const paths = COINS.map((_, i) => ({ p: [100] as number[], base: 0, r: rng(1000 + i) }));
 function spot(coin: string, tSec: number): number {
   const w = paths[COINS.indexOf(coin)];
   const idx = Math.max(0, Math.floor(tSec - T0));
-  while (w.p.length <= idx) {
+  while (w.base + w.p.length <= idx) {
     const g = Math.sqrt(-2 * Math.log(w.r() + 1e-12)) * Math.cos(2 * Math.PI * w.r());
     w.p.push(w.p[w.p.length - 1] * Math.exp(SIG * g));
+    if (w.p.length > 14_400) { w.p.splice(0, 7200); w.base += 7200; }
   }
-  return w.p[idx];
+  return w.p[Math.max(0, idx - w.base)];
 }
 
 /** Moyenne du spot sur les 60 s qui se terminent à `tSec` (règlement TWAP Chainlink). */

@@ -97,6 +97,42 @@ export function runtimeChecks(nodeVersion: string = process.versions.node): Chec
     : err('Node.js', `v${nodeVersion} : Node ≥ 20.6 requis (PM2 lance le bot par « node --import tsx »). Mettre Node à jour (22 LTS recommandé).`)];
 }
 
+/** Date de modification la plus récente sous `dir` (récursif, sans node_modules), 0 si absent. */
+function newestMtime(dir: string): number {
+  let newest = 0;
+  const walk = (d: string, depth: number) => {
+    if (depth > 6) return;
+    let entries: import('node:fs').Dirent[];
+    try { entries = readdirSync(d, { withFileTypes: true }); } catch { return; }
+    for (const e of entries) {
+      if (e.name === 'node_modules' || e.name.startsWith('.')) continue;
+      const p = join(d, e.name);
+      if (e.isDirectory()) walk(p, depth + 1);
+      else {
+        try { newest = Math.max(newest, statSync(p).mtimeMs); } catch { /* ignoré */ }
+      }
+    }
+  };
+  walk(dir, 0);
+  return newest;
+}
+
+/**
+ * Interface du dashboard : construite, et construite APRÈS la dernière modification de ses
+ * sources (oubli fréquent après un `git pull` : l'ancienne interface tourne sur le nouveau bot).
+ */
+export function dashboardBuildCheck(repoDir: string): Check {
+  const index = join(repoDir, 'dashboard', 'dist', 'index.html');
+  if (!existsSync(index)) return warn('Interface du dashboard', 'non construite : (cd dashboard && npm install && npm run build)');
+  let built = 0;
+  try { built = statSync(index).mtimeMs; } catch { /* ignoré */ }
+  const srcNewest = Math.max(newestMtime(join(repoDir, 'dashboard', 'src')), newestMtime(join(repoDir, 'dashboard', 'public')));
+  if (srcNewest && built && srcNewest > built + 1000) {
+    return warn('Interface du dashboard', `construite avant la dernière modification de ses sources (${new Date(srcNewest).toISOString().slice(0, 16)}) : (cd dashboard && npm run build)`);
+  }
+  return ok('Interface du dashboard', 'construite');
+}
+
 export function fileChecks(polyDir: string, repoDir: string, nowMs = Date.now()): Check[] {
   const out: Check[] = [];
   const ledgerPath = join(polyDir, 'fv-ledger.json');
@@ -114,9 +150,7 @@ export function fileChecks(polyDir: string, repoDir: string, nowMs = Date.now())
   out.push(crashes.last24h
     ? warn('Plantages', `${crashes.last24h} arrêt(s) anormal(aux) en 24 h, dernier il y a ${Math.round((nowMs - (crashes.lastAt as number)) / 60_000)} min : voir paperbot.error.log`)
     : ok('Plantages', 'aucun arrêt anormal en 24 h'));
-  out.push(existsSync(join(repoDir, 'dashboard', 'dist', 'index.html'))
-    ? ok('Interface du dashboard', 'construite')
-    : warn('Interface du dashboard', 'non construite : (cd dashboard && npm install && npm run build)'));
+  out.push(dashboardBuildCheck(repoDir));
   const jdir = join(polyDir, 'journal');
   if (existsSync(jdir)) {
     let bytes = 0;

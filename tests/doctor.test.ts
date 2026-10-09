@@ -4,10 +4,10 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { configChecks, fileChecks, networkChecks, runtimeChecks, summarize } from '../src/services/doctor.ts';
+import { configChecks, dashboardBuildCheck, fileChecks, networkChecks, runtimeChecks, summarize } from '../src/services/doctor.ts';
 
 const level = (cs: ReturnType<typeof configChecks>, label: string) => cs.find(c => c.label === label)?.level;
 
@@ -108,4 +108,20 @@ test('réglages : ancien règlement ponctuel et marge de bruit désactivée sign
   assert.equal(configChecks({ FV_NOISE_EDGE_K: '0' }).find(c => c.label === 'Marge de bruit')!.level, 'warn');
   assert.match(configChecks({ FV_NOISE_EDGE_K: '9' }).find(c => c.label === 'Réglages')!.detail, /FV_NOISE_EDGE_K=9/, 'hors bornes [0, 5]');
   assert.equal(configChecks({ FV_FILL_DELAY_MS: '0' }).find(c => c.label === 'Latence simulée')!.level, 'warn');
+});
+
+test('interface du dashboard : absente, périmée (sources plus récentes que la construction), à jour', () => {
+  const repo = mkdtempSync(join(tmpdir(), 'doctor-dash-'));
+  assert.equal(dashboardBuildCheck(repo).level, 'warn');
+  assert.match(dashboardBuildCheck(repo).detail, /non construite/);
+  mkdirSync(join(repo, 'dashboard', 'dist'), { recursive: true });
+  mkdirSync(join(repo, 'dashboard', 'src', 'components'), { recursive: true });
+  writeFileSync(join(repo, 'dashboard', 'dist', 'index.html'), '<html></html>');
+  writeFileSync(join(repo, 'dashboard', 'src', 'components', 'App.tsx'), 'export {}');
+  const old = Date.now() - 3_600_000;
+  utimesSync(join(repo, 'dashboard', 'dist', 'index.html'), old / 1000, old / 1000);
+  assert.match(dashboardBuildCheck(repo).detail, /construite avant la dernière modification de ses sources/);
+  assert.equal(dashboardBuildCheck(repo).level, 'warn');
+  utimesSync(join(repo, 'dashboard', 'dist', 'index.html'), Date.now() / 1000 + 5, Date.now() / 1000 + 5);
+  assert.equal(dashboardBuildCheck(repo).level, 'ok');
 });
