@@ -23,7 +23,9 @@ const K = Number(process.env.FAKE_TIME_SPEED ?? '20');
 const LAG = Number(process.env.FAKE_BOOK_LAG_SEC ?? '30');
 const RealDate = Date;
 const real0 = RealDate.now();
-const sim0 = Math.ceil(real0 / 300_000) * 300_000 + 40_000;
+// FAKE_SIM_START_MS / FAKE_T0_SEC : rejouer le MÊME marché dans un autre process (ex. lancer
+// fv-report après le bot : horloge placée après le dernier round, même chemin de prix).
+const sim0 = Number(process.env.FAKE_SIM_START_MS) || Math.ceil(real0 / 300_000) * 300_000 + 40_000;
 const simNow = () => sim0 + (RealDate.now() - real0) * K;
 class FakeDate extends RealDate {
   constructor(...a: unknown[]) {
@@ -36,7 +38,7 @@ class FakeDate extends RealDate {
 
 const COINS = ['btc', 'eth', 'sol', 'xrp', 'doge'];
 const SIG = 0.0006 / Math.sqrt(60);
-const T0 = Math.floor(sim0 / 1000) - 4000; // début des chemins (une heure d'historique)
+const T0 = Number(process.env.FAKE_T0_SEC) || Math.floor(sim0 / 1000) - 4000; // début des chemins (une heure d'historique)
 function rng(seed: number) {
   let a = seed >>> 0;
   return () => {

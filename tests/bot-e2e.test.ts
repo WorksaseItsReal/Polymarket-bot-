@@ -211,15 +211,19 @@ test('DRY_RUN=false : refus compté par le garde-fou de plantage et signalé sur
   assert.doesNotMatch(out, /NOUVEAU PARI|Dashboard : http/, 'rien ne démarre');
 });
 
-test('flux spot temps réel (faux WebSocket Binance) : santé « connecté », réactions aux sauts, mesures fin de round, arrêt propre', { timeout: 120_000 }, async () => {
+test('flux spot temps réel (faux WebSocket Binance) : santé « connecté », sauts, fin de round, arrêt propre, puis rapport d\'analyse sur ce journal', { timeout: 200_000 }, async () => {
   const home = mkdtempSync(join(tmpdir(), 'bot-e2e-stream-'));
   const tgLog = join(home, 'telegram.jsonl');
   const port = 30_000 + Math.floor(Math.random() * 20_000);
   const wsPort = port + 1;
+  // Horloge et chemin de prix fixés : le rapport, lancé ensuite, rejoue le MÊME marché.
+  const sim0 = Math.ceil(Date.now() / 300_000) * 300_000 + 40_000;
+  const t0 = Math.floor(sim0 / 1000) - 4000;
   const child = spawn(process.execPath, ['--import', 'tsx', '--import', './tests/fixtures/fake-live-net.ts', 'bot-with-dashboard.ts'], {
     env: {
       ...process.env, HOME: home, DOTENV_CONFIG_PATH: '/dev/null', DRY_RUN: 'true', PAPER_CAPITAL: '1000', FV_POLL_SEC: '5',
       FV_SPOT_STREAM: 'true', FAKE_SPOT_WS_PORT: String(wsPort), SPOT_STREAM_URL: `ws://127.0.0.1:${wsPort}/stream?streams=`,
+      FAKE_SIM_START_MS: String(sim0), FAKE_T0_SEC: String(t0),
       TELEGRAM_BOT_TOKEN: '123456789:' + 'A'.repeat(35), TELEGRAM_CHAT_ID: '42', FAKE_TELEGRAM_LOG: tgLog,
       DASHBOARD_PORT: String(port), POLYMARKET_PRIVATE_KEY: '', FAKE_TIME_SPEED: '20', FAKE_BOOK_LAG_SEC: '45',
     },
@@ -252,4 +256,22 @@ test('flux spot temps réel (faux WebSocket Binance) : santé « connecté », r
   const trades = existsSync(join(poly, 'fv-ledger.json')) ? (JSON.parse(readFileSync(join(poly, 'fv-ledger.json'), 'utf8')).trades as Array<{ openedAt: string; endMs: number }>) : [];
   for (const t of trades) assert.ok(t.endMs - Date.parse(t.openedAt) >= 60_000, 'aucun pari ouvert dans la dernière minute');
   assert.doesNotMatch(out, /TypeError|ReferenceError|Rejet de promesse non géré|Exception non rattrapée/, out.slice(-3000));
+
+  // Rapport d'analyse sur ce journal : horloge placée après le dernier round, même marché.
+  const lastT = Math.max(...lines.map(r => r.t as number));
+  const rep = spawn(process.execPath, ['--import', 'tsx', '--import', './tests/fixtures/fake-live-net.ts', 'scripts/analysis/fv-report.ts', '--days', '7'], {
+    env: { ...process.env, HOME: home, DOTENV_CONFIG_PATH: '/dev/null', FAKE_TIME_SPEED: '1', FAKE_SIM_START_MS: String(lastT + 900_000), FAKE_T0_SEC: String(t0) },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let report = '';
+  rep.stdout.on('data', d => { report += d; });
+  rep.stderr.on('data', d => { report += d; });
+  const repCode = await Promise.race([new Promise<number | null>(r => rep.on('exit', c => r(c))), sleep(90_000).then(() => 'timeout' as const)]);
+  if (repCode === 'timeout') rep.kill('SIGKILL');
+  assert.equal(repCode, 0, report.slice(-2000));
+  assert.match(report, /=== Journal : \d+ évaluations \(\+ \d+ mesures fin de round\), \d+ rounds, [1-9]\d* rounds réglés ===/, report.slice(0, 1500));
+  for (const section of [/^0\) Prix à battre/m, /^0b\) Prix à battre officiel en direct : présent/m, /^1\) Le modèle prédit-il/m, /^1c\) Volatilité/m, /^1d\) Fin de round/m, /^3\) Seuils rejoués/m]) {
+    assert.match(report, section, report.slice(0, 3000));
+  }
+  assert.doesNotMatch(report, /NaN|undefined|TypeError|ReferenceError/, report.slice(0, 3000));
 });
