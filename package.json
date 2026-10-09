@@ -22,6 +22,7 @@
     "typecheck": "tsc --noEmit -p . && tsc --noEmit --target ES2022 --module ESNext --moduleResolution bundler --strict --esModuleInterop --skipLibCheck --resolveJsonModule --downlevelIteration --allowImportingTsExtensions bot-with-dashboard.ts scripts/analysis/*.ts scripts/telegram/check.ts scripts/doctor.ts scripts/demo.ts tests/*.test.ts",
     "check": "npm run typecheck && npm run test:bot && npm test",
     "doctor": "tsx scripts/doctor.ts",
+    "upgrade": "bash scripts/update.sh",
     "demo": "tsx scripts/demo.ts",
     "test:watch": "vitest",
     "test:integration": "vitest run --config vitest.integration.config.ts",

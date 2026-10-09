@@ -36,6 +36,7 @@ import { noteStart, noteStop, type StartReport } from '../services/crash-guard.j
 import { fetchClobBook } from '../services/clob-book.js';
 import { MIN_SELL_SHARES, capitalWarning, dataPaths, loadBotConfig, type BotConfig } from './config.js';
 import { evaluateRisk, type RiskVerdict } from './risk-gate.js';
+import { answerCommand } from './telegram-commands.js';
 
 const ICONS: Record<string, string> = { INFO: '📋', WARN: '⚠️', ERROR: '❌', TRADE: '💰', SIGNAL: '🎯' };
 
@@ -109,6 +110,7 @@ export async function main(env: Record<string, string | undefined> = process.env
     // bilan de session en serait absent et son message partirait après « Bot arrêté ».
     if (pollTimer) clearInterval(pollTimer);
     scheduler?.stop();
+    telegram?.stopPolling();
     try { spotStream?.stop(); } catch { /* déjà arrêté */ }
     // Telegram pas (encore) connecté : arrêt compté mais pas « signalé » (le démarrage suivant le dira).
     const stop = crashStart ? noteStop(paths.runState, code !== 0, Date.now(), process.pid, telegram !== null) : { alert: true, recentCrashes: 0, nextGapMs: 0 };
@@ -213,7 +215,7 @@ export async function main(env: Record<string, string | undefined> = process.env
         lastEvaluations: [...lastEvals.values()],
       },
       health: {
-        spotStream: !spotStream ? 'disabled' : spotStream.isConnected() && config.coins.some(c => spotStream?.price(c)) ? 'live' : 'stale',
+        spotStream: spotStreamStatus(),
         clockSkewMs: spotStream?.clockSkewMs() ?? null,
         telegram: telegramStatus,
         lastFullPassAt: runnerRef?.lastFullPassAt ?? 0,
@@ -229,6 +231,10 @@ export async function main(env: Record<string, string | undefined> = process.env
     dashboardEmitter.updateState(state);
   }
   let runnerRef: FairValueRunner | null = null;
+  const spotStreamStatus = (): 'disabled' | 'live' | 'stale' =>
+    !spotStream ? 'disabled' : spotStream.isConnected() && config.coins.some(c => spotStream?.price(c)) ? 'live' : 'stale';
+  const freshRisk = (): RiskVerdict => evaluateRisk(config.capital, ledgerStats(), readLedgerShared(paths.ledger) ?? [], config.risk, Date.now());
+  const openPositions = (): LedgerTrade[] => (readLedgerShared(paths.ledger) ?? []).filter(t => t.status === 'open');
 
   // --- Porte de risque (registre) -------------------------------------------------------
   let riskLoggedAt = 0;
@@ -294,6 +300,28 @@ export async function main(env: Record<string, string | undefined> = process.env
     telegram = client;
     telegramStatus = 'connected';
     log('INFO', `📨 Telegram ${detail}`);
+    if (config.telegramCommands) {
+      // Commandes de l'opérateur (lecture seule) : /status, /bilan, /risque, /positions, /aide.
+      client.startPolling(msg => answerCommand(msg.text, {
+        status: () => {
+          const now = Date.now();
+          const risk = freshRisk();
+          return {
+            uptimeSec: (now - startTime) / 1000, capital: config.capital, stats: ledgerStats(), risk,
+            entryBlock: shuttingDown ? 'arrêt du bot en cours' : (clockBlock() ?? guard.current() ?? sessionStop),
+            positions: openPositions(),
+            lastFullPassAgoSec: runnerRef?.lastFullPassAt ? (now - runnerRef.lastFullPassAt) / 1000 : null,
+            lastMarketsFoundAgoSec: runnerRef?.lastMarketsFoundAt ? (now - runnerRef.lastMarketsFoundAt) / 1000 : null,
+            spotStream: spotStreamStatus(), consecutiveTickFailures: runnerRef?.consecutiveTickFailures ?? 0,
+            shadow: shadow?.stats(),
+          };
+        },
+        summary: () => ({ stats: ledgerStats(), capital: config.capital, shadow: shadow?.stats() }),
+        risk: () => ({ verdict: freshRisk(), limits: config.risk, capital: config.capital }),
+        positions: () => ({ positions: openPositions(), nowMs: Date.now(), timeZone: config.timeZone }),
+      }, client.chatType));
+      log('INFO', '💬 Commandes Telegram écoutées : /status /bilan /risque /positions /aide (TELEGRAM_COMMANDS=false pour couper)');
+    }
     if (crashStart && !crashStart.announce) {
       log('WARN', `Message de démarrage Telegram non envoyé : ${crashStart.recentCrashes} arrêts anormaux dans l'heure, alertes espacées.`);
     } else {

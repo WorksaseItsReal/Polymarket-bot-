@@ -11,6 +11,8 @@
 
 import type { LedgerStats } from './paper-ledger.js';
 import type { ShadowStats } from '../strategy/shadow-tracker.js';
+import type { RiskLimits } from '../bot/config.js';
+import type { RiskVerdict } from '../bot/risk-gate.js';
 
 export function escapeHtml(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -241,4 +243,92 @@ export function msgSummary(stats: LedgerStats, capital: number, shadow?: ShadowS
 
 export function msgAlert(text: string): string {
   return `⚠️ <b>ALERTE</b> — ${escapeHtml(text)}`;
+}
+
+// ─── Réponses aux commandes (/status, /risque, /positions, /aide) ─────────────────────
+
+export function msgHelp(): string {
+  return [
+    'ℹ️ <b>COMMANDES</b>',
+    '/status — état du bot : entrées, capital, positions, santé',
+    '/bilan — bilan des trades et fiabilité statistique',
+    '/risque — porte de risque : limites du jour, du mois, baisse, totale',
+    '/positions — paris en cours',
+    '/aide — cette liste',
+    'Bot papier : aucune commande ne passe d\'ordre réel ni ne change les réglages (.env).',
+  ].join('\n');
+}
+
+export interface PositionLike {
+  coin: string;
+  side: 'UP' | 'DOWN';
+  stake: number;
+  costPerShare: number;
+  shares: number;
+  modelProb: number;
+  endMs: number;
+}
+
+export interface StatusInfo {
+  uptimeSec: number;
+  capital: number;
+  stats: LedgerStats;
+  risk: RiskVerdict | null;
+  /** Blocage hors porte de risque (horloge, garde-fou de performance, arrêt en cours). */
+  entryBlock: string | null;
+  positions: PositionLike[];
+  lastFullPassAgoSec: number | null;
+  lastMarketsFoundAgoSec: number | null;
+  spotStream: 'disabled' | 'live' | 'stale';
+  consecutiveTickFailures: number;
+  shadow?: ShadowStats;
+}
+
+function ago(sec: number | null): string {
+  return sec === null ? 'jamais' : `il y a ${duration(sec)}`;
+}
+
+export function msgStatus(i: StatusInfo): string {
+  const blocked = i.risk && !i.risk.allowed ? i.risk.reason : i.entryBlock;
+  const pnl = i.stats.pnl;
+  return [
+    `🤖 <b>ÉTAT</b> — bot papier en marche depuis ${duration(i.uptimeSec)}`,
+    blocked ? `Entrées : ⏸️ bloquées — ${escapeHtml(blocked)}` : 'Entrées : ▶️ autorisées',
+    `Capital : ${amount(i.capital + pnl)} (départ ${amount(i.capital)}) · PnL ${money(pnl)}`
+      + (i.risk ? ` · jour ${money(i.risk.pnlToday)} · baisse ${pct(i.risk.drawdown, 1)}` : ''),
+    `Trades : ${balanceLine(i.stats)}`,
+    `Positions ouvertes : ${i.positions.length}${i.positions.length ? ` (exposition ${amount(i.positions.reduce((a, p) => a + p.stake, 0))})` : ''}`,
+    `Marchés : passage complet ${ago(i.lastFullPassAgoSec)} · rounds trouvés ${ago(i.lastMarketsFoundAgoSec)}`
+      + (i.consecutiveTickFailures ? ` · ⚠️ ${plural(i.consecutiveTickFailures, 'passage')} en échec d'affilée` : ''),
+    `Spot temps réel : ${i.spotStream === 'live' ? 'connecté' : i.spotStream === 'stale' ? '⚠️ figé (repli REST)' : 'désactivé (REST)'}`,
+    ...(i.shadow ? [shadowLine(i.shadow)] : []),
+    'Commandes : /bilan /risque /positions /aide',
+  ].join('\n');
+}
+
+export function msgRisk(v: RiskVerdict, limits: RiskLimits, capital: number): string {
+  const head = v.allowed
+    ? '🛡️ <b>PORTE DE RISQUE</b> — ▶️ entrées autorisées'
+    : `🛡️ <b>PORTE DE RISQUE</b> — ⏸️ ${escapeHtml(v.reason ?? 'entrées bloquées')}`;
+  return [
+    head,
+    `Perte du jour (UTC) : ${money(v.pnlToday)} / limite −${amount(capital * limits.dailyMaxLossPct)} (reprise à minuit UTC)`,
+    `Perte du mois (UTC) : ${money(v.pnlMonth)} / limite −${amount(capital * limits.monthlyMaxLossPct)} (reprise le 1er du mois)`,
+    `Baisse depuis le plus haut (${amount(v.peakCapital)}) : ${pct(v.drawdown, 1)} / limite ${pct(limits.maxDrawdownFromPeak)} (décision manuelle)`,
+    `Perte totale : ${money(Math.min(0, v.currentCapital - capital))} / limite −${amount(capital * limits.totalMaxLossPct)} (arrêt définitif)`,
+    'Les positions ouvertes restent suivies et réglées : seule l\'ouverture de nouveaux paris est bloquée.',
+  ].join('\n');
+}
+
+export function msgPositions(positions: PositionLike[], nowMs: number, timeZone?: string): string {
+  if (!positions.length) return '📂 Aucune position ouverte';
+  return [
+    `📂 <b>POSITIONS OUVERTES</b> (${positions.length}) · exposition ${amount(positions.reduce((a, p) => a + p.stake, 0))}`,
+    ...positions.map(p => {
+      const slotSec = Math.round(p.endMs / 1000) - 300;
+      const gain = p.shares - p.stake;
+      return `${escapeHtml(p.coin)} ${SIDE_LABEL[p.side]} · mise ${amount(p.stake)} à ${p.costPerShare.toFixed(3).replace('.', ',')} $/part · modèle ${pct(p.modelProb)}`
+        + ` · round ${roundWindow(slotSec, timeZone)} · fin dans ${duration((p.endMs - nowMs) / 1000)} · si gagné ${money(gain)}`;
+    }),
+  ].join('\n');
 }

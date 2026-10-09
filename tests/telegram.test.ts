@@ -308,3 +308,61 @@ test('accords : « 1 trade », « 2 trades » (bilan et fiabilité)', async () =
   assert.match(msgStartup({ capital: 250, minEdge: 0.04, minProb: 0.6, feeRate: 0.07, pollSec: 10, coins: ['BTC'], stats: stats([-0.8]) }), /Historique : 1 trade · 0 ✅ \/ 1 ❌/);
   assert.match(reliability({ n: 1, tStat: null }), /\(1 trade, il en faut/);
 });
+
+test('commandes (getUpdates) : seul le chat configuré est servi, commande périmée ignorée, offset avancé, conflit 409 signalé une fois, arrêt', async () => {
+  const logs: string[] = [];
+  const handled: string[] = [];
+  const nowSec = Math.floor(Date.now() / 1000);
+  const upd = (id: number, chat: number, text: string, date = nowSec) => ({ update_id: id, message: { message_id: id, date, text, chat: { id: chat, type: 'private' }, from: { username: 'op' } } });
+  let c: TelegramClient | null = null;
+  const fake = fakeTelegram((method, body, n) => {
+    if (method === 'sendMessage') return ok({ message_id: n });
+    assert.equal(method, 'getUpdates');
+    const polls = fake.calls.filter(x => x.method === 'getUpdates').length;
+    if (polls === 1) {
+      assert.equal(body.offset, 0);
+      assert.equal(body.timeout, 20);
+      return ok([upd(10, 99, '/status'), upd(11, 42, '/status', nowSec - 3600), upd(12, 42, '/risque'), { update_id: 13 }]);
+    }
+    if (polls === 2) { assert.equal(body.offset, 14, 'offset = dernier update_id + 1'); return fail(409, 'Conflict: terminated by other getUpdates request'); }
+    if (polls === 3) return fail(409, 'Conflict');
+    c!.stopPolling();
+    return ok([]);
+  });
+  c = client(fake.fetchImpl, logs);
+  c.startPolling(msg => { handled.push(`${msg.chatId}:${msg.text}:${msg.from}`); return `réponse à ${msg.text}`; });
+  assert.ok(c.isPolling);
+  for (let i = 0; i < 200 && c.isPolling; i++) await new Promise(r => setTimeout(r, 5));
+  assert.equal(c.isPolling, false, 'boucle arrêtée');
+  assert.deepEqual(handled, ['42:/risque:op'], 'autre chat ignoré, commande d\'il y a 1 h ignorée');
+  await c.flush();
+  const sent = fake.calls.filter(x => x.method === 'sendMessage').map(x => x.body.text);
+  assert.deepEqual(sent, ['réponse à /risque']);
+  assert.equal(logs.filter(l => /autre chat \(99\) ignoré/.test(l)).length, 1);
+  assert.equal(logs.filter(l => /conflit 409/.test(l)).length, 1, 'signalé une seule fois');
+  assert.equal(c.stats.commands, 1);
+  assert.ok(!logs.some(l => l.includes(TOKEN)), 'token jamais dans les logs');
+});
+
+test('commandes : erreur réseau → nouvel essai après attente, erreur du handler → message d\'excuse, 401 → arrêt', async () => {
+  const logs: string[] = [];
+  const sleeps: number[] = [];
+  let c: TelegramClient | null = null;
+  const fake = fakeTelegram((method) => {
+    if (method === 'sendMessage') return ok({});
+    const polls = fake.calls.filter(x => x.method === 'getUpdates').length;
+    if (polls === 1) return new Error('fetch failed');
+    if (polls === 2) return ok([{ update_id: 1, message: { message_id: 1, date: Math.floor(Date.now() / 1000), text: '/status', chat: { id: 42 } } }]);
+    return fail(401, 'Unauthorized');
+  });
+  c = client(fake.fetchImpl, logs, sleeps);
+  c.startPolling(() => { throw new Error('boum'); });
+  for (let i = 0; i < 200 && c.isPolling; i++) await new Promise(r => setTimeout(r, 5));
+  assert.equal(c.isPolling, false, 'arrêt sur 401');
+  await c.flush();
+  assert.ok(sleeps.includes(5000), 'attente avant nouvel essai réseau');
+  assert.ok(logs.some(l => /injoignable : fetch failed — nouvel essai dans 5 s/.test(l)));
+  assert.ok(logs.some(l => /erreur en traitant « \/status » : boum/.test(l)));
+  assert.deepEqual(fake.calls.filter(x => x.method === 'sendMessage').map(x => x.body.text), ['⚠️ Erreur interne en traitant cette commande (voir les logs du bot).']);
+  assert.ok(logs.some(l => /token refusé \(401\), écoute des commandes arrêtée/.test(l)));
+});

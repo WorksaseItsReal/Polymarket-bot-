@@ -8,6 +8,8 @@
  *   erreur réseau, repli en texte brut si le HTML est refusé, découpe à 4096 caractères.
  * - Le token n'apparaît JAMAIS dans un message d'erreur ou un log.
  * - Aucun envoi ne peut faire planter ni bloquer le bot : tout est asynchrone et capturé.
+ * - `startPolling()` écoute les commandes (/status…) du SEUL chat configuré, par long polling
+ *   (getUpdates) : jamais bloquant, reprise après erreur réseau, conflit 409 signalé une fois.
  */
 
 export interface TelegramOptions {
@@ -81,8 +83,24 @@ interface TgResponse {
   parameters?: { retry_after?: number };
   /** true si la réponse ne vient pas de l'API Telegram (corps non JSON : proxy, pare-feu). */
   foreign?: boolean;
-  result?: { username?: string; title?: string; first_name?: string; type?: string };
+  result?: unknown;
 }
+
+interface TgChatLike { username?: string; title?: string; first_name?: string; type?: string }
+interface TgUpdate {
+  update_id: number;
+  message?: { message_id?: number; date?: number; text?: string; chat?: { id?: number | string; type?: string }; from?: { username?: string; first_name?: string } };
+}
+
+/** Message reçu dans le chat configuré (commande de l'opérateur). */
+export interface TelegramIncoming {
+  text: string;
+  chatId: string;
+  /** Horodatage Telegram (s). */
+  date: number;
+  from?: string;
+}
+export type TelegramCommandHandler = (msg: TelegramIncoming) => string | null | Promise<string | null>;
 
 export class TelegramClient {
   private readonly token: string;
@@ -95,8 +113,14 @@ export class TelegramClient {
   private queue: string[] = [];
   private draining: Promise<void> | null = null;
   private lastSentAt = 0;
+  private polling = false;
+  private pollOffset = 0;
+  private conflictLoggedAt = -Infinity;
+  private foreignLoggedAt = -Infinity;
+  /** Type du chat configuré (private, group, supergroup…), connu après `check()`. */
+  chatType: string | null = null;
   /** Compteurs exposés pour le diagnostic. */
-  readonly stats = { sent: 0, failed: 0, dropped: 0 };
+  readonly stats = { sent: 0, failed: 0, dropped: 0, commands: 0 };
 
   constructor(opts: TelegramOptions) {
     this.token = opts.token;
@@ -113,9 +137,9 @@ export class TelegramClient {
     return this.token ? s.split(this.token).join('***') : s;
   }
 
-  private async call(method: string, body: Record<string, unknown>): Promise<TgResponse> {
+  private async call(method: string, body: Record<string, unknown>, timeoutMs = 10_000): Promise<TgResponse> {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 10_000);
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
       const res = await this.fetchImpl(`${API}/bot${this.token}/${method}`, {
         method: 'POST',
@@ -155,8 +179,9 @@ export class TelegramClient {
             : `getMe en échec (${me.error_code ?? '?'}) : ${this.redact(me.description ?? 'erreur inconnue')}`,
         };
       }
-      const username = me.result?.username;
+      const username = (me.result as TgChatLike | undefined)?.username;
       const chat = await this.call('getChat', { chat_id: this.chatId });
+      const chatRes = chat.result as TgChatLike | undefined;
       if (!chat.ok) {
         const desc = (chat.description ?? '').toLowerCase();
         let detail = `chat ${this.chatId} inaccessible (${chat.error_code ?? '?'}) : ${this.redact(chat.description ?? '')}`;
@@ -168,8 +193,9 @@ export class TelegramClient {
         }
         return { ok: false, detail, botUsername: username, retryable: (chat.error_code ?? 0) >= 500 || chat.error_code === 429 };
       }
-      const name = chat.result?.title ?? chat.result?.first_name ?? this.chatId;
-      return { ok: true, detail: `connecté : @${username} → « ${name} » (${chat.result?.type ?? 'chat'})`, botUsername: username };
+      const name = chatRes?.title ?? chatRes?.first_name ?? this.chatId;
+      this.chatType = chatRes?.type ?? null;
+      return { ok: true, detail: `connecté : @${username} → « ${name} » (${chatRes?.type ?? 'chat'})`, botUsername: username };
     } catch (err) {
       return { ok: false, retryable: true, detail: `api.telegram.org injoignable : ${this.redact(String((err as Error)?.message ?? err)).slice(0, 160)}` };
     }
@@ -194,6 +220,87 @@ export class TelegramClient {
   /** Attend que la file soit vide (arrêt propre, tests). */
   async flush(): Promise<void> {
     while (this.draining) await this.draining;
+  }
+
+  /**
+   * Écoute les commandes du chat configuré (long polling getUpdates, 20 s). Les messages
+   * d'autres chats sont ignorés (signalé au plus une fois par heure) ; une commande plus
+   * vieille que `maxAgeSec` (envoyée pendant un arrêt du bot) est ignorée. Ne lève jamais.
+   */
+  startPolling(handler: TelegramCommandHandler, opts: { maxAgeSec?: number } = {}): void {
+    if (this.polling) return;
+    this.polling = true;
+    void this.pollLoop(handler, opts.maxAgeSec ?? 300).catch(() => undefined).finally(() => { this.polling = false; });
+  }
+
+  stopPolling(): void {
+    this.polling = false;
+  }
+
+  get isPolling(): boolean {
+    return this.polling;
+  }
+
+  private async pollLoop(handler: TelegramCommandHandler, maxAgeSec: number): Promise<void> {
+    let backoff = 5_000;
+    while (this.polling) {
+      const t0 = Date.now();
+      let r: TgResponse;
+      try {
+        r = await this.call('getUpdates', { offset: this.pollOffset, timeout: 20, allowed_updates: ['message'] }, 30_000);
+      } catch (err) {
+        if (!this.polling) return;
+        this.log('WARN', `Telegram (commandes) injoignable : ${this.redact(String((err as Error)?.message ?? err)).slice(0, 120)} — nouvel essai dans ${backoff / 1000} s`);
+        await this.sleep(backoff);
+        backoff = Math.min(60_000, backoff * 2);
+        continue;
+      }
+      if (!this.polling) return;
+      if (!r.ok) {
+        if (r.error_code === 409) {
+          if (Date.now() - this.conflictLoggedAt > 3_600_000) {
+            this.conflictLoggedAt = Date.now();
+            this.log('WARN', 'Telegram (commandes) : un autre programme lit déjà les messages de ce bot (getUpdates, conflit 409) — les commandes ne répondront pas tant qu\'il tourne.');
+          }
+          await this.sleep(30_000);
+          continue;
+        }
+        if (r.error_code === 401) {
+          this.log('ERROR', 'Telegram (commandes) : token refusé (401), écoute des commandes arrêtée.');
+          return;
+        }
+        this.log('WARN', `Telegram (commandes) : getUpdates en échec (${r.error_code ?? '?'}) ${this.redact(r.description ?? '')} — nouvel essai dans ${backoff / 1000} s`.slice(0, 240));
+        await this.sleep(backoff);
+        backoff = Math.min(60_000, backoff * 2);
+        continue;
+      }
+      backoff = 5_000;
+      const updates = (Array.isArray(r.result) ? r.result : []) as TgUpdate[];
+      for (const u of updates) {
+        if (typeof u.update_id === 'number') this.pollOffset = u.update_id + 1;
+        const msg = u.message;
+        if (!msg || typeof msg.text !== 'string') continue;
+        if (String(msg.chat?.id) !== this.chatId) {
+          if (Date.now() - this.foreignLoggedAt > 3_600_000) {
+            this.foreignLoggedAt = Date.now();
+            this.log('WARN', `Telegram (commandes) : message d'un autre chat (${String(msg.chat?.id ?? '?')}) ignoré — seul TELEGRAM_CHAT_ID est écouté.`);
+          }
+          continue;
+        }
+        if (typeof msg.date === 'number' && Date.now() / 1000 - msg.date > maxAgeSec) continue; // envoyée pendant un arrêt
+        this.stats.commands++;
+        try {
+          const reply = await handler({ text: msg.text, chatId: String(msg.chat?.id), date: msg.date ?? 0, from: msg.from?.username ?? msg.from?.first_name });
+          if (reply) this.send(reply);
+        } catch (err) {
+          this.log('WARN', `Telegram (commandes) : erreur en traitant « ${msg.text.slice(0, 40)} » : ${this.redact(String((err as Error)?.message ?? err)).slice(0, 120)}`);
+          this.send('⚠️ Erreur interne en traitant cette commande (voir les logs du bot).');
+        }
+      }
+      // Anti-boucle serrée si le serveur répond sans attendre (proxy, faux serveur de test).
+      const elapsed = Date.now() - t0;
+      if (elapsed < 1000) await this.sleep(1000 - elapsed);
+    }
   }
 
   private async drain(): Promise<void> {

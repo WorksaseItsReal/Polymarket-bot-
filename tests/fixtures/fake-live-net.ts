@@ -91,6 +91,7 @@ function gammaEvent(slug: string) {
 // Faux Telegram : messages enregistrés (une ligne JSON par envoi) dans FAKE_TELEGRAM_LOG ;
 // le HTML est vérifié comme le ferait Telegram (balises autorisées, bien fermées).
 const TG_LOG = process.env.FAKE_TELEGRAM_LOG;
+let tgPolls = 0;
 const TG_TAGS = new Set(['b', 'i', 'u', 's', 'code', 'pre', 'a']);
 function htmlProblem(text: string): string | null {
   const stack: string[] = [];
@@ -110,6 +111,16 @@ globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) =>
     const method = url.split('/').pop();
     if (method === 'getMe') return json({ ok: true, result: { id: 1, is_bot: true, username: 'faux_bot' } });
     if (method === 'getChat') return json({ ok: true, result: { id: 42, type: 'private' } });
+    if (method === 'getUpdates') {
+      // Long polling simulé : une courte attente, et une commande injectée (FAKE_TELEGRAM_CMD)
+      // au premier appel pour tester la réponse du vrai bot.
+      await new Promise(r => setTimeout(r, 200));
+      const cmd = process.env.FAKE_TELEGRAM_CMD;
+      if (cmd && tgPolls++ === 0) {
+        return json({ ok: true, result: [{ update_id: 1, message: { message_id: 1, date: Math.floor(Date.now() / 1000), chat: { id: 42, type: 'private' }, from: { username: 'operateur' }, text: cmd } }] });
+      }
+      return json({ ok: true, result: [] });
+    }
     if (method === 'sendMessage') {
       const body = JSON.parse(String(init?.body ?? '{}')) as { text?: string; parse_mode?: string };
       const problem = body.parse_mode === 'HTML' ? htmlProblem(body.text ?? '') : null;

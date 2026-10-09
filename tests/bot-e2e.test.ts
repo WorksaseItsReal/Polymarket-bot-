@@ -26,7 +26,7 @@ test('bot complet sur faux réseau : évalue, journalise, parie et règle, dashb
     env: {
       // DOTENV_CONFIG_PATH : le .env du serveur (FV_*, clés…) ne doit pas influencer le test
       ...process.env, HOME: home, DOTENV_CONFIG_PATH: '/dev/null', DRY_RUN: 'true', PAPER_CAPITAL: '1000', FV_POLL_SEC: '5', FV_SPOT_STREAM: 'false',
-      TELEGRAM_BOT_TOKEN: '123456789:' + 'A'.repeat(35), TELEGRAM_CHAT_ID: '42', FAKE_TELEGRAM_LOG: tgLog,
+      TELEGRAM_BOT_TOKEN: '123456789:' + 'A'.repeat(35), TELEGRAM_CHAT_ID: '42', FAKE_TELEGRAM_LOG: tgLog, FAKE_TELEGRAM_CMD: '/status',
       DASHBOARD_PORT: String(port), POLYMARKET_PRIVATE_KEY: '',
       FAKE_TIME_SPEED: '20', FAKE_BOOK_LAG_SEC: '45',
     },
@@ -58,6 +58,7 @@ test('bot complet sur faux réseau : évalue, journalise, parie et règle, dashb
   assert.match(tg[0].text, /Bot Polymarket démarré.*mode PAPIER/s);
   assert.deepEqual(tg.filter(m => m.problem).map(m => m.problem), [], 'HTML accepté par Telegram');
   assert.match(tg[tg.length - 1].text, /Bot arrêté \(SIGINT\)/, 'message d\'arrêt envoyé avant la sortie');
+  assert.ok(tg.some(m => /ÉTAT.*bot papier en marche depuis.*Entrées : ▶️ autorisées/s.test(m.text)), 'réponse du vrai bot à la commande /status');
   const tradesMsgs = tg.filter(m => /NOUVEAU PARI|GAGNÉ|PERDU|REVENDU/.test(m.text));
   if (process.env.SHOW_TELEGRAM) for (const m of tg) console.log('---\n' + m.text);
 

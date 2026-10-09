@@ -65,6 +65,8 @@ export interface BotConfig {
   telegram: { token: string; chatId: string } | null;
   /** Période du bilan Telegram (min). */
   summaryEveryMin: number;
+  /** Répondre aux commandes Telegram (/status, /bilan…) du chat configuré. */
+  telegramCommands: boolean;
   timeZone: string;
   dashboard: { port: number; host: string; token: string | null };
   /** Délai HTTP par défaut (ms) pour axios (carnets CLOB). */
@@ -182,6 +184,7 @@ export function loadBotConfig(env: Env = process.env): { config: BotConfig; warn
     maxClockSkewMs: 5000,
     telegram,
     summaryEveryMin: num(env, 'TELEGRAM_SUMMARY_MIN', 60, 15, 24 * 60, warnings),
+    telegramCommands: bool(env, 'TELEGRAM_COMMANDS', true, warnings),
     timeZone,
     dashboard: { port, host, token },
     httpTimeoutMs: num(env, 'HTTP_TIMEOUT_MS', 10_000, 1000, 120_000, warnings),

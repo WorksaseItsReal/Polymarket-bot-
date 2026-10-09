@@ -49,10 +49,17 @@ mesures ne sont pas favorables, **aucune hausse de mise ni passage en réel n'es
 
 ## Mise en route
 
-Sur le serveur, dans le dossier du bot :
+Sur le serveur, dans le dossier du bot, **une commande fait tout** (code `main`, dépendances,
+interface, diagnostic, relance PM2 ; ne touche ni au `.env` ni aux données) :
 
 ```bash
-git fetch origin && git checkout feat/fair-value-strategy && git pull
+npm run upgrade                            # = bash scripts/update.sh [branche]
+```
+
+À la main, la même chose étape par étape :
+
+```bash
+git fetch origin && git checkout main && git pull
 npm install
 npm run check                              # types + tests (sans réseau) : doit finir sans échec
 (cd dashboard && npm install && npm run build)   # interface web (à refaire après chaque mise à jour)
@@ -212,6 +219,7 @@ npx tsx scripts/analysis/fv-report.ts --days 7   # le modèle a-t-il un edge ? (
 | `TELEGRAM_ENABLED` | `false` pour couper sans retirer le token. |
 | `TELEGRAM_SUMMARY_MIN` | Période du bilan (défaut 60, bornée 15–1440). Envoyé s'il y a de nouveaux trades ; sinon (seule la mesure a avancé) au plus toutes les 6 h. |
 | `TELEGRAM_TZ` | Fuseau des heures de round (défaut `Europe/Paris`). |
+| `TELEGRAM_COMMANDS` | `false` pour ne plus répondre aux commandes (défaut : le bot écoute le chat configuré). |
 
 **Au démarrage**, la connexion est vérifiée (`getMe` + `getChat`) et le log dit exactement quoi
 faire si elle échoue : token refusé → le régénérer chez @BotFather ; « chat introuvable » →
@@ -227,6 +235,15 @@ bilan périodique (trades, réussite, calibration, PnL, fiabilité t, « Modèle
 « Avant le réel ») · `⚠️ ALERTE` (porte de risque, arrêt de sécurité, chiens de garde,
 horloge, capital trop petit, plantage — au plus une par motif toutes les 6 h ; en boucle de
 plantage, espacées 10 min → 6 h).
+
+**Commandes** (envoyées au bot depuis le chat configuré, lecture seule — rien ne change au bot) :
+`/status` (entrées autorisées ou bloquées et pourquoi, capital, trades, positions, santé du
+flux et des passages), `/bilan` (le bilan périodique, à la demande), `/risque` (les quatre
+limites chiffrées), `/positions` (paris en cours : côté, mise, prix, modèle, fin, gain si
+gagné), `/aide`. Seul `TELEGRAM_CHAT_ID` est écouté (les messages d'autres chats sont
+ignorés) ; une commande envoyée pendant un arrêt du bot (> 5 min) n'est pas rejouée. Si un
+autre programme lit déjà les messages du même bot (conflit 409 de `getUpdates`), les commandes
+ne répondent pas et le log le dit : utiliser un bot distinct par programme.
 
 ### 4.2 Dashboard
 
