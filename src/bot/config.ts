@@ -125,6 +125,8 @@ export function loadBotConfig(env: Env = process.env): { config: BotConfig; warn
   }
   const tails = (env.FV_TAILS ?? '').trim();
   if (tails && tails !== 'normal' && tails !== 't4') warnings.push(`FV_TAILS=${tails} ignoré (attendu : normal ou t4) — normal`);
+  const ve = (env.FV_VOL_ESTIMATOR ?? '').trim();
+  if (ve && !['cc', 'parkinson', 'blend'].includes(ve)) warnings.push(`FV_VOL_ESTIMATOR=${ve} ignoré (attendu : cc, parkinson ou blend) — cc`);
 
   const coinsRaw = (env.FV_COINS ?? '').trim();
   const coins = coinsFromEnv(coinsRaw);

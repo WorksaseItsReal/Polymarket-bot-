@@ -491,6 +491,7 @@ export class FairValueRunner {
         rec = {
           t: now, slug: market.slug, coin, tau: Math.round(tauSec * 10) / 10, spot: data.spot, strike: data.strike,
           sig: data.sigmaPerSqrtSec, pUp: decision.pUp, pRaw: decision.pRaw ?? null, zs: cfg.zScale,
+          ...(data.sigmaCcPerSqrtSec ? { sc: data.sigmaCcPerSqrtSec } : {}), ...(data.sigmaParkPerSqrtSec ? { sp: data.sigmaParkPerSqrtSec } : {}),
           ...(decision.noiseSdRaw !== undefined ? { ns: Math.round(decision.noiseSdRaw * 1e4) / 1e4 } : {}),
           ...(cfg.tails === 't4' ? { tl: 't4' as const } : {}), ...(cfg.twapWindowSec > 0 ? { tw: cfg.twapWindowSec } : {}),
           ...(coins ? { mv: true as const } : {}), upAsk: upBest?.price ?? null, downAsk: downBest?.price ?? null,

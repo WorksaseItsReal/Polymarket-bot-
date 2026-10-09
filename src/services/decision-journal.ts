@@ -37,8 +37,12 @@ export interface DecisionRecord {
   tau: number;
   spot: number;
   strike: number;
-  /** Volatilité par √seconde. */
+  /** Volatilité par √seconde (celle utilisée, selon FV_VOL_ESTIMATOR). */
   sig: number;
+  /** σ clôture-à-clôture et σ Parkinson (plus haut/plus bas) par √s, toujours journalisés
+   *  quand les bougies le permettent : le rapport (1c) compare les estimateurs. */
+  sc?: number;
+  sp?: number;
   /** Probabilité de « Up » utilisée pour décider (après mélange éventuel avec le marché). */
   pUp: number | null;
   /** Probabilité du modèle seul (avant mélange) ; absente des anciens journaux. */

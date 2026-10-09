@@ -17,7 +17,8 @@
  */
 
 import {
-  DEFAULT_FAIR_VALUE_CONFIG, blendWithMarket, bookMidUp, effectiveCostPerShare, normCdf, normInv, studentT4CdfStd, studentT4InvStd,
+  DEFAULT_FAIR_VALUE_CONFIG, blendWithMarket, bookMidUp, effectiveCostPerShare, normCdf, normInv, probUp, studentT4CdfStd, studentT4InvStd,
+  type FairValueConfig,
 } from '../services/fair-value.js';
 import type { DecisionRecord } from '../services/decision-journal.js';
 import { clusteredMeanT, slotKey } from './stats.js';
@@ -696,4 +697,76 @@ export function strikeVsOfficial(rounds: StrikeCheckRound[], strikeNoiseSec: num
   const withFinal = rounds.filter(r => r.ptb > 0 && (r.final ?? 0) > 0);
   const agree = withFinal.filter(r => ((r.final as number) >= r.ptb) === r.upWon).length;
   return { coins, consistency: { n: withFinal.length, agree } };
+}
+
+/**
+ * Probabilité du modèle SEUL recalculée avec une autre volatilité, aux réglages de
+ * l'évaluation (spot, strike, τ, fenêtre TWAP, FV_Z_SCALE, loi). Avec `sigma = r.sig`, on
+ * retrouve `pRaw` (invariant testé) — donc la comparaison n'introduit rien d'autre que σ.
+ */
+export function probWithSigma(
+  r: Pick<DecisionRecord, 'spot' | 'strike' | 'tau' | 'tw' | 'zs' | 'tl'>,
+  sigma: number | null | undefined,
+  cfg: Pick<FairValueConfig, 'strikeNoiseSec' | 'basisBps'>,
+): number | null {
+  if (!(sigma && sigma > 0) || !(r.spot > 0) || !(r.strike > 0)) return null;
+  return probUp({ spot: r.spot, strike: r.strike, sigmaPerSqrtSec: sigma, tauSec: r.tau }, {
+    ...DEFAULT_FAIR_VALUE_CONFIG, strikeNoiseSec: cfg.strikeNoiseSec, basisBps: cfg.basisBps,
+    twapWindowSec: r.tw ?? 0, zScale: r.zs ?? 1, tails: r.tl ?? 'normal',
+  });
+}
+
+export interface SigmaComparison {
+  /** rounds où les deux σ sont journalisés */
+  rounds: number;
+  brierCc: number | null;
+  brierPark: number | null;
+  brierBlend: number | null;
+  /** t groupés par créneau de (Brier estimateur − Brier cc) ; négatif = meilleur que cc */
+  tPark: number | null;
+  tBlend: number | null;
+}
+
+/**
+ * Quel estimateur de volatilité prédit le mieux ? Même protocole que `compareModelBook` :
+ * par round, moyenne des erreurs de Brier des probabilités recalculées avec σ clôture-à-
+ * clôture (sc), σ Parkinson (sp) et leur mélange ; t groupé par créneau.
+ */
+export function compareSigmaEstimators(
+  rounds: ResolvedRecord[][],
+  cfg: Pick<FairValueConfig, 'strikeNoiseSec' | 'basisBps'>,
+  opts: { minTau?: number; maxTau?: number } = {},
+): SigmaComparison {
+  const rows: Array<{ key: string; cc: number; park: number; blend: number }> = [];
+  for (const list of rounds) {
+    let cc = 0;
+    let park = 0;
+    let blend = 0;
+    let n = 0;
+    for (const r of list) {
+      if (opts.minTau !== undefined && r.tau < opts.minTau) continue;
+      if (opts.maxTau !== undefined && r.tau > opts.maxTau) continue;
+      if (!(r.sc && r.sp)) continue;
+      const pc = probWithSigma(r, r.sc, cfg);
+      const pp = probWithSigma(r, r.sp, cfg);
+      const pb = probWithSigma(r, Math.sqrt((r.sc * r.sc + r.sp * r.sp) / 2), cfg);
+      if (pc === null || pp === null || pb === null) continue;
+      const y = r.upWon ? 1 : 0;
+      cc += (pc - y) ** 2;
+      park += (pp - y) ** 2;
+      blend += (pb - y) ** 2;
+      n++;
+    }
+    if (n) rows.push({ key: slotKey(list[0].slug), cc: cc / n, park: park / n, blend: blend / n });
+  }
+  if (!rows.length) return { rounds: 0, brierCc: null, brierPark: null, brierBlend: null, tPark: null, tBlend: null };
+  const mean = (xs: number[]) => xs.reduce((a, b) => a + b, 0) / xs.length;
+  return {
+    rounds: rows.length,
+    brierCc: mean(rows.map(r => r.cc)),
+    brierPark: mean(rows.map(r => r.park)),
+    brierBlend: mean(rows.map(r => r.blend)),
+    tPark: clusteredMeanT(rows.map(r => ({ key: r.key, x: r.park - r.cc }))).t,
+    tBlend: clusteredMeanT(rows.map(r => ({ key: r.key, x: r.blend - r.cc }))).t,
+  };
 }

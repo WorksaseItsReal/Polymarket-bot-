@@ -19,7 +19,7 @@ import { gunzipSync } from 'node:zlib';
 import { fetchRoundOutcome } from '../../src/services/paper-ledger.js';
 import { entryMinTauSec, fairValueConfigFromEnv } from '../../src/services/fair-value.js';
 import {
-  applyBlend, blendVerdict, zScaleConflictsWithBlend, bookStats, brier, byRound, calibration, compareModelBook, describeBlend, fitBlend,
+  applyBlend, blendVerdict, zScaleConflictsWithBlend, bookStats, brier, byRound, calibration, compareModelBook, compareSigmaEstimators, describeBlend, fitBlend,
   fitZScale, halves, marketProbUp, normalizeZScale, rawModelProb, replay, zScaleAdvice,
   strikeVsOfficial, thresholdGrid, type ResolvedRecord,
 } from '../../src/analysis/fv-analysis.js';
@@ -48,7 +48,9 @@ const intern = (x: string) => strings.get(x) ?? (strings.set(x, x), x);
 function slim(r: DecisionRecord): DecisionRecord {
   return {
     // strike et sig gardés : comparaison avec le prix à battre publié par Polymarket (section 0)
-    t: r.t, slug: intern(r.slug), coin: intern(r.coin), tau: r.tau, spot: 0, strike: r.strike, sig: r.sig, pUp: r.pUp, pRaw: r.pRaw, zs: r.zs,
+    // spot, sc, sp gardés : probabilités recalculées avec chaque estimateur de volatilité (section 1c)
+    t: r.t, slug: intern(r.slug), coin: intern(r.coin), tau: r.tau, spot: r.spot, strike: r.strike, sig: r.sig, pUp: r.pUp, pRaw: r.pRaw, zs: r.zs,
+    ...(r.sc ? { sc: r.sc } : {}), ...(r.sp ? { sp: r.sp } : {}), ...(r.tw ? { tw: r.tw } : {}),
     upAsk: r.upAsk, downAsk: r.downAsk, upAskSz: r.upAskSz, downAskSz: null, upBid: r.upBid, src: '', act: r.act === 'buy' ? 'buy' : 'hold',
     // GARDER mv (exclusion des mesures) et tl (loi du modèle) : sans eux, le filtre des
     // évaluations « saut du spot » et la conversion t4 étaient silencieusement inopérants.
@@ -184,6 +186,19 @@ async function main() {
       : cmp.t >= 2
         ? '   → le carnet prédit significativement mieux : PAS d\'edge, quel que soit le seuil.'
         : '   → pas de différence significative : aucun edge démontré à ce stade.');
+  }
+
+  // 1c. Estimateur de volatilité : clôture-à-clôture (réglage par défaut) vs Parkinson vs mélange
+  const sg = compareSigmaEstimators(measureRounds, cfg, { minTau: entryMinTauSec(cfg), maxTau: cfg.maxTauSec });
+  console.log(`\n1c) Volatilité : clôture-à-clôture (cc) vs Parkinson (plus haut/plus bas) vs mélange — réglage actuel FV_VOL_ESTIMATOR=${cfg.volEstimator ?? 'cc'}`);
+  if (!sg.rounds) {
+    console.log('   pas encore d\'évaluations avec les deux σ journalisées (champs sc/sp, écrits depuis cette version du bot).');
+  } else {
+    console.log(`   Brier par round : cc ${num(sg.brierCc, 4)} | parkinson ${num(sg.brierPark, 4)} (t ${num(sg.tPark, 1)}) | mélange ${num(sg.brierBlend, 4)} (t ${num(sg.tBlend, 1)}) — n=${sg.rounds} rounds (t ≤ −2 = meilleur que cc)`);
+    const best = sg.tPark !== null && sg.tPark <= -2 && (sg.tBlend === null || sg.tPark <= sg.tBlend) ? 'parkinson' : sg.tBlend !== null && sg.tBlend <= -2 ? 'blend' : null;
+    console.log(best
+      ? `   → ${best} prédit SIGNIFICATIVEMENT mieux : candidat FV_VOL_ESTIMATOR=${best} (à confirmer sur les deux moitiés avant de changer).`
+      : '   → pas de différence significative : garder cc (le rebond bid/ask gonfle Parkinson sur les petits cours).');
   }
 
   // 1b. Mélange modèle + carnet

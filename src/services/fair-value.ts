@@ -87,7 +87,16 @@ export interface FairValueConfig {
    *  (F(1) = 0,885 contre 0,841) — précisément la zone où le bot parie. Elle n'est donc
    *  pas « prudente » ; elle ne l'est qu'au-delà de |z| ≈ 2. */
   tails: 't4' | 'normal';
+  /** Estimateur de volatilité : 'cc' clôture-à-clôture (défaut), 'parkinson' (plus haut /
+   *  plus bas de chaque minute : ~5× plus efficace pour un mouvement brownien, mais biaisé
+   *  vers le haut par le rebond bid/ask et vers le bas par l'échantillonnage), 'blend'
+   *  (moyenne des deux variances). Les deux σ sont journalisés quel que soit ce réglage
+   *  (sc, sp) : le rapport (section 1c) dit lequel prédit mieux AVANT de le changer. */
+  volEstimator?: VolEstimator;
 }
+
+export type VolEstimator = 'cc' | 'parkinson' | 'blend';
+export const VOL_ESTIMATORS: readonly VolEstimator[] = ['cc', 'parkinson', 'blend'];
 
 export const DEFAULT_FAIR_VALUE_CONFIG: FairValueConfig = {
   takerFeeRate: 0.07,
@@ -105,6 +114,7 @@ export const DEFAULT_FAIR_VALUE_CONFIG: FairValueConfig = {
   zScale: 1,
   blendModel: 1,
   blendMarket: 0,
+  volEstimator: 'cc',
 };
 
 /**
@@ -218,6 +228,40 @@ export function realizedVolPerSqrtSec(closes: number[], intervalSec: number, min
   }
   if (n < minReturns) return null;
   return Math.sqrt(sum / n) / Math.sqrt(intervalSec);
+}
+
+/**
+ * Volatilité par √seconde par l'estimateur de Parkinson : σ² = moyenne(ln(H/L)²) / (4 ln 2)
+ * par bougie. Bougies sans plus haut/plus bas cohérents ignorées ; null sous `minCandles`.
+ */
+export function parkinsonVolPerSqrtSec(
+  candles: ReadonlyArray<{ open: number; close: number; high?: number; low?: number }>,
+  intervalSec: number,
+  minCandles = 10,
+): number | null {
+  if (!isPos(intervalSec)) return null;
+  let sum = 0;
+  let n = 0;
+  for (const c of candles) {
+    const h = c.high;
+    const l = c.low;
+    if (typeof h !== 'number' || typeof l !== 'number' || !isPos(l) || !(h >= l)) continue;
+    if (h < Math.max(c.open, c.close) || l > Math.min(c.open, c.close)) continue; // incohérente
+    const r = Math.log(h / l);
+    sum += r * r;
+    n++;
+  }
+  if (n < minCandles) return null;
+  return Math.sqrt(sum / n / (4 * Math.LN2)) / Math.sqrt(intervalSec);
+}
+
+/** σ retenue selon le réglage ; repli sur l'autre estimateur si l'un manque. */
+export function selectSigma(cc: number | null, park: number | null, estimator: VolEstimator = 'cc'): number | null {
+  const a = isPos(cc) ? cc : null;
+  const b = isPos(park) ? park : null;
+  if (estimator === 'parkinson') return b ?? a;
+  if (estimator === 'blend') return a !== null && b !== null ? Math.sqrt((a * a + b * b) / 2) : a ?? b;
+  return a ?? b;
 }
 
 /**
@@ -589,6 +633,7 @@ export function fairValueConfigFromEnv(env: Record<string, string | undefined>):
     zScale: num('FV_Z_SCALE', d.zScale, 0.3, 2),
     blendModel: num('FV_BLEND_MODEL', d.blendModel, 0, 3),
     blendMarket: num('FV_BLEND_MARKET', d.blendMarket, 0, 3),
+    volEstimator: VOL_ESTIMATORS.includes((env.FV_VOL_ESTIMATOR ?? '').trim() as VolEstimator) ? (env.FV_VOL_ESTIMATOR as string).trim() as VolEstimator : 'cc',
   };
   // Fenêtre vide (y compris à cause de la minute finale moyennée) : aucun pari possible → défauts.
   if (entryMinTauSec(cfg) > cfg.maxTauSec) { cfg.minTauSec = d.minTauSec; cfg.maxTauSec = d.maxTauSec; }

@@ -18,7 +18,7 @@
  * Aucune valeur par défaut : toute donnée absente, périmée ou incohérente → null.
  */
 
-import { DEFAULT_FAIR_VALUE_CONFIG, realizedVolPerSqrtSec } from './fair-value.js';
+import { DEFAULT_FAIR_VALUE_CONFIG, parkinsonVolPerSqrtSec, realizedVolPerSqrtSec, selectSigma, type VolEstimator } from './fair-value.js';
 import type { SpotCoin } from './spot-price-service.js';
 import type { LivePrice } from './spot-stream.js';
 
@@ -38,6 +38,10 @@ export interface RoundMarketData {
   source: string;
   /** Âge de la bougie courante (ms) au moment de la lecture. */
   candleAgeMs: number;
+  /** σ clôture-à-clôture et σ Parkinson (plus haut/plus bas), toujours calculés (null si les
+   *  bougies ne le permettent pas) : journalisés pour comparer les estimateurs (rapport 1c). */
+  sigmaCcPerSqrtSec?: number | null;
+  sigmaParkPerSqrtSec?: number | null;
 }
 
 const PAIRS: Record<SpotCoin, { binance: string; coinbase: string }> = {
@@ -153,6 +157,7 @@ export function deriveRoundData(
   source: string,
   maxCandleAgeMs = MAX_CANDLE_AGE_SPOT_MS,
   twapWindowSec = DEFAULT_FAIR_VALUE_CONFIG.twapWindowSec,
+  estimator: VolEstimator = 'cc',
 ): RoundMarketData | null {
   if (!candles.length || !(slotSec > 0)) return null;
   const last = candles[candles.length - 1];
@@ -164,13 +169,15 @@ export function deriveRoundData(
   if (!candles.some(c => c.openTimeMs === slotSec * 1000)) return null;
   const strike = strikeFromCandles(ms => candles.find(c => c.openTimeMs === ms), slotSec, twapWindowSec);
   if (strike === null) return null;
-  // Vol sur bougies CLOSES uniquement (la courante est partielle).
-  const closed = candles.slice(0, -1).map(c => c.close);
-  const volLong = realizedVolPerSqrtSec(closed, 60, 10);
-  const volShort = realizedVolPerSqrtSec(closed.slice(-16), 60, 10);
-  const sigma = Math.max(volLong ?? 0, volShort ?? 0);
-  if (!(sigma > 0)) return null;
-  return { spot: last.close, strike, sigmaPerSqrtSec: sigma, source, candleAgeMs };
+  // Vol sur bougies CLOSES uniquement (la courante est partielle). Deux estimateurs, chacun
+  // = max(longue fenêtre, 16 dernières minutes) pour réagir à une hausse de volatilité.
+  const closedCandles = candles.slice(0, -1);
+  const closed = closedCandles.map(c => c.close);
+  const cc = Math.max(realizedVolPerSqrtSec(closed, 60, 10) ?? 0, realizedVolPerSqrtSec(closed.slice(-16), 60, 10) ?? 0) || null;
+  const park = Math.max(parkinsonVolPerSqrtSec(closedCandles, 60, 10) ?? 0, parkinsonVolPerSqrtSec(closedCandles.slice(-16), 60, 10) ?? 0) || null;
+  const sigma = selectSigma(cc, park, estimator);
+  if (!(sigma && sigma > 0)) return null;
+  return { spot: last.close, strike, sigmaPerSqrtSec: sigma, source, candleAgeMs, sigmaCcPerSqrtSec: cc, sigmaParkPerSqrtSec: park };
 }
 
 const cache = new Map<SpotCoin, { ts: number; value: { candles: Candle[]; source: string } | null }>();
@@ -189,6 +196,7 @@ export async function getRoundMarketData(
   nowMs = Date.now(),
   liveInput: LivePrice | null | (() => LivePrice | null) = null,
   twapWindowSec = DEFAULT_FAIR_VALUE_CONFIG.twapWindowSec,
+  estimator: VolEstimator = 'cc',
 ): Promise<RoundMarketData | null> {
   if (slotSec * 1000 > nowMs) return null; // round pas encore ouvert : strike inconnu
   // Un getter est relu APRÈS le chargement des bougies (qui peut prendre plusieurs
@@ -210,14 +218,14 @@ export async function getRoundMarketData(
   // Avec un spot temps réel, la bougie ne sert qu'au strike et à la vol : âge toléré plus long.
   const useLive = () => liveOk && !!loaded && loaded.source.startsWith('binance');
   const maxCandleAge = () => (useLive() ? MAX_CANDLE_AGE_MS : MAX_CANDLE_AGE_SPOT_MS);
-  let base = deriveRoundData(loaded.candles, slotSec, nowMs, loaded.source, maxCandleAge(), twapWindowSec);
+  let base = deriveRoundData(loaded.candles, slotSec, nowMs, loaded.source, maxCandleAge(), twapWindowSec, estimator);
   if (!base && fromCache) {
     // Cache antérieur au début du round (bougie du strike absente) ou trop vieux : on relit.
     loaded = await fetchCandles(coin);
     cache.set(coin, { ts: nowMs, value: loaded });
     loadedAt = nowMs;
     if (!loaded) return null;
-    base = deriveRoundData(loaded.candles, slotSec, nowMs, loaded.source, maxCandleAge(), twapWindowSec);
+    base = deriveRoundData(loaded.candles, slotSec, nowMs, loaded.source, maxCandleAge(), twapWindowSec, estimator);
   }
   if (!base) return null;
   live = readLive();
@@ -232,7 +240,7 @@ export async function getRoundMarketData(
       cache.set(coin, { ts: nowMs, value: fresh });
       loaded = fresh;
     }
-    return deriveRoundData(loaded.candles, slotSec, nowMs, loaded.source, MAX_CANDLE_AGE_SPOT_MS, twapWindowSec);
+    return deriveRoundData(loaded.candles, slotSec, nowMs, loaded.source, MAX_CANDLE_AGE_SPOT_MS, twapWindowSec, estimator);
   }
   if (liveOk && loaded.source.startsWith('binance')) {
     return { ...base, spot: (live as LivePrice).price, source: `${loaded.source}+ws` };

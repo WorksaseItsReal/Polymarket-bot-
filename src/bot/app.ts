@@ -415,7 +415,7 @@ export async function main(env: Record<string, string | undefined> = process.env
     // Délai garanti : une réponse CLOB bloquée figeait la boucle.
     getBook: tokenId => withTimeout(fetchClobBook(tokenId), 8000, 'carnet CLOB'),
     getRoundData: (coin, slot, now) => (isSpotCoin(coin)
-      ? getRoundMarketData(coin as SpotCoin, slot, now, () => stream?.price(coin) ?? null, fv.twapWindowSec)
+      ? getRoundMarketData(coin as SpotCoin, slot, now, () => stream?.price(coin) ?? null, fv.twapWindowSec, fv.volEstimator ?? 'cc')
       : Promise.resolve(null)),
     fetchOutcome: slug => fetchRoundOutcome(slug),
     notify,
