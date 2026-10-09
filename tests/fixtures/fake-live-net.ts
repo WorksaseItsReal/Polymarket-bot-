@@ -16,6 +16,7 @@
  * Tout le reste répond 404.
  */
 import axios from 'axios';
+import { WebSocketServer } from 'ws';
 import { normCdf } from '../../src/services/fair-value.ts';
 
 const K = Number(process.env.FAKE_TIME_SPEED ?? '20');
@@ -181,3 +182,27 @@ axios.defaults.adapter = async config => {
   }
   return ok({ error: 'not found (faux réseau)' }, 404);
 };
+
+// Faux flux Binance (WebSocket) : FAKE_SPOT_WS_PORT=<port> lance un serveur local qui diffuse un
+// aggTrade par crypto toutes les 100 ms réelles (= 2 s simulées à ×20) depuis le même chemin de
+// prix que les bougies ; le bot s'y connecte via SPOT_STREAM_URL=ws://127.0.0.1:<port>/stream?streams=
+// (voir tests/bot-e2e.test.ts). Flux spot, réactions aux sauts et mesure fin de round de bout en bout.
+const WS_PORT = Number(process.env.FAKE_SPOT_WS_PORT ?? '0');
+if (WS_PORT > 0) {
+  const SYMBOLS: Record<string, string> = { btc: 'BTCUSDT', eth: 'ETHUSDT', sol: 'SOLUSDT', xrp: 'XRPUSDT', doge: 'DOGEUSDT' };
+  const wss = new WebSocketServer({ host: '127.0.0.1', port: WS_PORT });
+  wss.on('connection', (socket, req) => {
+    const wanted = decodeURIComponent(String(req.url ?? '')).split('streams=')[1]?.split('/') ?? [];
+    const coins = COINS.filter(c => wanted.includes(`${SYMBOLS[c].toLowerCase()}@aggTrade`));
+    const timer = setInterval(() => {
+      if (socket.readyState !== socket.OPEN) return;
+      const t = simNow();
+      for (const c of coins) {
+        socket.send(JSON.stringify({ stream: `${SYMBOLS[c].toLowerCase()}@aggTrade`, data: { e: 'aggTrade', s: SYMBOLS[c], p: String(spot(c, t / 1000)), T: t, E: t } }));
+      }
+    }, 100);
+    socket.on('close', () => clearInterval(timer));
+    socket.on('error', () => clearInterval(timer));
+  });
+  wss.on('error', err => console.error('[faux flux spot] serveur WebSocket :', (err as Error).message));
+}

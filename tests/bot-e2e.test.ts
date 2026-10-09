@@ -209,3 +209,46 @@ test('DRY_RUN=false : refus compté par le garde-fou de plantage et signalé sur
   assert.ok(tg.some(m => /ALERTE.*bot arrêté sur erreur \(DRY_RUN=false refusé/s.test(m.text)), `alerte attendue : ${tg.map(m => m.text.slice(0, 80)).join(' | ')}`);
   assert.doesNotMatch(out, /NOUVEAU PARI|Dashboard : http/, 'rien ne démarre');
 });
+
+test('flux spot temps réel (faux WebSocket Binance) : santé « connecté », réactions aux sauts, mesures fin de round, arrêt propre', { timeout: 120_000 }, async () => {
+  const home = mkdtempSync(join(tmpdir(), 'bot-e2e-stream-'));
+  const tgLog = join(home, 'telegram.jsonl');
+  const port = 30_000 + Math.floor(Math.random() * 20_000);
+  const wsPort = port + 1;
+  const child = spawn(process.execPath, ['--import', 'tsx', '--import', './tests/fixtures/fake-live-net.ts', 'bot-with-dashboard.ts'], {
+    env: {
+      ...process.env, HOME: home, DOTENV_CONFIG_PATH: '/dev/null', DRY_RUN: 'true', PAPER_CAPITAL: '1000', FV_POLL_SEC: '5',
+      FV_SPOT_STREAM: 'true', FAKE_SPOT_WS_PORT: String(wsPort), SPOT_STREAM_URL: `ws://127.0.0.1:${wsPort}/stream?streams=`,
+      TELEGRAM_BOT_TOKEN: '123456789:' + 'A'.repeat(35), TELEGRAM_CHAT_ID: '42', FAKE_TELEGRAM_LOG: tgLog,
+      DASHBOARD_PORT: String(port), POLYMARKET_PRIVATE_KEY: '', FAKE_TIME_SPEED: '20', FAKE_BOOK_LAG_SEC: '45',
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let out = '';
+  child.stdout.on('data', d => { out += d; });
+  child.stderr.on('data', d => { out += d; });
+  const exited = new Promise<number | null>(r => child.on('exit', code => r(code)));
+  let state: Record<string, unknown> = {};
+  try {
+    await sleep(40_000); // ×20 : plus de deux rounds, dont deux dernières minutes
+    state = await (await fetch(`http://127.0.0.1:${port}/api/state`)).json() as Record<string, unknown>;
+  } finally {
+    child.kill('SIGINT');
+  }
+  const code = await Promise.race([exited, sleep(12_000).then(() => 'timeout' as const)]);
+  if (code === 'timeout') child.kill('SIGKILL');
+  assert.equal(code, 0, `arrêt propre attendu (code ${code})\n${out.slice(-2000)}`);
+  assert.match(out, /Flux spot temps réel connecté/, out.slice(-1500));
+  const health = state.health as { spotStream: string; clockSkewMs: number | null };
+  assert.equal(health.spotStream, 'live', 'santé : flux connecté et prix frais');
+  const poly = join(home, '.polymarket');
+  const lines = readdirSync(join(poly, 'journal')).flatMap(f => readFileSync(join(poly, 'journal', f), 'utf8').split('\n').filter(Boolean)).map(l => JSON.parse(l) as Record<string, unknown>);
+  assert.ok(lines.some(r => r.mv === true), 'évaluations déclenchées par un saut du spot');
+  assert.ok(lines.some(r => /\+ws$/.test(String(r.src))), 'spot pris sur le flux');
+  const late = lines.filter(r => r.lt === true);
+  assert.ok(late.length >= 1, `mesures fin de round attendues (τ < 60 s) : ${late.length}`);
+  assert.ok(late.every(r => typeof r.pl === 'number' && (r.pl as number) > 0 && (r.pl as number) < 1 && (r.kn as number) >= 0 && (r.kn as number) <= 60 && r.act === 'hold' && (r.tau as number) < 60), JSON.stringify(late[0]));
+  const trades = existsSync(join(poly, 'fv-ledger.json')) ? (JSON.parse(readFileSync(join(poly, 'fv-ledger.json'), 'utf8')).trades as Array<{ openedAt: string; endMs: number }>) : [];
+  for (const t of trades) assert.ok(t.endMs - Date.parse(t.openedAt) >= 60_000, 'aucun pari ouvert dans la dernière minute');
+  assert.doesNotMatch(out, /TypeError|ReferenceError|Rejet de promesse non géré|Exception non rattrapée/, out.slice(-3000));
+});

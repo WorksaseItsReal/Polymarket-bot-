@@ -393,7 +393,9 @@ export async function main(env: Record<string, string | undefined> = process.env
   const shadowRef = shadow;
   setInterval(() => { void shadowRef.resolveDue(); }, 30_000).unref?.();
   journal = config.journal.enabled ? new DecisionJournal({ dir: paths.journalDir, log: m => log('WARN', m), keepDays: config.journal.keepDays }) : null;
-  spotStream = config.spotStream ? new SpotStream({ coins: config.coins, moveBps: config.moveBps, log: (l, m) => log(l, m) }) : null;
+  spotStream = config.spotStream
+    ? new SpotStream({ coins: config.coins, moveBps: config.moveBps, log: (l, m) => log(l, m), ...(config.spotStreamUrl ? { urls: [config.spotStreamUrl] } : {}) })
+    : null;
   const stream = spotStream;
 
   const runner = new FairValueRunner({

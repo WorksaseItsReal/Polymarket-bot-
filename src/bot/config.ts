@@ -67,6 +67,9 @@ export interface BotConfig {
   summaryEveryMin: number;
   /** Répondre aux commandes Telegram (/status, /bilan…) du chat configuré. */
   telegramCommands: boolean;
+  /** Point d'entrée du flux spot (ws:// ou wss://, se terminant par `?streams=`) ; null = Binance.
+   *  Avancé : proxy, ou faux flux des tests de bout en bout. */
+  spotStreamUrl: string | null;
   timeZone: string;
   dashboard: { port: number; host: string; token: string | null };
   /** Délai HTTP par défaut (ms) pour axios (carnets CLOB). */
@@ -151,6 +154,13 @@ export function loadBotConfig(env: Env = process.env): { config: BotConfig; warn
     port = 3001;
   }
 
+  const streamRaw = (env.SPOT_STREAM_URL ?? '').trim();
+  let spotStreamUrl: string | null = null;
+  if (streamRaw) {
+    if (/^wss?:\/\/.+\?streams=$/.test(streamRaw)) spotStreamUrl = streamRaw;
+    else warnings.push(`SPOT_STREAM_URL=${streamRaw} ignoré (attendu : ws(s)://…/stream?streams=) — flux Binance`);
+  }
+
   const telegram = telegramConfigFromEnv(env);
   if (telegram && !looksLikeBotToken(telegram.token)) {
     warnings.push('TELEGRAM_BOT_TOKEN ne ressemble pas à un token @BotFather (123456789:ABC…) : la connexion échouera');
@@ -189,6 +199,7 @@ export function loadBotConfig(env: Env = process.env): { config: BotConfig; warn
     telegram,
     summaryEveryMin: num(env, 'TELEGRAM_SUMMARY_MIN', 60, 15, 24 * 60, warnings),
     telegramCommands: bool(env, 'TELEGRAM_COMMANDS', true, warnings),
+    spotStreamUrl,
     timeZone,
     dashboard: { port, host, token },
     httpTimeoutMs: num(env, 'HTTP_TIMEOUT_MS', 10_000, 1000, 120_000, warnings),
