@@ -747,3 +747,40 @@ test('règlement TWAP : aucune revente dans la minute finale (même avec FV_MIN_
   assert.equal(await sellAt(base), 'open', 'TWAP 60 s : part déjà moyennée inconnue → on garde');
   assert.equal(await sellAt({ ...base, twapWindowSec: 0 }), 'sold', 'contrôle : règlement ponctuel, τ ≥ 30 s → revente');
 });
+
+test('fin de round (τ < 60 s) : mesure journalisée (lt, pl, kn), raison visible, JAMAIS de pari', async () => {
+  const evals: Array<{ rec: Parameters<NonNullable<RunnerDeps['onEvaluation']>>[0]; reason: string }> = [];
+  const env = setup({
+    // Spot au-dessus du strike, TWAP acquis 35 s au-dessus aussi : P(hausse) fin de round élevée
+    getRoundData: async () => ({ spot: 100.06, strike: 100, sigmaPerSqrtSec: SIGMA, source: 'binance+ws', candleAgeMs: 0, twapPartial: { mean: 100.05, knownSec: 35 } }),
+    upAsk: 0.6, downAsk: 0.41,
+    onEvaluation: (rec, reason) => evals.push({ rec, reason }),
+  });
+  env.setNow((SLOT + 275) * 1000); // τ = 25 s
+  const r = env.runner();
+  await r.tick();
+  assert.equal(loadLedger(env.ledgerPath)!.length, 0, 'aucun pari dans la dernière minute, même avec un carnet en retard');
+  assert.equal(evals.length, 1);
+  const { rec, reason } = evals[0];
+  assert.equal(rec.lt, true);
+  assert.equal(rec.act, 'hold');
+  assert.equal(rec.kn, 35);
+  assert.ok((rec.pl as number) > 0.9, `P(hausse) fin de round ${rec.pl}`);
+  assert.equal(rec.upAsk, 0.6);
+  assert.match(reason, /BTC fin de round \(τ 25 s, TWAP acquis 35 s\) : P\(hausse\) fin de round 0\.9\d\d · asks hausse 0\.60 \/ baisse 0\.41 — mesure seulement, jamais d'entrée/);
+  // Même marché 3 s plus tard : pas de nouvelle mesure (une toutes les 8 s)
+  env.setNow((SLOT + 278) * 1000);
+  await r.tick();
+  assert.equal(evals.length, 1);
+  // Sans TWAP partiel (flux temps réel absent) : rien à mesurer, rien de journalisé
+  const env2 = setup({ getRoundData: async () => ({ spot: 100.06, strike: 100, sigmaPerSqrtSec: SIGMA, source: 'binance', candleAgeMs: 0 }), onEvaluation: (rec, reason) => evals.push({ rec, reason }) });
+  env2.setNow((SLOT + 275) * 1000);
+  await env2.runner().tick();
+  assert.equal(evals.length, 1);
+  // Réglage coupé : aucune lecture de carnet dans la dernière minute
+  let books = 0;
+  const env3 = setup({ cfg: { ...DEFAULT_FAIR_VALUE_CONFIG, lateMeasure: false }, getBook: async () => { books++; return { asks: [{ price: 0.6, size: 5 }], bids: [] }; }, getRoundData: async () => ({ spot: 100.06, strike: 100, sigmaPerSqrtSec: SIGMA, source: 'binance+ws', candleAgeMs: 0, twapPartial: { mean: 100.05, knownSec: 35 } }) });
+  env3.setNow((SLOT + 275) * 1000);
+  await env3.runner().tick();
+  assert.equal(books, 0);
+});

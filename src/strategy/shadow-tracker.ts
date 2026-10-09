@@ -119,7 +119,7 @@ export class ShadowTracker {
     // « modèle vs carnet » serait truquée.
     // Seulement les passages réguliers : les évaluations déclenchées par un saut du spot
     // sur-représenteraient les instants où un carnet en retard flatte le modèle.
-    if (r.mv) return;
+    if (r.mv || r.lt) return; // fin de round : autre modèle, autre fenêtre (rapport 1d)
     const pModel = rawModelProb(r);
     if (pModel === null) return;
     const pMarket = marketProbUp(r);

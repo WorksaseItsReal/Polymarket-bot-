@@ -57,7 +57,10 @@ interface CoinState {
   price: number;
   recvAt: number;
   lastMovePrice: number;
+  /** Dernier prix de chaque seconde (horloge locale), ~4 dernières minutes : TWAP partiel. */
+  secs: Array<[sec: number, price: number]>;
 }
+const SECS_KEPT = 240;
 
 /** Extrait (coin, prix, horodatage Binance) d'un message combiné `aggTrade`. Pure. */
 export function parseAggTrade(raw: string): { coin: StreamCoin; price: number; eventTime: number } | null {
@@ -140,6 +143,32 @@ export class SpotStream extends EventEmitter {
     return { price: s.price, ageMs, source: 'binance-ws' };
   }
 
+  /**
+   * Moyenne du prix par seconde sur [fromMs, toMs) — dernier prix de chaque seconde, reporté
+   * sur une seconde sans échange : la part déjà acquise du TWAP de règlement. null sans prix
+   * connu au début de l'intervalle (tolérance 2 s) ou si l'intervalle est vide.
+   */
+  meanSince(coin: string, fromMs: number, toMs: number): number | null {
+    const s = this.state.get(coin as StreamCoin);
+    if (!s || !s.secs.length) return null;
+    const from = Math.floor(fromMs / 1000);
+    const to = Math.ceil(toMs / 1000);
+    if (to <= from) return null;
+    let i = 0;
+    let price: number | null = null;
+    while (i < s.secs.length && s.secs[i][0] < from) { price = s.secs[i][1]; i++; }
+    if (price === null && (i >= s.secs.length || s.secs[i][0] > from + 2)) return null;
+    let sum = 0;
+    let n = 0;
+    for (let sec = from; sec < to; sec++) {
+      while (i < s.secs.length && s.secs[i][0] <= sec) { price = s.secs[i][1]; i++; }
+      if (price === null) continue;
+      sum += price;
+      n++;
+    }
+    return n ? sum / n : null;
+  }
+
   /** Médiane (réception locale − horodatage Binance), ms ; null si < 20 mesures. */
   clockSkewMs(): number | null {
     if (this.skews.length < 20) return null;
@@ -213,13 +242,20 @@ export class SpotStream extends EventEmitter {
       this.emit('clockSkew', skew);
     }
 
+    const sec = Math.floor(recvAt / 1000);
     const s = this.state.get(t.coin);
     if (!s) {
-      this.state.set(t.coin, { price: t.price, recvAt, lastMovePrice: t.price });
+      this.state.set(t.coin, { price: t.price, recvAt, lastMovePrice: t.price, secs: [[sec, t.price]] });
       return;
     }
     s.price = t.price;
     s.recvAt = recvAt;
+    const last = s.secs[s.secs.length - 1];
+    if (last && last[0] === sec) last[1] = t.price;
+    else if (!last || sec > last[0]) {
+      s.secs.push([sec, t.price]);
+      if (s.secs.length > SECS_KEPT) s.secs.splice(0, s.secs.length - SECS_KEPT);
+    }
     const bps = Math.abs(t.price / s.lastMovePrice - 1) * 1e4;
     if (bps >= this.moveBps) {
       s.lastMovePrice = t.price;

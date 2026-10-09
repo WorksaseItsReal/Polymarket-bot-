@@ -596,32 +596,61 @@ export interface ModelBookComparison {
  * (les cryptos d'un même round le sont aussi).
  */
 export function compareModelBook(rounds: ResolvedRecord[][], opts: { minTau?: number; maxTau?: number } = {}): ModelBookComparison {
-  const rows: Array<{ key: string; m: number; k: number }> = [];
+  const c = compareProbs(rounds, rawModelProb, marketProbUp, opts);
+  return { rounds: c.rounds, brierModel: c.brierA, brierMarket: c.brierB, t: c.t };
+}
+
+export interface PairedComparison {
+  rounds: number;
+  brierA: number | null;
+  brierB: number | null;
+  /** t groupé par créneau de (Brier A − Brier B) ; négatif = A meilleur */
+  t: number | null;
+}
+
+/** Comparaison appariée de deux sources de probabilité (même protocole que `compareModelBook`). */
+export function compareProbs(
+  rounds: ResolvedRecord[][],
+  pA: (r: ResolvedRecord) => number | null,
+  pB: (r: ResolvedRecord) => number | null,
+  opts: { minTau?: number; maxTau?: number } = {},
+): PairedComparison {
+  const rows: Array<{ key: string; a: number; b: number }> = [];
   for (const list of rounds) {
-    let m = 0;
-    let k = 0;
+    let a = 0;
+    let b = 0;
     let n = 0;
     for (const r of list) {
       if (opts.minTau !== undefined && r.tau < opts.minTau) continue;
       if (opts.maxTau !== undefined && r.tau > opts.maxTau) continue;
-      const pm = rawModelProb(r);
-      const pk = marketProbUp(r);
-      if (pm === null || pk === null) continue;
+      const va = pA(r);
+      const vb = pB(r);
+      if (va === null || vb === null || !Number.isFinite(va) || !Number.isFinite(vb)) continue;
       const y = r.upWon ? 1 : 0;
-      m += (pm - y) ** 2;
-      k += (pk - y) ** 2;
+      a += (va - y) ** 2;
+      b += (vb - y) ** 2;
       n++;
     }
-    if (n) rows.push({ key: slotKey(list[0].slug), m: m / n, k: k / n });
+    if (n) rows.push({ key: slotKey(list[0].slug), a: a / n, b: b / n });
   }
-  if (!rows.length) return { rounds: 0, brierModel: null, brierMarket: null, t: null };
-  const mean = (xs: number[]) => xs.reduce((a, b) => a + b, 0) / xs.length;
+  if (!rows.length) return { rounds: 0, brierA: null, brierB: null, t: null };
+  const mean = (xs: number[]) => xs.reduce((s, x) => s + x, 0) / xs.length;
   return {
     rounds: rows.length,
-    brierModel: mean(rows.map(r => r.m)),
-    brierMarket: mean(rows.map(r => r.k)),
-    t: clusteredMeanT(rows.map(r => ({ key: r.key, x: r.m - r.k }))).t,
+    brierA: mean(rows.map(r => r.a)),
+    brierB: mean(rows.map(r => r.b)),
+    t: clusteredMeanT(rows.map(r => ({ key: r.key, x: r.a - r.b }))).t,
   };
+}
+
+/**
+ * Mesures « fin de round » (lt) au format du rejeu et des comparaisons : pUp = P(Up) fin de
+ * round (`pl`). Les autres évaluations sont écartées (autre modèle, autre fenêtre).
+ */
+export function lateRounds(rounds: ResolvedRecord[][]): ResolvedRecord[][] {
+  return rounds
+    .map(list => list.filter(r => r.lt && typeof r.pl === 'number').map(r => ({ ...r, pUp: r.pl as number, pRaw: r.pl as number })))
+    .filter(list => list.length > 0);
 }
 
 /** Bornes acceptées par la variable FV_Z_SCALE (fairValueConfigFromEnv). */

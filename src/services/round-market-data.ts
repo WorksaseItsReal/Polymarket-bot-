@@ -42,6 +42,9 @@ export interface RoundMarketData {
    *  bougies ne le permettent pas) : journalisés pour comparer les estimateurs (rapport 1c). */
   sigmaCcPerSqrtSec?: number | null;
   sigmaParkPerSqrtSec?: number | null;
+  /** Dernière minute du round, flux temps réel Binance : moyenne du prix déjà acquise sur la
+   *  fenêtre de règlement et secondes couvertes (mesure « fin de round », jamais d'entrée). */
+  twapPartial?: { mean: number; knownSec: number } | null;
 }
 
 const PAIRS: Record<SpotCoin, { binance: string; coinbase: string }> = {
@@ -197,6 +200,7 @@ export async function getRoundMarketData(
   liveInput: LivePrice | null | (() => LivePrice | null) = null,
   twapWindowSec = DEFAULT_FAIR_VALUE_CONFIG.twapWindowSec,
   estimator: VolEstimator = 'cc',
+  twapMean: ((fromMs: number, toMs: number) => number | null) | null = null,
 ): Promise<RoundMarketData | null> {
   if (slotSec * 1000 > nowMs) return null; // round pas encore ouvert : strike inconnu
   // Un getter est relu APRÈS le chargement des bougies (qui peut prendre plusieurs
@@ -243,7 +247,16 @@ export async function getRoundMarketData(
     return deriveRoundData(loaded.candles, slotSec, nowMs, loaded.source, MAX_CANDLE_AGE_SPOT_MS, twapWindowSec, estimator);
   }
   if (liveOk && loaded.source.startsWith('binance')) {
-    return { ...base, spot: (live as LivePrice).price, source: `${loaded.source}+ws` };
+    // Dernière minute : part déjà acquise du TWAP de règlement, sur le même flux que le spot.
+    const endMs = slotSec * 1000 + 300_000;
+    const W = Math.min(60, Math.max(0, twapWindowSec));
+    let twapPartial: { mean: number; knownSec: number } | null = null;
+    if (twapMean && W > 0 && nowMs < endMs && nowMs > endMs - W * 1000) {
+      const from = endMs - W * 1000;
+      const mean = twapMean(from, nowMs);
+      if (mean !== null && mean > 0) twapPartial = { mean, knownSec: (nowMs - from) / 1000 };
+    }
+    return { ...base, spot: (live as LivePrice).price, source: `${loaded.source}+ws`, twapPartial };
   }
   return base;
 }

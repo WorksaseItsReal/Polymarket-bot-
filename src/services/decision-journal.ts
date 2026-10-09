@@ -64,6 +64,11 @@ export interface DecisionRecord {
    *  calibration (elle sur-représente les instants juste après un saut, où un carnet en
    *  retard flatte le modèle). */
   mv?: true;
+  /** Mesure « fin de round » (τ < fenêtre TWAP, jamais d'entrée) : P(Up) avec la part déjà
+   *  acquise du TWAP (`pl`) et secondes acquises (`kn`). Exclue des mesures régulières. */
+  lt?: true;
+  pl?: number | null;
+  kn?: number;
   upAsk: number | null;
   downAsk: number | null;
   /** Taille (parts) au meilleur ask. */
@@ -121,7 +126,7 @@ export class DecisionJournal {
     // perdent aussi : 30 s et 39,97 s tombent dans la même.)
     // Évaluations « saut du spot » : au plus une toutes les 3 intervalles (30 s) — utiles
     // pour rejouer les paris, mais sans doubler la taille du journal (et la mémoire du rapport).
-    const key = r.mv ? `${r.slug}|mv` : r.slug;
+    const key = r.lt ? `${r.slug}|lt` : r.mv ? `${r.slug}|mv` : r.slug;
     const gap = r.mv ? 3 * this.minIntervalMs : 0.8 * this.minIntervalMs;
     if (r.act !== 'buy' && r.t - (this.last.get(key) ?? -Infinity) < gap) return false;
     this.last.set(key, r.t);

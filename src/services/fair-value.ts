@@ -93,6 +93,11 @@ export interface FairValueConfig {
    *  (moyenne des deux variances). Les deux σ sont journalisés quel que soit ce réglage
    *  (sc, sp) : le rapport (section 1c) dit lequel prédit mieux AVANT de le changer. */
   volEstimator?: VolEstimator;
+  /** Mesurer la dernière minute des rounds (τ < fenêtre TWAP) — P(Up) avec la part déjà
+   *  acquise du TWAP et le carnet, journalisés, JAMAIS d'entrée (rapport, section 1d).
+   *  Défaut true ; FV_LATE_MEASURE=false pour couper (économise 2 lectures de carnet par
+   *  coin toutes les 8 s pendant la dernière minute). */
+  lateMeasure?: boolean;
 }
 
 export type VolEstimator = 'cc' | 'parkinson' | 'blend';
@@ -115,6 +120,7 @@ export const DEFAULT_FAIR_VALUE_CONFIG: FairValueConfig = {
   blendModel: 1,
   blendMarket: 0,
   volEstimator: 'cc',
+  lateMeasure: true,
 };
 
 /**
@@ -305,6 +311,33 @@ export function probUp(input: ProbUpInput, cfg: FairValueConfig = DEFAULT_FAIR_V
   const variance = sigmaPerSqrtSec * sigmaPerSqrtSec * pathVarSec + basis * basis;
   if (!(variance > 0)) return null;
   const z = (x / Math.sqrt(variance)) * (cfg.zScale > 0 ? cfg.zScale : 1);
+  const p = cfg.tails === 't4' ? studentT4CdfStd(z) : normCdf(z);
+  return Math.min(PROB_CEIL, Math.max(PROB_FLOOR, p));
+}
+
+export interface LateInput extends ProbUpInput {
+  /** Moyenne du prix déjà acquise sur la fenêtre de règlement (même flux que `spot`). */
+  partialMean: number;
+  /** Secondes de la fenêtre déjà acquises (≈ W − τ). */
+  knownSec: number;
+}
+
+/**
+ * P(Up) dans la fenêtre de moyenne finale (τ < W), quand une partie du TWAP de règlement est
+ * déjà observée : E[TWAP] = (moyenne acquise · (W − τ) + spot · τ) / W et seule la part restante
+ * est incertaine, Var = σ²·τ³/(3W²) (+ prix à battre, écart de flux). À τ = W on retrouve
+ * `probUp`. MESURE uniquement : la part acquise vient de Binance, le règlement de Chainlink.
+ */
+export function probUpLate(input: LateInput, cfg: FairValueConfig = DEFAULT_FAIR_VALUE_CONFIG): number | null {
+  const { spot, strike, sigmaPerSqrtSec: s, tauSec, partialMean, knownSec } = input;
+  const W = Math.min(60, Math.max(0, cfg.twapWindowSec));
+  if (!isPos(spot) || !isPos(strike) || !isPos(s) || !isPos(partialMean) || !(W > 0)) return null;
+  if (!(tauSec >= 0) || tauSec > W || !(knownSec >= 0)) return null;
+  const expected = (partialMean * (W - tauSec) + spot * tauSec) / W;
+  const basis = Math.max(0, cfg.basisBps) / 1e4;
+  const variance = s * s * (twapVarianceSeconds(tauSec, W) + Math.max(0, cfg.strikeNoiseSec)) + basis * basis;
+  if (!(variance > 0)) return null;
+  const z = (Math.log(expected / strike) / Math.sqrt(variance)) * (cfg.zScale > 0 ? cfg.zScale : 1);
   const p = cfg.tails === 't4' ? studentT4CdfStd(z) : normCdf(z);
   return Math.min(PROB_CEIL, Math.max(PROB_FLOOR, p));
 }
@@ -634,6 +667,7 @@ export function fairValueConfigFromEnv(env: Record<string, string | undefined>):
     blendModel: num('FV_BLEND_MODEL', d.blendModel, 0, 3),
     blendMarket: num('FV_BLEND_MARKET', d.blendMarket, 0, 3),
     volEstimator: VOL_ESTIMATORS.includes((env.FV_VOL_ESTIMATOR ?? '').trim() as VolEstimator) ? (env.FV_VOL_ESTIMATOR as string).trim() as VolEstimator : 'cc',
+    lateMeasure: (env.FV_LATE_MEASURE ?? '').trim().toLowerCase() !== 'false',
   };
   // Fenêtre vide (y compris à cause de la minute finale moyennée) : aucun pari possible → défauts.
   if (entryMinTauSec(cfg) > cfg.maxTauSec) { cfg.minTauSec = d.minTauSec; cfg.maxTauSec = d.maxTauSec; }

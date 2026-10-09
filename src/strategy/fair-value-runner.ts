@@ -28,6 +28,7 @@ import {
   maxBuyPriceForEdge,
   probNoiseSd,
   probUp,
+  probUpLate,
   type BookLevel,
   type FairValueConfig,
 } from '../services/fair-value.js';
@@ -48,6 +49,8 @@ import { computeStake, MAX_VARIANCE_PCT } from '../services/stake-sizing.js';
 import { msgAlert, msgTradeClosed, msgTradeOpened } from '../services/telegram-messages.js';
 
 export const STRATEGY_COINS = ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE'] as const;
+/** Sous ce τ, plus de mesure « fin de round » (lecture des carnets trop proche du règlement). */
+const LATE_MIN_TAU_SEC = 5;
 export type StrategyCoin = (typeof STRATEGY_COINS)[number];
 
 /** Coins tradés, depuis une liste « BTC,ETH » (env FV_COINS). Vide/invalide → tous. */
@@ -228,6 +231,8 @@ export class FairValueRunner {
 
   /** Dernière ligne lisible par marché (même si le journal l'a tue par throttling). */
   private readonly lastReason = new Map<string, string>();
+  /** Dernière mesure « fin de round » par marché (ms). */
+  private readonly lateAt = new Map<string, number>();
 
   private holdLog(id: string, msg: string): void {
     this.lastReason.set(id, msg);
@@ -445,6 +450,54 @@ export class FairValueRunner {
     if (this.markets.length) this.lastMarketsFoundAt = now;
   }
 
+  /**
+   * Dernière minute du round (τ < fenêtre TWAP) : MESURE seulement, jamais d'entrée. Une partie
+   * du TWAP de règlement est déjà acquise (prix Binance par seconde) : P(Up) « fin de round » et
+   * le carnet sont journalisés (lt, pl, kn) pour que le rapport (section 1d) dise si un edge s'y
+   * cache — avant d'envisager quoi que ce soit (latence réelle, Chainlink ≠ Binance).
+   */
+  private async measureLate(market: ScannedMarket, slot: number, endMs: number): Promise<void> {
+    const { cfg } = this.d;
+    const key = market.conditionId;
+    const now0 = this.d.now();
+    if (now0 - (this.lateAt.get(key) ?? -Infinity) < 8000) return; // une mesure par marché toutes les 8 s
+    this.lateAt.set(key, now0);
+    if (this.lateAt.size > 200) this.lateAt.clear();
+    let rec: DecisionRecord | null = null;
+    try {
+      const data = await this.d.getRoundData(market.underlying, slot, now0);
+      if (!data?.twapPartial) return; // sans flux temps réel, rien à mesurer
+      const [upBook, downBook] = await Promise.all([this.d.getBook(market.upTokenId), this.d.getBook(market.downTokenId)]);
+      const now = this.d.now();
+      const tauSec = (endMs - now) / 1000;
+      if (tauSec < LATE_MIN_TAU_SEC || tauSec >= entryMinTauSec(cfg)) return;
+      const upBest = bestLevel(upBook.asks, 'ask');
+      const downBest = bestLevel(downBook.asks, 'ask');
+      const upBid = bestLevel(upBook.bids, 'bid');
+      const downBid = bestLevel(downBook.bids, 'bid');
+      const pl = probUpLate({ spot: data.spot, strike: data.strike, sigmaPerSqrtSec: data.sigmaPerSqrtSec, tauSec, partialMean: data.twapPartial.mean, knownSec: data.twapPartial.knownSec }, cfg);
+      const pRaw = probUp({ spot: data.spot, strike: data.strike, sigmaPerSqrtSec: data.sigmaPerSqrtSec, tauSec }, cfg);
+      rec = {
+        t: now, slug: market.slug, coin: market.underlying, tau: Math.round(tauSec * 10) / 10, spot: data.spot, strike: data.strike,
+        sig: data.sigmaPerSqrtSec, pUp: pRaw, pRaw, zs: cfg.zScale, lt: true, pl, kn: Math.round(data.twapPartial.knownSec),
+        ...(data.sigmaCcPerSqrtSec ? { sc: data.sigmaCcPerSqrtSec } : {}), ...(data.sigmaParkPerSqrtSec ? { sp: data.sigmaParkPerSqrtSec } : {}),
+        ...(cfg.tails === 't4' ? { tl: 't4' as const } : {}), ...(cfg.twapWindowSec > 0 ? { tw: cfg.twapWindowSec } : {}),
+        upAsk: upBest?.price ?? null, downAsk: downBest?.price ?? null, upAskSz: upBest?.size ?? null, downAskSz: downBest?.size ?? null,
+        upBid: upBid?.price ?? null, downBid: downBid?.price ?? null, upBidSz: upBid?.size ?? null, downBidSz: downBid?.size ?? null,
+        src: data.source, act: 'hold',
+      };
+      this.lastReason.set(key, `${market.underlying} fin de round (τ ${Math.round(tauSec)} s, TWAP acquis ${Math.round(data.twapPartial.knownSec)} s) : `
+        + `P(hausse) fin de round ${pl === null ? '—' : pl.toFixed(3)} · asks hausse ${upBest ? upBest.price.toFixed(2) : '—'} / baisse ${downBest ? downBest.price.toFixed(2) : '—'} — mesure seulement, jamais d'entrée`);
+    } catch {
+      /* mesure silencieuse : ne doit jamais gêner la stratégie */
+    } finally {
+      if (rec) {
+        const reason = this.lastReason.get(key) ?? '';
+        try { this.d.onEvaluation?.(rec, reason); } catch { /* idem */ }
+      }
+    }
+  }
+
   async enterNewTrades(coins?: readonly string[], gateBlock: string | null = null): Promise<void> {
     const { cfg } = this.d;
     await this.refreshMarkets();
@@ -455,6 +508,10 @@ export class FairValueRunner {
       const endMs = slot * 1000 + 300_000;
       const now = this.d.now();
       let tauSec = (endMs - now) / 1000;
+      if (tauSec < entryMinTauSec(cfg) && tauSec >= LATE_MIN_TAU_SEC && cfg.lateMeasure !== false && cfg.twapWindowSec > 0) {
+        await this.measureLate(market, slot, endMs);
+        continue;
+      }
       if (tauSec < entryMinTauSec(cfg) || tauSec > cfg.maxTauSec) continue; // aucun appel réseau hors fenêtre
       const coin = market.underlying;
       let rec: DecisionRecord | null = null; // évaluation journalisée (pari ou abstention)

@@ -19,7 +19,7 @@ import { gunzipSync } from 'node:zlib';
 import { fetchRoundOutcome } from '../../src/services/paper-ledger.js';
 import { entryMinTauSec, fairValueConfigFromEnv } from '../../src/services/fair-value.js';
 import {
-  applyBlend, blendVerdict, zScaleConflictsWithBlend, bookStats, brier, byRound, calibration, compareModelBook, compareSigmaEstimators, describeBlend, fitBlend,
+  applyBlend, blendVerdict, zScaleConflictsWithBlend, bookStats, brier, byRound, calibration, compareModelBook, compareProbs, compareSigmaEstimators, describeBlend, fitBlend, lateRounds,
   fitZScale, halves, marketProbUp, normalizeZScale, rawModelProb, replay, zScaleAdvice,
   strikeVsOfficial, thresholdGrid, type ResolvedRecord,
 } from '../../src/analysis/fv-analysis.js';
@@ -51,6 +51,7 @@ function slim(r: DecisionRecord): DecisionRecord {
     // spot, sc, sp gardés : probabilités recalculées avec chaque estimateur de volatilité (section 1c)
     t: r.t, slug: intern(r.slug), coin: intern(r.coin), tau: r.tau, spot: r.spot, strike: r.strike, sig: r.sig, pUp: r.pUp, pRaw: r.pRaw, zs: r.zs,
     ...(r.sc ? { sc: r.sc } : {}), ...(r.sp ? { sp: r.sp } : {}), ...(r.tw ? { tw: r.tw } : {}),
+    ...(r.lt ? { lt: true as const, pl: r.pl ?? null, kn: r.kn } : {}), // mesures fin de round (section 1d)
     upAsk: r.upAsk, downAsk: r.downAsk, upAskSz: r.upAskSz, downAskSz: null, upBid: r.upBid, src: '', act: r.act === 'buy' ? 'buy' : 'hold',
     // GARDER mv (exclusion des mesures) et tl (loi du modèle) : sans eux, le filtre des
     // évaluations « saut du spot » et la conversion t4 étaient silencieusement inopérants.
@@ -143,7 +144,8 @@ async function main() {
   // Mesures (modèle vs carnet, mélange, calibration) : passages RÉGULIERS seulement. Les
   // évaluations déclenchées par un saut du spot restent pour le rejeu des paris (ce sont de
   // vraies occasions), mais sur-représenteraient les instants favorables au modèle.
-  const measureRounds = rounds.map(l => l.filter(r => !r.mv)).filter(l => l.length);
+  // Mesures : passages réguliers seulement (ni « saut du spot », ni « fin de round », section 1d).
+  const measureRounds = rounds.map(l => l.filter(r => !r.mv && !r.lt)).filter(l => l.length);
   const evals = measureRounds.flat();
   console.log(`\n=== Journal : ${records.length} évaluations, ${new Set(records.map(r => r.slug)).size} rounds, ${rounds.length} rounds réglés ===\n`);
   if (!rounds.length) return;
@@ -199,6 +201,28 @@ async function main() {
     console.log(best
       ? `   → ${best} prédit SIGNIFICATIVEMENT mieux : candidat FV_VOL_ESTIMATOR=${best} (à confirmer sur les deux moitiés avant de changer).`
       : '   → pas de différence significative : garder cc (le rebond bid/ask gonfle Parkinson sur les petits cours).');
+  }
+
+  // 1d. Dernière minute du round : P(Up) avec la part acquise du TWAP, contre le carnet, et
+  // les entrées hypothétiques (jamais prises par le bot).
+  const late = lateRounds(rounds);
+  console.log(`\n1d) Fin de round (τ < ${cfg.twapWindowSec} s, TWAP de règlement en partie acquis) — mesure seulement : le bot n'y entre JAMAIS`);
+  if (!late.length) {
+    console.log('   pas encore de mesures (flux spot temps réel requis ; champs lt/pl écrits depuis cette version du bot).');
+  } else {
+    const lp = { feeRate: cfg.takerFeeRate, minAsk: cfg.minAsk, maxAsk: cfg.maxAsk, minTau: 5, maxTau: cfg.twapWindowSec, noiseK: 0 };
+    const lateRegular = lateRounds(rounds.map(l => l.filter(r => !r.mv)).filter(l => l.length)); // sans les passages « saut du spot »
+    const lc = compareProbs(lateRegular, r => r.pUp, marketProbUp, { minTau: 5, maxTau: cfg.twapWindowSec });
+    console.log(`   P(Up) fin de round vs carnet : Brier ${num(lc.brierA, 4)} | ${num(lc.brierB, 4)} | t ${num(lc.t, 1)} (n=${lc.rounds} rounds ; t ≤ −2 = le modèle voit mieux que le carnet)`);
+    const all = replay(late, cfg.minEdge, cfg.minProb, lp);
+    const [la, lb] = halves(late);
+    const ra = replay(la, cfg.minEdge, cfg.minProb, lp);
+    const rb = replay(lb, cfg.minEdge, cfg.minProb, lp);
+    console.log(`   entrées hypothétiques (seuils actuels, sans marge de bruit, remplies au meilleur ask) : n=${all.n}  WR ${pct(all.winRate)}  EV/$ ${num(all.evPerDollar, 4)}  t ${num(all.tStat, 1)}  | moitiés ${num(ra.evPerDollar, 3)} / ${num(rb.evPerDollar, 3)}`);
+    const promising = all.n >= 100 && (all.tStat ?? 0) >= 2 && (ra.evPerDollar ?? 0) > 0 && (rb.evPerDollar ?? 0) > 0;
+    console.log(promising
+      ? '   → un edge SEMBLE exister en fin de round (deux moitiés positives). Avant d\'y entrer : latence réelle de remplissage, Chainlink ≠ Binance, profondeur — à étudier, pas à activer.'
+      : '   → rien de démontré en fin de round (ou pas assez de rounds).');
   }
 
   // 1b. Mélange modèle + carnet
