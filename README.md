@@ -159,7 +159,7 @@ par `npm run doctor`. Modèle complet et commenté : [`.env.example`](.env.examp
 |---|---|---|
 | `PAPER_CAPITAL` | `50` | Capital papier de référence. Mise ≤ 1 % du capital **actuel** → **250 $ recommandé** (minimum Polymarket 1 $ par ordre). |
 | `CAPITAL_USD` | — | Ancien nom : lu seulement si `PAPER_CAPITAL` est absent (le doctor le signale). À renommer. |
-| `DRY_RUN` | `true` | `false` = demande de mode réel : **refusé** (non implémenté). |
+| `DRY_RUN` | `true` | `false` = demande de mode réel : **refusé** (non implémenté) — le bot s'arrête (code 1) en l'annonçant sur Telegram ; sous PM2 les relances sont comptées et les alertes espacées. |
 | `DAILY_MAX_LOSS_PCT` / `MONTHLY_MAX_LOSS_PCT` / `MAX_DRAWDOWN_PCT` / `TOTAL_MAX_LOSS_PCT` | `0.05` / `0.15` / `0.25` / `0.40` | Porte de risque (§6). Hiérarchie vérifiée (jour ≤ mois ≤ totale). |
 | `FV_MIN_EDGE` | `0.04` | Edge minimal exigé (probabilité modèle − coût réel par part), après frais. |
 | `FV_NOISE_EDGE_K` | `1.5` | Marge en plus, en écarts-types du bruit de notre probabilité (prix à battre estimé, écart Binance/Chainlink). Simulation (10 graines × 3 000 rounds) : sans marge, 13 % des rounds joués à −5 %/$ contre un carnet juste ; avec, 0,1 %, et sur un carnet en retard le gain par pari passe de +17,5 % à +38 %. S'applique aussi aux reventes. |
@@ -352,8 +352,11 @@ partie des prix fantômes, mais des bots co-localisés restent plus rapides : le
   (edge, risque, exécution, PnL, recap, code) ; [`docs/rebuild/strategy/EDGE.md`](docs/rebuild/strategy/EDGE.md),
   [`docs/rebuild/risk/RISK.md`](docs/rebuild/risk/RISK.md), [`docs/rebuild/execution/COSTS.md`](docs/rebuild/execution/COSTS.md).
 - [`docs/EDGE-VALIDATION.md`](docs/EDGE-VALIDATION.md) — validation d'edge de l'ancienne règle
-  (1 411 décisions). Les autres documents de `docs/` décrivent l'ancienne architecture
-  (SDK, DipArb, recap Hermes) et sont conservés comme archives.
+  (1 411 décisions).
+- [`docs/legacy/`](docs/legacy/) — guides de l'ancienne architecture (QUICKSTART, BEGINNER_GUIDE,
+  README arabe, ancien dashboard, correctifs C2–C9) : **ils ne décrivent plus ce bot**, conservés
+  pour l'historique. Les autres documents de `docs/` (SDK, DipArb, recap Hermes) sont des archives
+  de même nature. Le dump de code `repoinfo.md` (31 791 lignes) a été supprimé.
 - [`.env.example`](.env.example) — modèle de configuration (sans secrets).
 - `npm run doctor` — diagnostic ; `npm run demo` — le bot sur un marché simulé (hors ligne) ;
   `npm run check` — types et tests (dont le vrai bot de bout en bout sur un faux réseau).
