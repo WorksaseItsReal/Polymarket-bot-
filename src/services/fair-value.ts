@@ -544,6 +544,15 @@ export function decide(input: DecisionInput, cfg: FairValueConfig = DEFAULT_FAIR
     return none(`asks hors bornes [${cfg.minAsk}, ${cfg.maxAsk}] (${summary})`, { ...ctx, quotes, best });
   }
   if (!eligible.length) {
+    // Un côté peut avoir p ≥ minProb mais un ask hors bornes (ex. DOWN p=0.795, ask 0.93 > 0.92) :
+    // le dire tel quel plutôt qu'un faux « aucun côté avec p_modèle ≥ … ».
+    const capped = quotes.filter(q => q.prob >= cfg.minProb);
+    if (capped.length) {
+      const why = capped
+        .map(q => `${q.side} p=${q.prob.toFixed(3)} mais ask ${q.ask.toFixed(2)} ${q.ask > cfg.maxAsk ? `> ${cfg.maxAsk}` : `< ${cfg.minAsk}`}`)
+        .join(', ');
+      return none(`${why} ; ${inBounds.map(q => q.side).join(' et ')} p_modèle < ${cfg.minProb} (${summary})`, { ...ctx, quotes, best });
+    }
     return none(`aucun côté avec p_modèle ≥ ${cfg.minProb} (${summary})`, { ...ctx, quotes, best });
   }
   if (!(best.edge >= requiredEdge)) {

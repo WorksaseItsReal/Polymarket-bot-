@@ -283,7 +283,7 @@ export async function main(env: Record<string, string | undefined> = process.env
       notify(msgStartup({
         capital: config.capital, minEdge: config.fv.minEdge, minProb: config.fv.minProb, feeRate: config.fv.takerFeeRate,
         pollSec: config.pollMs / 1000, coins: [...config.coins], stats: ledgerStats(), warning: capWarn ?? undefined,
-        zScale: config.fv.zScale, blendModel: config.fv.blendModel, blendMarket: config.fv.blendMarket, live: false,
+        zScale: config.fv.zScale, blendModel: config.fv.blendModel, blendMarket: config.fv.blendMarket,
         noiseK: config.fv.noiseEdgeK,
         restart: crashStart && (crashStart.brutal || crashStart.afterError) ? { brutal: crashStart.brutal, recentCrashes: crashStart.recentCrashes } : undefined,
       }));

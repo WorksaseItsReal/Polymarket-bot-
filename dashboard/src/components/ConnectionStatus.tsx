@@ -17,7 +17,7 @@ export function ConnectionStatus({ connected, error }: ConnectionStatusProps) {
       <div className={`w-2 h-2 rounded-full animate-pulse ${error ? 'bg-red-400' : 'bg-yellow-400'}`} />
       {error ? (
         <span>
-          <span className="font-medium">Connection Error:</span> {error}
+          <span className="font-medium">Erreur de connexion :</span> {error}
         </span>
       ) : (
         <span className="flex items-center gap-2">
@@ -37,7 +37,7 @@ export function ConnectionStatus({ connected, error }: ConnectionStatusProps) {
               d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
             />
           </svg>
-          Connecting to dashboard server...
+          Connexion au bot…
         </span>
       )}
     </div>

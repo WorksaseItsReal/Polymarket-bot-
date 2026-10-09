@@ -95,6 +95,16 @@ test('decide : un carnet calibré sur le modèle ne déclenche AUCUN trade (les 
   assert.equal(d.side, null, d.reason);
 });
 
+test('decide : un côté probable mais à l\'ask hors bornes est nommé tel quel (pas un faux « aucun côté »)', () => {
+  const base = { spot: 99.8, strike: 100, sigmaPerSqrtSec: SIGMA, tauSec: 120 };
+  const pDown = 1 - probUp(base)!;
+  assert.ok(pDown >= 0.6, `DOWN p=${pDown.toFixed(3)} doit passer le filtre de probabilité`);
+  const d = decide({ ...base, upAsk: 0.09, downAsk: 0.93 });
+  assert.equal(d.side, null, d.reason);
+  assert.match(d.reason, /^DOWN p=0\.\d{3} mais ask 0\.93 > 0\.92 ; UP p_modèle < 0\.6 \(/, d.reason);
+  assert.doesNotMatch(d.reason, /aucun côté avec p_modèle/);
+});
+
 test('decide : un carnet en retard sur le spot déclenche l\'achat du bon côté', () => {
   const base = { spot: 100.12, strike: 100, sigmaPerSqrtSec: SIGMA, tauSec: 120 };
   const p = probUp(base)!;

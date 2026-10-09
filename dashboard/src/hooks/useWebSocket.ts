@@ -10,9 +10,11 @@ interface WebSocketMessage {
 // Jeton éventuel (DASHBOARD_TOKEN côté bot) : repris de l'URL de la page (?token=…).
 export const DASHBOARD_TOKEN = new URLSearchParams(window.location.search).get('token') ?? '';
 const TOKEN_QS = DASHBOARD_TOKEN ? `?token=${encodeURIComponent(DASHBOARD_TOKEN)}` : '';
+// Page servie en https (reverse proxy) → wss, sinon le navigateur bloque la connexion (contenu mixte).
+const WS_PROTO = window.location.protocol === 'https:' ? 'wss' : 'ws';
 const WS_URL = (window.location.port === '5173'
   ? `ws://${window.location.hostname}:3001`
-  : `ws://${window.location.host}`) + TOKEN_QS;
+  : `${WS_PROTO}://${window.location.host}`) + TOKEN_QS;
 /** Base de l'API du bot (même hôte que la page, ou :3001 en dev). */
 export const API_BASE = window.location.port === '5173'
   ? `http://${window.location.hostname}:3001`
@@ -85,13 +87,13 @@ export function useWebSocket() {
       };
 
       ws.onerror = () => {
-        setError('Connection failed. Is the bot running?');
+        setError('connexion au bot impossible — tourne-t-il ? (jeton manquant ou faux si DASHBOARD_TOKEN est défini)');
         setConnected(false);
       };
 
       wsRef.current = ws;
     } catch (e) {
-      setError(`Failed to connect: ${e}`);
+      setError(`connexion impossible : ${e}`);
     }
   }, []);
 
