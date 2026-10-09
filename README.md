@@ -158,6 +158,7 @@ par `npm run doctor`. Modèle complet et commenté : [`.env.example`](.env.examp
 | Variable | Défaut | Rôle |
 |---|---|---|
 | `PAPER_CAPITAL` | `50` | Capital papier de référence. Mise ≤ 1 % du capital **actuel** → **250 $ recommandé** (minimum Polymarket 1 $ par ordre). |
+| `CAPITAL_USD` | — | Ancien nom : lu seulement si `PAPER_CAPITAL` est absent (le doctor le signale). À renommer. |
 | `DRY_RUN` | `true` | `false` = demande de mode réel : **refusé** (non implémenté). |
 | `DAILY_MAX_LOSS_PCT` / `MONTHLY_MAX_LOSS_PCT` / `MAX_DRAWDOWN_PCT` / `TOTAL_MAX_LOSS_PCT` | `0.05` / `0.15` / `0.25` / `0.40` | Porte de risque (§6). Hiérarchie vérifiée (jour ≤ mois ≤ totale). |
 | `FV_MIN_EDGE` | `0.04` | Edge minimal exigé (probabilité modèle − coût réel par part), après frais. |

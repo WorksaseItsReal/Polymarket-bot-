@@ -43,9 +43,18 @@ export function configChecks(env: Env): Check[] {
     ? (/aucun pari/.test(capWarn) ? err('Capital', capWarn) : warn('Capital', capWarn))
     : ok('Capital', `${c.capital} $ (mise max ${(c.capital * MAX_VARIANCE_PCT).toFixed(2)} $ par pari)`));
 
-  const legacy = ['DIPARB_ENABLED', 'SMARTMONEY_ENABLED', 'ARBITRAGE_ENABLED', 'TREND_ANALYSIS_ENABLED', 'DEEPSEEK_ANALYZER_ENABLED', 'POLYMARKET_PRIVATE_KEY']
-    .filter(k => (env[k] ?? '').trim() !== '' && (env[k] ?? '').trim() !== 'your_private_key_here');
+  const legacy = Object.keys(env)
+    .filter(k => /^(DIPARB_|SMARTMONEY_|ARBITRAGE_|TREND_ANALYSIS_|DEEPSEEK_|POLYGON_RPC_URL$|POLYMARKET_PRIVATE_KEY$)/.test(k))
+    .filter(k => (env[k] ?? '').trim() !== '' && (env[k] ?? '').trim() !== 'your_private_key_here')
+    .sort();
   if (legacy.length) out.push(warn('Variables obsolètes', `${legacy.join(', ')} : sans effet depuis la reconstruction (plus de stratégie héritée, de LLM ni de wallet dans le bot) — à retirer du .env.`));
+  // CAPITAL_USD (ancien nom) n'est PAS sans effet : la config le lit encore faute de PAPER_CAPITAL valide.
+  if ((env.CAPITAL_USD ?? '').trim() !== '') {
+    const paperValid = (env.PAPER_CAPITAL ?? '').trim() !== '' && !warnings.some(w => w.startsWith('PAPER_CAPITAL='));
+    out.push(warn('Ancien nom', paperValid
+      ? 'CAPITAL_USD ignoré (PAPER_CAPITAL prime) — le retirer du .env.'
+      : `CAPITAL_USD=${(env.CAPITAL_USD ?? '').trim()} sert de capital papier faute de PAPER_CAPITAL valide — le renommer PAPER_CAPITAL dans le .env.`));
+  }
 
   out.push(!c.telegram
     ? warn('Telegram', 'non configuré (TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID) : aucune notification.')

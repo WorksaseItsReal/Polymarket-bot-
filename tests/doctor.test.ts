@@ -23,6 +23,13 @@ test('configuration : capital trop petit, variables obsolètes, réglages ignor�
   assert.ok(good.every(c => c.level === 'ok'), summarize(good).text);
   assert.equal(configChecks({ POLYMARKET_PRIVATE_KEY: 'your_private_key_here' }).some(c => c.label === 'Variables obsolètes'), false, 'placeholder toléré');
   assert.equal(level(configChecks({ POLYMARKET_PRIVATE_KEY: '0x' + 'a'.repeat(64) }), 'Variables obsolètes'), 'warn');
+  assert.match(configChecks({ DEEPSEEK_API_KEY: 'k', POLYGON_RPC_URL: 'https://x' }).find(c => c.label === 'Variables obsolètes')!.detail, /DEEPSEEK_API_KEY, POLYGON_RPC_URL/);
+  const ancien = (env: Record<string, string>) => configChecks(env).find(c => c.label === 'Ancien nom')?.detail ?? '';
+  assert.match(ancien({ CAPITAL_USD: '250' }), /CAPITAL_USD=250 sert de capital papier/, 'encore lu faute de PAPER_CAPITAL');
+  assert.match(ancien({ CAPITAL_USD: '250', PAPER_CAPITAL: 'abc' }), /sert de capital papier/, 'PAPER_CAPITAL invalide = absent');
+  assert.match(ancien({ CAPITAL_USD: '250', PAPER_CAPITAL: '300' }), /ignoré \(PAPER_CAPITAL prime\)/);
+  assert.equal(ancien({ PAPER_CAPITAL: '300' }), '', 'rien à dire sans CAPITAL_USD');
+  assert.equal(configChecks({ CAPITAL_USD: '250' }).some(c => c.label === 'Variables obsolètes'), false, 'CAPITAL_USD n\'est pas « sans effet »');
 });
 
 test('fichiers : registre illisible et arrêt de sécurité actif = erreurs', () => {
