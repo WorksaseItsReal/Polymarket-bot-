@@ -162,3 +162,20 @@ test('port déjà pris : erreur journalisée, pas de crash', async () => {
     a.close();
   }
 });
+
+test('stopDashboard : se termine même avec un client WebSocket encore connecté', async () => {
+  const srv = startDashboard(0, { host: '127.0.0.1' });
+  await once(srv, 'listening');
+  const port = (srv.address() as { port: number }).port;
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/`);
+  await once(ws, 'open');
+  let timer: NodeJS.Timeout | undefined;
+  const guard = new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error('stopDashboard bloqué par un client connecté')), 3000); });
+  try {
+    await Promise.race([stopDashboard(), guard]);
+  } finally {
+    clearTimeout(timer);
+  }
+  await Promise.race([once(ws, 'close'), sleep(1000)]);
+  assert.notEqual(ws.readyState, WebSocket.OPEN, 'client coupé par l\'arrêt');
+});

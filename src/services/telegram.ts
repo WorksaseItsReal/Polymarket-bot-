@@ -151,7 +151,7 @@ export class TelegramClient {
           ok: false,
           retryable: (me.error_code ?? 0) >= 500 || me.error_code === 429,
           detail: me.error_code === 401 || me.error_code === 404
-            ? 'token refusé par Telegram (401) : régénère-le avec @BotFather et mets à jour TELEGRAM_BOT_TOKEN'
+            ? `token refusé par Telegram (${me.error_code}) : régénère-le avec @BotFather et mets à jour TELEGRAM_BOT_TOKEN`
             : `getMe en échec (${me.error_code ?? '?'}) : ${this.redact(me.description ?? 'erreur inconnue')}`,
         };
       }
@@ -199,9 +199,15 @@ export class TelegramClient {
   private async drain(): Promise<void> {
     while (this.queue.length) {
       const text = this.queue.shift() as string;
-      const wait = this.lastSentAt + this.minIntervalMs - Date.now();
-      if (wait > 0) await this.sleep(wait);
-      await this.deliver(text);
+      try {
+        const wait = this.lastSentAt + this.minIntervalMs - Date.now();
+        if (wait > 0) await this.sleep(wait);
+        await this.deliver(text);
+      } catch {
+        // `deliver` capture tout ; ne reste qu'un `sleep`/`log` injecté qui lève. La file ne
+        // doit jamais mourir sur un message (sinon plus AUCUNE notification jusqu'au redémarrage).
+        this.stats.failed++;
+      }
       this.lastSentAt = Date.now();
     }
   }

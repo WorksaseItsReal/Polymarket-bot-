@@ -94,6 +94,26 @@ export function hostAllowed(hostHeader: string | undefined, tokenSet: boolean): 
   }
 }
 
+/**
+ * Envoie un fichier de dashboard/dist. Une erreur de lecture en cours de route (fichier
+ * remplacé par un `npm run build`, disque) est une erreur du FLUX, pas de la requête : sans
+ * écouteur, elle devenait une exception non rattrapée → arrêt du bot pour un affichage.
+ */
+function streamFile(filePath: string, contentType: string, res: http.ServerResponse): void {
+  const stream = fs.createReadStream(filePath);
+  stream.on('error', (err) => {
+    console.error(`[Dashboard] lecture de ${path.basename(filePath)} impossible : ${err.message}`);
+    if (!res.headersSent) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'fichier illisible' }));
+    } else {
+      res.destroy();
+    }
+  });
+  stream.on('open', () => res.writeHead(200, { 'Content-Type': contentType }));
+  stream.pipe(res);
+}
+
 export function startDashboard(port = 3001, opts: DashboardOptions = {}): http.Server {
   let host = opts.host || '127.0.0.1';
   const token = opts.token || '';
@@ -214,16 +234,14 @@ export function startDashboard(port = 3001, opts: DashboardOptions = {}): http.S
       };
       const contentType = mimeTypes[ext] || 'application/octet-stream';
 
-      res.writeHead(200, { 'Content-Type': contentType });
-      fs.createReadStream(filePath).pipe(res);
+      streamFile(filePath, contentType, res);
       return;
     }
 
     // SPA fallback - serve index.html for all other routes
     const indexPath = path.join(distPath, 'index.html');
     if (fs.existsSync(indexPath)) {
-      res.writeHead(200, { 'Content-Type': 'text/html' });
-      fs.createReadStream(indexPath).pipe(res);
+      streamFile(indexPath, 'text/html', res);
       return;
     }
 
@@ -308,17 +326,25 @@ export function startDashboard(port = 3001, opts: DashboardOptions = {}): http.S
   return server;
 }
 
+/**
+ * Arrêt du serveur. `wss.close()` (ws ≥ 8) ne ferme PAS les clients connectés et
+ * `server.close()` attend la fin de toutes les connexions : un navigateur resté ouvert
+ * faisait attendre la promesse indéfiniment. On coupe donc clients WS et connexions HTTP.
+ */
 export function stopDashboard(): Promise<void> {
   return new Promise((resolve) => {
     if (wss) {
+      for (const client of wss.clients) {
+        try { client.terminate(); } catch { /* déjà fermé */ }
+      }
       wss.close();
       wss = null;
     }
     if (server) {
-      server.close(() => {
-        server = null;
-        resolve();
-      });
+      const s = server;
+      server = null;
+      s.close(() => resolve());
+      s.closeAllConnections();
     } else {
       resolve();
     }
