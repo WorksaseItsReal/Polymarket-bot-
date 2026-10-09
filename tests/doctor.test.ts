@@ -11,33 +11,18 @@ import { configChecks, fileChecks, networkChecks, runtimeChecks, summarize } fro
 
 const level = (cs: ReturnType<typeof configChecks>, label: string) => cs.find(c => c.label === label)?.level;
 
-test('configuration : capital trop petit, anciennes stratégies, réglages ignorés, mode réel', () => {
+test('configuration : capital trop petit, variables obsolètes, réglages ignorés, mode réel refusé', () => {
   const bad = configChecks({ PAPER_CAPITAL: '50', DIPARB_ENABLED: 'true', FV_Z_SCALE: '9', TELEGRAM_BOT_TOKEN: 'abc', TELEGRAM_CHAT_ID: '1' });
   assert.equal(level(bad, 'Capital'), 'error');
-  assert.equal(level(bad, 'Anciennes stratégies'), 'warn');
-  assert.match(bad.find(c => c.label === 'Réglages FV')!.detail, /FV_Z_SCALE=9/);
+  assert.equal(level(bad, 'Variables obsolètes'), 'warn');
+  assert.match(bad.find(c => c.label === 'Réglages')!.detail, /FV_Z_SCALE=9/);
   assert.equal(level(bad, 'Telegram'), 'error', 'token à la mauvaise forme');
+  assert.match(configChecks({ DRY_RUN: 'false' }).find(c => c.label === 'Mode')!.detail, /refusera de démarrer/);
   assert.equal(level(configChecks({ DRY_RUN: 'false' }), 'Mode'), 'error');
   const good = configChecks({ PAPER_CAPITAL: '250', FV_MIN_EDGE: '0.05', TELEGRAM_BOT_TOKEN: '123456789:' + 'A'.repeat(35), TELEGRAM_CHAT_ID: '42' });
   assert.ok(good.every(c => c.level === 'ok'), summarize(good).text);
-});
-
-test('clé du wallet : forme vérifiée sans jamais la citer', () => {
-  const key = '4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318';
-  const check = (k: string | undefined, extra: Record<string, string> = {}) => configChecks({ POLYMARKET_PRIVATE_KEY: k, ...extra }).find(c => c.label === 'Clé du wallet')!;
-  assert.equal(check(undefined).level, 'ok');
-  assert.equal(check('your_private_key_here').level, 'ok');
-  assert.match(check('0x' + key).detail, /bonne forme ; en papier elle ne signe rien/);
-  assert.match(check(` 0x${key} `).detail, /espaces autour ignorés/);
-  const typo = check(key.slice(0, 20) + 'O' + key.slice(21));
-  assert.equal(typo.level, 'warn');
-  assert.match(typo.detail, /1 caractère\(s\) non hexadécimal/);
-  assert.match(check(key.slice(1)).detail, /63 caractères au lieu de 64 — sans effet en papier/);
-  assert.equal(check(key.slice(1), { DRY_RUN: 'false' }).level, 'error');
-  assert.equal(check(undefined, { DRY_RUN: 'false' }).level, 'error');
-  for (const k of [key, key.slice(1), key.slice(0, 20) + 'O' + key.slice(21)]) {
-    assert.ok(configChecks({ POLYMARKET_PRIVATE_KEY: k }).every(c => !c.detail.includes(k.slice(0, 12))), 'jamais citée');
-  }
+  assert.equal(configChecks({ POLYMARKET_PRIVATE_KEY: 'your_private_key_here' }).some(c => c.label === 'Variables obsolètes'), false, 'placeholder toléré');
+  assert.equal(level(configChecks({ POLYMARKET_PRIVATE_KEY: '0x' + 'a'.repeat(64) }), 'Variables obsolètes'), 'warn');
 });
 
 test('fichiers : registre illisible et arrêt de sécurité actif = erreurs', () => {
@@ -100,23 +85,6 @@ test('horloge : des requêtes lentes AVANT Binance ne passent plus pour un déca
   assert.equal(cs.find(c => c.label === 'Horloge')!.level, 'ok', JSON.stringify(cs));
 });
 
-test('configuration : mêmes lectures que le bot (FV_MIN_ORDER_USD > 100 ignoré, FV_TAILS invalide signalé)', () => {
-  const cs = configChecks({ PAPER_CAPITAL: '250', FV_MIN_ORDER_USD: '150', FV_TAILS: 'T4' });
-  assert.equal(cs.find(c => c.label === 'Capital')!.level, 'ok', 'le bot utilise 1 $ (150 hors bornes)');
-  assert.match(cs.find(c => c.label === 'Réglages FV')!.detail, /FV_TAILS=T4/);
-});
-
-test('réglages du bot : valeurs ramenées ou ignorées signalées (comme le bot les lit)', () => {
-  const cs = configChecks({ PAPER_CAPITAL: '250', FV_POLL_SEC: '1', FV_FILL_DELAY_MS: '0', FV_COINS: 'BTC,ADA', FV_EXIT_EDGE: '2' });
-  const d = cs.find(c => c.label === 'Réglages du bot')!;
-  assert.equal(d.level, 'warn');
-  assert.match(d.detail, /FV_POLL_SEC=1 → 5/);
-  assert.match(d.detail, /aucune latence simulée/);
-  assert.match(d.detail, /ADA inconnu/);
-  assert.match(d.detail, /FV_EXIT_EDGE=2 ignoré/);
-  assert.equal(configChecks({ PAPER_CAPITAL: '250', FV_POLL_SEC: '10', FV_COINS: 'btc,eth' }).find(c => c.label === 'Réglages du bot')!.level, 'ok');
-});
-
 test('Node.js : ≥ 20.6 requis (PM2 lance le bot par node --import tsx)', () => {
   assert.equal(runtimeChecks('22.22.0')[0].level, 'ok');
   assert.equal(runtimeChecks('20.6.0')[0].level, 'ok');
@@ -131,5 +99,6 @@ test('réglages : ancien règlement ponctuel et marge de bruit désactivée sign
   assert.equal(legacy.level, 'warn');
   assert.match(legacy.detail, /moyenne Chainlink des 60 s/);
   assert.equal(configChecks({ FV_NOISE_EDGE_K: '0' }).find(c => c.label === 'Marge de bruit')!.level, 'warn');
-  assert.match(configChecks({ FV_NOISE_EDGE_K: '9' }).find(c => c.label === 'Réglages FV')!.detail, /FV_NOISE_EDGE_K=9/, 'hors bornes [0, 5]');
+  assert.match(configChecks({ FV_NOISE_EDGE_K: '9' }).find(c => c.label === 'Réglages')!.detail, /FV_NOISE_EDGE_K=9/, 'hors bornes [0, 5]');
+  assert.equal(configChecks({ FV_FILL_DELAY_MS: '0' }).find(c => c.label === 'Latence simulée')!.level, 'warn');
 });

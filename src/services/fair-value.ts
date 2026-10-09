@@ -21,9 +21,8 @@
  * ⚠️ Ce modèle n'est PAS validé sur données historiques (aucune donnée spot+carnet
  *   horodatée n'existe dans le dépôt). Il est prudent par construction
  *   (vol max(court, long), incertitude de strike et d'oracle, marge
- *   minimale, entrée interdite en toute fin de round) et chaque décision journalise
- *   p_modèle dans history.json pour mesurer sa calibration
- *   (`npx tsx scripts/fv-calibration.ts`).
+ *   minimale, entrée interdite en toute fin de round) et chaque évaluation est journalisée
+ *   (journal des décisions) pour mesurer sa calibration (`scripts/analysis/fv-report.ts`).
  *
  * Module PUR : aucune I/O, aucune horloge, aucun accès à process.env.
  */

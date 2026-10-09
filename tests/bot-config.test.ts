@@ -82,3 +82,13 @@ test('chemins des données : tous sous le dossier d\'état', () => {
   assert.equal(p.journalDir, '/srv/poly/journal');
   assert.ok(Object.values(p).every(x => x.startsWith('/srv/poly/')));
 });
+
+test('limites de perte : réglables, hiérarchie vérifiée (sinon défauts + avertissement)', () => {
+  const { config: c, warnings } = loadBotConfig({ DAILY_MAX_LOSS_PCT: '0.03', MONTHLY_MAX_LOSS_PCT: '0.10', MAX_DRAWDOWN_PCT: '0.2', TOTAL_MAX_LOSS_PCT: '0.5' });
+  assert.deepEqual(warnings, []);
+  assert.deepEqual(c.risk, { dailyMaxLossPct: 0.03, monthlyMaxLossPct: 0.1, maxDrawdownFromPeak: 0.2, totalMaxLossPct: 0.5 });
+  const bad = loadBotConfig({ DAILY_MAX_LOSS_PCT: '0.3', MONTHLY_MAX_LOSS_PCT: '0.1' });
+  assert.deepEqual(bad.config.risk, { dailyMaxLossPct: 0.05, monthlyMaxLossPct: 0.15, maxDrawdownFromPeak: 0.25, totalMaxLossPct: 0.4 });
+  assert.match(bad.warnings.join('\n'), /limites de perte incohérentes/);
+  assert.match(loadBotConfig({ TOTAL_MAX_LOSS_PCT: '2' }).warnings.join('\n'), /TOTAL_MAX_LOSS_PCT=2 ignoré/);
+});

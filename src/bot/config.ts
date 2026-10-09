@@ -137,6 +137,19 @@ export function loadBotConfig(env: Env = process.env): { config: BotConfig; warn
     warnings.push('TELEGRAM_BOT_TOKEN ne ressemble pas à un token @BotFather (123456789:ABC…) : la connexion échouera');
   }
 
+  // Limites de perte : réglables, mais une hiérarchie absurde (mois < jour, total < baisse)
+  // rendrait une couche inerte sans qu'on le voie → défauts.
+  const risk: RiskLimits = {
+    dailyMaxLossPct: num(env, 'DAILY_MAX_LOSS_PCT', DEFAULT_RISK_LIMITS.dailyMaxLossPct, 0.005, 0.9, warnings),
+    monthlyMaxLossPct: num(env, 'MONTHLY_MAX_LOSS_PCT', DEFAULT_RISK_LIMITS.monthlyMaxLossPct, 0.005, 0.9, warnings),
+    maxDrawdownFromPeak: num(env, 'MAX_DRAWDOWN_PCT', DEFAULT_RISK_LIMITS.maxDrawdownFromPeak, 0.01, 0.9, warnings),
+    totalMaxLossPct: num(env, 'TOTAL_MAX_LOSS_PCT', DEFAULT_RISK_LIMITS.totalMaxLossPct, 0.01, 0.95, warnings),
+  };
+  if (!(risk.dailyMaxLossPct <= risk.monthlyMaxLossPct && risk.monthlyMaxLossPct <= risk.totalMaxLossPct && risk.maxDrawdownFromPeak <= risk.totalMaxLossPct)) {
+    warnings.push(`limites de perte incohérentes (jour ${risk.dailyMaxLossPct} ≤ mois ${risk.monthlyMaxLossPct} ≤ totale ${risk.totalMaxLossPct}, baisse ${risk.maxDrawdownFromPeak} ≤ totale attendus) — défauts utilisés`);
+    Object.assign(risk, DEFAULT_RISK_LIMITS);
+  }
+
   const host = (env.DASHBOARD_HOST ?? '').trim() || '127.0.0.1';
   const token = (env.DASHBOARD_TOKEN ?? '').trim() || null;
 
@@ -152,7 +165,7 @@ export function loadBotConfig(env: Env = process.env): { config: BotConfig; warn
     fillDelayMs: num(env, 'FV_FILL_DELAY_MS', 1000, 0, 10_000, warnings),
     spotStream: bool(env, 'FV_SPOT_STREAM', true, warnings),
     journal: { enabled: bool(env, 'FV_JOURNAL', true, warnings), keepDays: num(env, 'FV_JOURNAL_KEEP_DAYS', 30, 1, 365, warnings) },
-    risk: { ...DEFAULT_RISK_LIMITS },
+    risk,
     maxClockSkewMs: 5000,
     telegram,
     summaryEveryMin: num(env, 'TELEGRAM_SUMMARY_MIN', 60, 15, 24 * 60, warnings),

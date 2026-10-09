@@ -9,11 +9,12 @@
 
 import { existsSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import { entryMinTauSec, fairValueConfigFromEnv, DEFAULT_FAIR_VALUE_CONFIG } from './fair-value.js';
-import { looksLikeBotToken, telegramConfigFromEnv } from './telegram.js';
+import { entryMinTauSec } from './fair-value.js';
+import { MAX_VARIANCE_PCT } from './stake-sizing.js';
 import { computeStats, readLedgerShared } from './paper-ledger.js';
 import { parseRoundTokens, roundSlug, slotStart } from './round-discovery.js';
 import { crashSummary } from './crash-guard.js';
+import { capitalWarning, loadBotConfig, type Env } from '../bot/config.js';
 
 export type Level = 'ok' | 'warn' | 'error';
 export interface Check {
@@ -22,147 +23,57 @@ export interface Check {
   detail: string;
 }
 
-type Env = Record<string, string | undefined>;
 const ok = (label: string, detail: string): Check => ({ level: 'ok', label, detail });
 const warn = (label: string, detail: string): Check => ({ level: 'warn', label, detail });
 const err = (label: string, detail: string): Check => ({ level: 'error', label, detail });
 
-const positive = (env: Env, ...keys: string[]) => {
-  for (const k of keys) {
-    const v = Number(env[k] ?? '');
-    if (Number.isFinite(v) && v > 0) return v;
-  }
-  return null;
-};
-
-/** Mêmes FV_* que lus par le bot ; ceux qui sont ignorés (hors bornes, illisibles). */
-const FV_ENV: Array<[string, keyof typeof DEFAULT_FAIR_VALUE_CONFIG]> = [
-  ['FV_MIN_EDGE', 'minEdge'], ['FV_MIN_PROB', 'minProb'], ['FV_MIN_TAU_SEC', 'minTauSec'], ['FV_MAX_TAU_SEC', 'maxTauSec'],
-  ['FV_MIN_ASK', 'minAsk'], ['FV_MAX_ASK', 'maxAsk'], ['FV_Z_SCALE', 'zScale'], ['FV_BLEND_MODEL', 'blendModel'],
-  ['FV_BLEND_MARKET', 'blendMarket'], ['FV_TAKER_FEE_RATE', 'takerFeeRate'], ['FV_BASIS_BPS', 'basisBps'],
-  ['FV_STRIKE_NOISE_SEC', 'strikeNoiseSec'], ['FV_TWAP_WINDOW_SEC', 'twapWindowSec'], ['FV_NOISE_EDGE_K', 'noiseEdgeK'],
-];
-
 /**
- * Forme de POLYMARKET_PRIVATE_KEY, décrite SANS jamais la citer. En papier elle ne sert à
- * rien (clé éphémère) ; une faute de frappe passerait sinon inaperçue jusqu'au réel.
+ * Configuration : la MÊME lecture que le bot (src/bot/config.ts), donc les mêmes valeurs
+ * effectives et les mêmes avertissements — rien n'est recopié ici.
  */
-function walletKeyCheck(raw: string | undefined, paper: boolean): Check {
-  const label = 'Clé du wallet';
-  const v = raw ?? '';
-  if (!v.trim() || /^(your_|0x\.\.\.|xxx)/i.test(v.trim())) {
-    return paper ? ok(label, 'absente : normal en papier (obligatoire en réel)') : err(label, 'absente : obligatoire en réel');
-  }
-  const t = v.trim();
-  const hex = t.replace(/^0x/i, '');
-  const problems: string[] = [];
-  if (t !== v) problems.push('espaces avant/après (à retirer)');
-  const bad = hex.replace(/[0-9a-fA-F]/g, '').length;
-  if (bad) problems.push(`${bad} caractère(s) non hexadécimal(aux) (ex. « O » au lieu de « 0 »)`);
-  if (hex.length !== 64) problems.push(`${hex.length} caractères au lieu de 64`);
-  if (!problems.length || (problems.length === 1 && t !== v)) {
-    const note = t !== v ? ' (espaces autour ignorés)' : '';
-    return ok(label, paper ? `présente, bonne forme${note} ; en papier elle ne signe rien (clé éphémère)` : `présente, bonne forme${note}`);
-  }
-  const msg = `mal formée : ${problems.join(', ')}`;
-  return paper ? warn(label, `${msg} — sans effet en papier, bloquante en réel`) : err(label, msg);
-}
-
 export function configChecks(env: Env): Check[] {
   const out: Check[] = [];
-  const paper = (env.DRY_RUN ?? '').trim().toLowerCase() !== 'false';
-  out.push(paper ? ok('Mode', 'PAPIER (DRY_RUN) : aucun ordre réel') : err('Mode', 'DRY_RUN=false : mode RÉEL. La stratégie juste valeur n\'envoie aucun ordre, mais les autres stratégies activées le peuvent.'));
+  const { config: c, warnings } = loadBotConfig(env);
+  out.push(c.dryRun
+    ? ok('Mode', 'PAPIER (DRY_RUN) : aucun ordre réel')
+    : err('Mode', 'DRY_RUN=false : le mode RÉEL n\'est pas implémenté, le bot refusera de démarrer. Retirer DRY_RUN=false.'));
 
-  const capital = paper ? positive(env, 'PAPER_CAPITAL', 'CAPITAL_USD') ?? 50 : positive(env, 'CAPITAL_USD') ?? 250;
-  const minOrderRaw = (env.FV_MIN_ORDER_USD ?? '').trim();
-  // même lecture que le bot (bot-with-dashboard.ts) : [0 ; 100], sinon 1
-  const minOrder = minOrderRaw !== '' && Number.isFinite(Number(minOrderRaw)) && Number(minOrderRaw) >= 0 && Number(minOrderRaw) <= 100
-    ? Number(minOrderRaw) : 1;
-  const maxStake = capital * 0.01;
-  out.push(minOrder > 0 && maxStake < minOrder
-    ? err('Capital', `${capital} $ : mise max ${maxStake.toFixed(2)} $ (1 %) < minimum Polymarket ${minOrder} $ → AUCUN pari. Mettre PAPER_CAPITAL=250.`)
-    : minOrder > 0 && maxStake < 2 * minOrder
-      ? warn('Capital', `${capital} $ : mise max ${maxStake.toFixed(2)} $, à peine au-dessus du minimum ${minOrder} $ — 250 $ recommandé.`)
-      : ok('Capital', `${capital} $ (mise max ${maxStake.toFixed(2)} $ par pari)`));
+  const capWarn = capitalWarning(c, MAX_VARIANCE_PCT);
+  out.push(capWarn
+    ? (/aucun pari/.test(capWarn) ? err('Capital', capWarn) : warn('Capital', capWarn))
+    : ok('Capital', `${c.capital} $ (mise max ${(c.capital * MAX_VARIANCE_PCT).toFixed(2)} $ par pari)`));
 
-  out.push(walletKeyCheck(env.POLYMARKET_PRIVATE_KEY, paper));
+  const legacy = ['DIPARB_ENABLED', 'SMARTMONEY_ENABLED', 'ARBITRAGE_ENABLED', 'TREND_ANALYSIS_ENABLED', 'DEEPSEEK_ANALYZER_ENABLED', 'POLYMARKET_PRIVATE_KEY']
+    .filter(k => (env[k] ?? '').trim() !== '' && (env[k] ?? '').trim() !== 'your_private_key_here');
+  if (legacy.length) out.push(warn('Variables obsolètes', `${legacy.join(', ')} : sans effet depuis la reconstruction (plus de stratégie héritée, de LLM ni de wallet dans le bot) — à retirer du .env.`));
 
-  const legacy = ['DIPARB_ENABLED', 'SMARTMONEY_ENABLED', 'ARBITRAGE_ENABLED', 'TREND_ANALYSIS_ENABLED'].filter(k => env[k] === 'true');
-  out.push(legacy.length
-    ? warn('Anciennes stratégies', `${legacy.join(', ')} activé(s) : elles tournent en parallèle (requêtes, compteurs du dashboard). Les mettre à false sauf besoin précis.`)
-    : ok('Anciennes stratégies', 'désactivées'));
+  out.push(!c.telegram
+    ? warn('Telegram', 'non configuré (TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID) : aucune notification.')
+    : warnings.some(w => w.startsWith('TELEGRAM_BOT_TOKEN'))
+      ? err('Telegram', 'TELEGRAM_BOT_TOKEN ne ressemble pas à un token @BotFather (123456789:ABC…).')
+      : ok('Telegram', 'configuré (connexion testée plus bas)'));
 
-  const tg = telegramConfigFromEnv(env);
-  if (!tg) out.push(warn('Telegram', 'non configuré (TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID) : aucune notification.'));
-  else if (!looksLikeBotToken(tg.token)) out.push(err('Telegram', 'TELEGRAM_BOT_TOKEN ne ressemble pas à un token @BotFather (123456789:ABC…).'));
-  else out.push(ok('Telegram', 'configuré (connexion testée plus bas)'));
+  const local = ['127.0.0.1', '::1', 'localhost'].includes(c.dashboard.host);
+  out.push(!local && !c.dashboard.token
+    ? warn('Dashboard', `DASHBOARD_HOST=${c.dashboard.host} sans DASHBOARD_TOKEN : le dashboard se repliera sur 127.0.0.1 (tunnel SSH pour y accéder).`)
+    : ok('Dashboard', local ? `local (${c.dashboard.host})` : `exposé sur ${c.dashboard.host}, protégé par jeton`));
 
-  const host = env.DASHBOARD_HOST || '127.0.0.1';
-  const local = ['127.0.0.1', '::1', 'localhost'].includes(host);
-  out.push(!local && !env.DASHBOARD_TOKEN
-    ? warn('Dashboard', `DASHBOARD_HOST=${host} sans DASHBOARD_TOKEN : le dashboard se repliera sur 127.0.0.1 (tunnel SSH pour y accéder).`)
-    : ok('Dashboard', local ? `local (${host})` : `exposé sur ${host}, protégé par jeton`));
-
-  const cfg = fairValueConfigFromEnv(env);
-  out.push(botSettingsCheck(env, cfg.minEdge));
-  const tails = env.FV_TAILS?.trim();
-  const ignoredTails = tails && tails !== 'normal' && tails !== 't4' ? [`FV_TAILS=${tails} (attendu : normal ou t4)`] : [];
-  const ignored = [...ignoredTails, ...FV_ENV.filter(([k, f]) => {
-    const raw = env[k];
-    if (raw === undefined || raw.trim() === '') return false;
-    return Number(raw) !== (cfg[f] as number);
-  }).map(([k]) => `${k}=${env[k]}`)];
   // Règlement TWAP 60 s depuis août 2026 : un modèle ponctuel est faux (strike et variance).
-  if (cfg.twapWindowSec !== 60) {
-    out.push(warn('Règlement', `FV_TWAP_WINDOW_SEC=${cfg.twapWindowSec} : Polymarket règle les rounds 5 min sur la moyenne Chainlink des 60 s (fin et prix à battre) depuis août 2026 — retirer ce réglage (défaut 60).`));
+  if (c.fv.twapWindowSec !== 60) {
+    out.push(warn('Règlement', `FV_TWAP_WINDOW_SEC=${c.fv.twapWindowSec} : Polymarket règle les rounds 5 min sur la moyenne Chainlink des 60 s (fin et prix à battre) depuis août 2026 — retirer ce réglage (défaut 60).`));
   }
-  if ((cfg.noiseEdgeK ?? 0) === 0) {
+  if ((c.fv.noiseEdgeK ?? 0) === 0) {
     out.push(warn('Marge de bruit', 'FV_NOISE_EDGE_K=0 : le bot parie aussi sur des écarts que son propre bruit (prix à battre estimé) explique — en simulation (30 000 rounds), 13 % des rounds joués à −5 % par pari contre un carnet juste (écart et frais payés pour rien).'));
   }
-  out.push(ignored.length
-    ? warn('Réglages FV', `ignorés (hors bornes ou illisibles, valeur par défaut utilisée) : ${ignored.join(', ')}`)
-    : ok('Réglages FV', `edge ≥ ${cfg.minEdge} + ${cfg.noiseEdgeK}·bruit, p ≥ ${cfg.minProb}, τ ∈ [${entryMinTauSec(cfg)}, ${cfg.maxTauSec}] s, TWAP ${cfg.twapWindowSec} s, confiance ×${cfg.zScale}, mélange ${cfg.blendModel}/${cfg.blendMarket}`));
-  return out;
-}
+  if (c.fillDelayMs === 0) out.push(warn('Latence simulée', 'FV_FILL_DELAY_MS=0 : aucune latence simulée, le papier sera plus optimiste que le réel.'));
 
-/**
- * Réglages lus par bot-with-dashboard.ts (mêmes bornes et mêmes défauts) : une valeur hors
- * bornes est ramenée ou ignorée SANS message côté bot — on le dit ici.
- */
-function botSettingsCheck(env: Env, minEdge: number): Check {
-  const notes: string[] = [];
-  const raw = (k: string) => (env[k] ?? '').trim();
-  const clampNote = (k: string, lo: number, hi: number, def: number) => {
-    const r = raw(k);
-    if (r === '') return;
-    const v = Number(r) || def;
-    const eff = Math.min(hi, Math.max(lo, v));
-    if (!Number.isFinite(Number(r)) || eff !== Number(r)) notes.push(`${k}=${r} → ${eff} (bornes ${lo}–${hi})`);
-  };
-  clampNote('FV_POLL_SEC', 5, 300, 10);
-  clampNote('FV_MOVE_BPS', 1, 50, 3);
-  clampNote('TELEGRAM_SUMMARY_MIN', 15, 1440, 60);
-  clampNote('FV_JOURNAL_KEEP_DAYS', 1, 365, 30);
-  const delay = raw('FV_FILL_DELAY_MS');
-  if (delay !== '') {
-    const v = Number(delay);
-    if (!(Number.isFinite(v) && v >= 0 && v <= 10_000)) notes.push(`FV_FILL_DELAY_MS=${delay} ignoré → 1000`);
-    else if (v === 0) notes.push('FV_FILL_DELAY_MS=0 : aucune latence simulée, le papier sera plus optimiste que le réel');
-  }
-  const exit = raw('FV_EXIT_EDGE');
-  if (exit !== '') {
-    const v = Number(exit);
-    if (!(Number.isFinite(v) && v >= 0 && v <= 0.5)) notes.push(`FV_EXIT_EDGE=${exit} ignoré → ${minEdge}`);
-  }
-  const coins = raw('FV_COINS');
-  if (coins !== '') {
-    const known = ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE'];
-    const wanted = coins.split(',').map(c => c.trim().toUpperCase()).filter(Boolean);
-    const unknown = wanted.filter(c => !known.includes(c));
-    if (unknown.length) notes.push(`FV_COINS : ${unknown.join(', ')} inconnu(s), ignoré(s)`);
-    if (!wanted.some(c => known.includes(c))) notes.push('FV_COINS sans crypto valide → les 5 sont tradées');
-  }
-  return notes.length ? warn('Réglages du bot', notes.join(' ; ')) : ok('Réglages du bot', 'valeurs reconnues');
+  const ignored = warnings.filter(w => !w.startsWith('TELEGRAM_BOT_TOKEN'));
+  out.push(ignored.length
+    ? warn('Réglages', `valeurs ignorées ou ramenées : ${ignored.join(' ; ')}`)
+    : ok('Réglages', `edge ≥ ${c.fv.minEdge} + ${c.fv.noiseEdgeK}·bruit, p ≥ ${c.fv.minProb}, τ ∈ [${entryMinTauSec(c.fv)}, ${c.fv.maxTauSec}] s, TWAP ${c.fv.twapWindowSec} s, `
+      + `confiance ×${c.fv.zScale}, mélange ${c.fv.blendModel}/${c.fv.blendMarket}, ${c.coins.join(',')}, scrutation ${c.pollMs / 1000} s, `
+      + `limites jour ${c.risk.dailyMaxLossPct} / mois ${c.risk.monthlyMaxLossPct} / baisse ${c.risk.maxDrawdownFromPeak} / totale ${c.risk.totalMaxLossPct}`));
+  return out;
 }
 
 /**
