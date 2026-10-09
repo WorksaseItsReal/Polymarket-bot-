@@ -799,3 +799,32 @@ export function compareSigmaEstimators(
     tBlend: clusteredMeanT(rows.map(r => ({ key: r.key, x: r.blend - r.cc }))).t,
   };
 }
+
+/**
+ * Le prix à battre officiel était-il publié PENDANT le round ? Par round : présent dans au
+ * moins une évaluation, délai de la première évaluation qui l'a (depuis l'ouverture, borne
+ * haute du délai de publication), et égalité avec la valeur publiée au règlement (`prices`).
+ */
+export function liveStrikeAvailability(
+  rounds: ResolvedRecord[][],
+  prices: Record<string, [number | null, number | null]>,
+): { rounds: number; withPs: number; medianDelaySec: number | null; compared: number; same: number } {
+  let withPs = 0;
+  let compared = 0;
+  let same = 0;
+  const delays: number[] = [];
+  for (const list of rounds) {
+    const first = list.find(r => typeof r.ps === 'number' && r.ps > 0);
+    if (!first) continue;
+    withPs++;
+    const slot = Number(first.slug.split('-').pop());
+    if (Number.isFinite(slot)) delays.push(first.t / 1000 - slot);
+    const official = prices[first.slug]?.[0];
+    if (official && official > 0) {
+      compared++;
+      if (Math.abs((first.ps as number) / official - 1) < 1e-9) same++;
+    }
+  }
+  delays.sort((a, b) => a - b);
+  return { rounds: rounds.length, withPs, medianDelaySec: delays.length ? delays[Math.floor(delays.length / 2)] : null, compared, same };
+}

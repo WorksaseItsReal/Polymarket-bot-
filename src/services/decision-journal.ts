@@ -43,6 +43,9 @@ export interface DecisionRecord {
    *  quand les bougies le permettent : le rapport (1c) compare les estimateurs. */
   sc?: number;
   sp?: number;
+  /** Prix à battre OFFICIEL (Gamma eventMetadata.priceToBeat) s'il était publié au moment de
+   *  l'évaluation : mesure de sa disponibilité en direct (rapport, section 0). */
+  ps?: number;
   /** Probabilité de « Up » utilisée pour décider (après mélange éventuel avec le marché). */
   pUp: number | null;
   /** Probabilité du modèle seul (avant mélange) ; absente des anciens journaux. */

@@ -21,7 +21,7 @@ import { entryMinTauSec, fairValueConfigFromEnv } from '../../src/services/fair-
 import {
   applyBlend, blendVerdict, zScaleConflictsWithBlend, bookStats, brier, byRound, calibration, compareModelBook, compareProbs, compareSigmaEstimators, describeBlend, fitBlend, lateRounds,
   fitZScale, halves, marketProbUp, normalizeZScale, rawModelProb, replay, zScaleAdvice,
-  strikeVsOfficial, thresholdGrid, type ResolvedRecord,
+  liveStrikeAvailability, strikeVsOfficial, thresholdGrid, type ResolvedRecord,
 } from '../../src/analysis/fv-analysis.js';
 
 function arg(name: string): string | undefined {
@@ -53,6 +53,7 @@ function slim(r: DecisionRecord): DecisionRecord {
     t: r.t, slug: intern(r.slug), coin: intern(r.coin), tau: r.tau, spot: r.sc && r.sp && !r.lt ? r.spot : 0, strike: r.strike, sig: r.sig, pUp: r.pUp, pRaw: r.pRaw, zs: r.zs,
     ...(r.sc && r.sp && !r.lt ? { sc: r.sc, sp: r.sp } : {}), ...(r.tw ? { tw: r.tw } : {}),
     ...(r.lt ? { lt: true as const, pl: r.pl ?? null, kn: r.kn } : {}), // mesures fin de round (section 1d)
+    ...(r.ps ? { ps: r.ps } : {}), // prix à battre officiel lu en direct (section 0)
     upAsk: r.upAsk, downAsk: r.downAsk, upAskSz: r.upAskSz, downAskSz: null, upBid: r.upBid, src: '', act: r.act === 'buy' ? 'buy' : 'hold',
     // GARDER mv (exclusion des mesures) et tl (loi du modèle) : sans eux, le filtre des
     // évaluations « saut du spot » et la conversion t4 étaient silencieusement inopérants.
@@ -171,6 +172,16 @@ async function main() {
       console.log(`   cohérence « prix final ≥ prix à battre ⇔ Up » : ${pct(sc.consistency.agree / sc.consistency.n)} (n=${sc.consistency.n}) — sous 99 %, ces champs ne signifient pas ce qu'on croit`);
     }
     console.log('   Dispersion corrigée nettement sous la dispersion brute → lire le prix officiel améliorerait le modèle (et réduirait la marge de bruit).\n');
+  }
+  // 0b. Prix à battre officiel DISPONIBLE PENDANT le round ? (prérequis pour l'utiliser en direct)
+  const live = liveStrikeAvailability(measureRounds, prices);
+  if (live.rounds) {
+    console.log(`0b) Prix à battre officiel en direct : présent dans ${pct(live.withPs / live.rounds)} des rounds (${live.withPs}/${live.rounds})`
+      + (live.medianDelaySec === null ? '' : `, publié au plus tard ~${Math.round(live.medianDelaySec)} s après l'ouverture (médiane)`)
+      + (live.compared ? ` ; identique à la valeur publiée au règlement dans ${pct(live.same / live.compared)} des cas (n=${live.compared})` : '') + '.');
+    console.log(live.withPs / live.rounds >= 0.95 && (!live.compared || live.same / live.compared >= 0.99)
+      ? '   → disponible et stable : l\'utiliser en direct est envisageable (corriger l\'écart Chainlink/Binance de la section 0 d\'abord).\n'
+      : '   → pas assez disponible ou pas stable : continuer d\'estimer le prix à battre depuis les bougies.\n');
   }
 
   // 1. Modèle vs marché : appariée (mêmes évaluations), chaque round pesant 1, modèle SEUL

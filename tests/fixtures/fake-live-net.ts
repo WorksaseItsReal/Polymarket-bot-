@@ -81,8 +81,12 @@ function gammaEvent(slug: string) {
   const closed = simNow() / 1000 > slot + 300 + 10;
   const upWon = twap60(coin, slot + 300) >= twap60(coin, slot);
   const ci = COINS.indexOf(coin);
+  const now = simNow() / 1000;
+  const meta: Record<string, number> = {};
+  if (now >= slot + 20) meta.priceToBeat = twap60(coin, slot); // publié avec un peu de retard
+  if (closed) meta.finalPrice = twap60(coin, slot + 300);
   return {
-    slug, title: `${coin} up or down`,
+    slug, title: `${coin} up or down`, ...(Object.keys(meta).length ? { eventMetadata: JSON.stringify(meta) } : {}),
     markets: [{
       conditionId: '0x' + String(slot).padStart(62, '0') + String(ci).padStart(2, '0'),
       question: `${coin.toUpperCase()} Up or Down`, closed,

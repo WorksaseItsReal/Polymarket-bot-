@@ -310,7 +310,9 @@ Chaque évaluation est écrite dans `~/.polymarket/journal/decisions-AAAA-MM-JJ.
 par round toutes les 10 s, avec probabilité, bruit, asks, meilleurs bids, fenêtre du modèle).
 `npx tsx scripts/analysis/fv-report.ts --days 7` règle les rounds et répond dans l'ordre :
 0. **Prix à battre** : notre estimation vs celle publiée par Polymarket (décalage, dispersion,
-   gain possible en lisant le prix officiel).
+   gain possible en lisant le prix officiel). 0b : le prix officiel est-il **disponible pendant
+   le round** (relu dans Gamma tant qu'il manque, journalisé `ps`), avec quel délai, et égal à la
+   valeur du règlement ? Prérequis avant de l'utiliser en direct.
 1. **Le modèle prédit-il mieux que le carnet ?** (Brier, t groupé par créneau). 1c : quelle
    volatilité prédit le mieux (clôture-à-clôture, Parkinson, mélange — `FV_VOL_ESTIMATOR`).
    1d : **dernière minute** (TWAP en partie acquis) — le modèle « fin de round » voit-il mieux

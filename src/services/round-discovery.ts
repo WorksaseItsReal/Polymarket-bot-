@@ -15,6 +15,8 @@
  * Les métadonnées d'un round ne changent pas : elles sont mises en cache jusqu'à sa fin.
  */
 
+import { roundPrices } from './paper-ledger.js';
+
 export const DISCOVERY_COINS = ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE'] as const;
 export type DiscoveryCoin = (typeof DISCOVERY_COINS)[number];
 
@@ -26,6 +28,9 @@ export interface DiscoveredRound {
   durationMinutes: 5;
   upTokenId: string;
   downTokenId: string;
+  /** Prix à battre officiel (Gamma `eventMetadata.priceToBeat`), s'il est déjà publié. MESURE
+   *  seulement : journalisé (ps) pour savoir s'il est disponible pendant le round. */
+  priceToBeat?: number;
 }
 
 export function slotStart(nowMs: number): number {
@@ -56,7 +61,7 @@ export function parseRoundTokens(
 ): (DiscoveredRound & { closed: boolean }) | null {
   const events = Array.isArray(data) ? data : [];
   const ev = events.find(e => e && typeof e === 'object' && (e as { slug?: unknown }).slug === slug) as
-    | { markets?: unknown; title?: unknown }
+    | { markets?: unknown; title?: unknown; eventMetadata?: unknown }
     | undefined;
   if (!ev) return null;
   const markets = Array.isArray(ev.markets) ? ev.markets : [];
@@ -81,6 +86,7 @@ export function parseRoundTokens(
     durationMinutes: 5,
     upTokenId,
     downTokenId,
+    ...(roundPrices(ev).priceToBeat !== undefined ? { priceToBeat: roundPrices(ev).priceToBeat } : {}),
     closed: m.closed === true,
   };
 }
@@ -98,6 +104,8 @@ export interface DiscoveryOptions {
   timeoutMs?: number;
   /** Délai minimal entre deux essais pour un slug introuvable (ms). */
   retryMs?: number;
+  /** Relecture d'un round connu tant que son prix à battre officiel manque (ms ; 0 = jamais). */
+  priceToBeatRetryMs?: number;
 }
 
 /**
@@ -107,14 +115,17 @@ export interface DiscoveryOptions {
 export class RoundDiscovery {
   private readonly cache = new Map<string, DiscoveredRound>();
   private readonly misses = new Map<string, number>();
+  private readonly ptbTried = new Map<string, number>();
   private readonly fetchImpl: typeof fetch;
   private readonly timeoutMs: number;
   private readonly retryMs: number;
+  private readonly ptbRetryMs: number;
 
   constructor(opts: DiscoveryOptions = {}) {
     this.fetchImpl = opts.fetchImpl ?? ((...a: Parameters<typeof fetch>) => fetch(...a));
     this.timeoutMs = opts.timeoutMs ?? 5000;
     this.retryMs = opts.retryMs ?? 15_000;
+    this.ptbRetryMs = opts.priceToBeatRetryMs ?? 20_000;
   }
 
   private async fetchOne(coin: DiscoveryCoin, slug: string): Promise<DiscoveredRound | null> {
@@ -143,18 +154,34 @@ export class RoundDiscovery {
       if (s + 300 < nowMs / 1000 - 60) this.cache.delete(slug);
     }
     for (const [slug, t] of this.misses) if (nowMs - t > 600_000) this.misses.delete(slug);
+    for (const [slug, t] of this.ptbTried) if (nowMs - t > 600_000) this.ptbTried.delete(slug);
 
     const out = await Promise.all(
       coins.map(async coin => {
         const slug = roundSlug(coin, slot);
         const hit = this.cache.get(slug);
-        if (hit) return hit;
+        if (hit) {
+          // Prix à battre officiel pas encore publié : relu au plus toutes les ptbRetryMs, et
+          // seulement pendant la fenêtre d'entrée (au-delà, il ne servirait plus à la mesure).
+          const tauSec = slot + 300 - nowMs / 1000;
+          if (hit.priceToBeat === undefined && this.ptbRetryMs > 0 && tauSec > 60
+            && nowMs - (this.ptbTried.get(slug) ?? 0) >= this.ptbRetryMs) {
+            this.ptbTried.set(slug, nowMs);
+            const again = await this.fetchOne(coin, slug);
+            if (again?.priceToBeat !== undefined && again.conditionId === hit.conditionId) {
+              this.cache.set(slug, again);
+              return again;
+            }
+          }
+          return hit;
+        }
         const lastMiss = this.misses.get(slug);
         if (lastMiss !== undefined && nowMs - lastMiss < this.retryMs) return null;
         const found = await this.fetchOne(coin, slug);
         if (found) {
           this.cache.set(slug, found);
           this.misses.delete(slug);
+          this.ptbTried.set(slug, nowMs);
         } else {
           this.misses.set(slug, nowMs);
         }

@@ -57,7 +57,7 @@ test('RoundDiscovery : un appel par round (cache), réessai borné des rounds in
     const coin = slug.split('-')[0].toUpperCase();
     return new Response(JSON.stringify(event(slug, { conditionId: '0x' + coin.charCodeAt(0).toString(16).padStart(2, '0').repeat(32) })));
   }) as typeof fetch;
-  const d = new RoundDiscovery({ fetchImpl, retryMs: 15_000 });
+  const d = new RoundDiscovery({ fetchImpl, retryMs: 15_000, priceToBeatRetryMs: 0 }); // relecture du prix à battre : test dédié
   const now = SLOT * 1000 + 30_000;
 
   let r = await d.current(now, ['BTC', 'ETH', 'SOL']);
@@ -88,4 +88,37 @@ test('RoundDiscovery : réseau en panne ou délai dépassé → liste vide, jama
     timeoutMs: 20,
   });
   assert.deepEqual(await d.current(SLOT * 1000, ['BTC']), []);
+});
+
+test('prix à battre officiel : lu dans eventMetadata (objet ou chaîne), relu tant qu\'il manque, plus après', async () => {
+  const slug = roundSlug('BTC', SLOT);
+  const withMeta = (meta: unknown) => [{ ...event(slug)[0], eventMetadata: meta }];
+  assert.equal(parseDiscoveryEvent(withMeta('{"priceToBeat": 62345.12}'), 'BTC', slug)!.priceToBeat, 62345.12);
+  assert.equal(parseDiscoveryEvent(withMeta({ priceToBeat: '0.2471' }), 'BTC', slug)!.priceToBeat, 0.2471);
+  assert.equal(parseDiscoveryEvent(withMeta({ priceToBeat: 0 }), 'BTC', slug)!.priceToBeat, undefined, 'zéro = non publié');
+  assert.equal(parseDiscoveryEvent(event(slug), 'BTC', slug)!.priceToBeat, undefined);
+
+  let published = false;
+  let calls = 0;
+  const fetchImpl = (async () => { calls++; return new Response(JSON.stringify(published ? withMeta({ priceToBeat: 100.5 }) : event(slug))); }) as typeof fetch;
+  const d = new RoundDiscovery({ fetchImpl, priceToBeatRetryMs: 20_000 });
+  const t0 = SLOT * 1000 + 10_000;
+  assert.equal((await d.current(t0, ['BTC']))[0].priceToBeat, undefined);
+  assert.equal(calls, 1);
+  await d.current(t0 + 5_000, ['BTC']);
+  assert.equal(calls, 1, 'pas de relecture avant 20 s');
+  await d.current(t0 + 21_000, ['BTC']);
+  assert.equal(calls, 2, 'relu : toujours absent');
+  published = true;
+  const r = await d.current(t0 + 42_000, ['BTC']);
+  assert.equal(calls, 3);
+  assert.equal(r[0].priceToBeat, 100.5, 'publié → disponible');
+  await d.current(t0 + 80_000, ['BTC']);
+  assert.equal(calls, 3, 'une fois connu, plus de relecture');
+  // Dernière minute : on ne relit plus (la mesure n'en a plus besoin)
+  const d2 = new RoundDiscovery({ fetchImpl: (async () => { calls++; return new Response(JSON.stringify(event(slug))); }) as typeof fetch });
+  await d2.current(SLOT * 1000 + 200_000, ['BTC']);
+  const before = calls;
+  await d2.current(SLOT * 1000 + 250_000, ['BTC']);
+  assert.equal(calls, before, 'τ ≤ 60 s : pas de relecture');
 });

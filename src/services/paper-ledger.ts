@@ -285,7 +285,7 @@ export type RoundOutcome =
   | { resolved: false; reason: string };
 
 /** `eventMetadata` de Gamma (objet ou chaîne JSON) : prix à battre / final s'ils sont publiés. */
-function roundPrices(ev: { eventMetadata?: unknown }): { priceToBeat?: number; finalPrice?: number } {
+export function roundPrices(ev: { eventMetadata?: unknown }): { priceToBeat?: number; finalPrice?: number } {
   let meta: unknown = ev.eventMetadata;
   if (typeof meta === 'string') {
     try { meta = JSON.parse(meta); } catch { return {}; }

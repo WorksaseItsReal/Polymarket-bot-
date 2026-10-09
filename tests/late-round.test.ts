@@ -12,7 +12,7 @@ import { join } from 'node:path';
 import { DEFAULT_FAIR_VALUE_CONFIG, probUp, probUpLate } from '../src/services/fair-value.ts';
 import { SpotStream } from '../src/services/spot-stream.ts';
 import { DecisionJournal, type DecisionRecord } from '../src/services/decision-journal.ts';
-import { compareProbs, lateRounds, marketProbUp, replay, type ResolvedRecord } from '../src/analysis/fv-analysis.ts';
+import { compareProbs, lateRounds, liveStrikeAvailability, marketProbUp, replay, type ResolvedRecord } from '../src/analysis/fv-analysis.ts';
 import { loadBotConfig } from '../src/bot/config.ts';
 
 const SIG = 0.0005 / Math.sqrt(60);
@@ -93,4 +93,20 @@ test('analyse : lateRounds ramène pl en pUp, rejeu et comparaison appariée fon
   assert.deepEqual(loadBotConfig({ FV_LATE_MEASURE: '0' }).warnings, []);
   assert.equal(loadBotConfig({}).config.fv.lateMeasure, true);
   assert.match(loadBotConfig({ FV_LATE_MEASURE: 'peut-être' }).warnings.join('\n'), /FV_LATE_MEASURE=peut-être ignoré/);
+});
+
+test('liveStrikeAvailability : part des rounds avec le prix officiel en direct, délai, égalité avec la valeur du règlement', () => {
+  const rec = (slot: number, t: number, ps?: number): ResolvedRecord => ({
+    t: t * 1000, slug: `btc-updown-5m-${slot}`, coin: 'BTC', tau: slot + 300 - t, spot: 100, strike: 100, sig: SIG, pUp: 0.5,
+    upAsk: 0.5, downAsk: 0.5, upAskSz: 1, downAskSz: 1, src: 't', act: 'hold', upWon: true, ...(ps ? { ps } : {}),
+  });
+  const S = 1_790_000_100;
+  const rounds = [
+    [rec(S, S + 40), rec(S, S + 50, 100.1), rec(S, S + 60, 100.1)], // publié, délai 50 s
+    [rec(S + 300, S + 330, 99.9)], // publié, délai 30 s, différent du règlement
+    [rec(S + 600, S + 640)], // jamais vu
+  ];
+  const a = liveStrikeAvailability(rounds, { [`btc-updown-5m-${S}`]: [100.1, null], [`btc-updown-5m-${S + 300}`]: [99.95, null] });
+  assert.deepEqual(a, { rounds: 3, withPs: 2, medianDelaySec: 50, compared: 2, same: 1 });
+  assert.deepEqual(liveStrikeAvailability([], {}), { rounds: 0, withPs: 0, medianDelaySec: null, compared: 0, same: 0 });
 });

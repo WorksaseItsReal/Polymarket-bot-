@@ -71,6 +71,7 @@ test('bot complet sur faux réseau : évalue, journalise, parie et règle, dashb
   const lines = jfiles.flatMap(f => readFileSync(join(poly, 'journal', f), 'utf8').split('\n').filter(Boolean)).map(l => JSON.parse(l));
   assert.ok(lines.length >= 5, `journal : ${lines.length} évaluations`);
   assert.ok(lines.every(r => typeof r.slug === 'string' && 'pRaw' in r && r.zs === 1), 'champs du journal');
+  assert.ok(lines.some(r => typeof r.ps === 'number' && r.ps > 0), 'prix à battre officiel lu en direct (faux Gamma : publié 20 s après l\'ouverture)');
 
   assert.ok(existsSync(join(poly, 'fv-ledger.json')) || lines.every(r => r.act !== 'buy'));
   if (existsSync(join(poly, 'fv-ledger.json'))) {
