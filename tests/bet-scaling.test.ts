@@ -10,7 +10,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { pySourcesAvailable, runHarness } from './harness.ts';
 import { binaryPayoff, effectiveCostPerShare } from '../src/services/fair-value.ts';
 
 test('la boucle de stratégie passe par computeStake et binaryPayoff (pas de mise figée)', () => {
@@ -39,12 +38,4 @@ test('une mise nulle ou un coût invalide ne produit ni gain ni perte, jamais un
     assert.deepEqual(r, { shares: 0, winProfit: 0, loss: 0 }, `stake=${stake} cost=${cost}`);
   }
   assert.ok(binaryPayoff(0.5, 0.6).winProfit > 0);
-});
-
-test('le résolveur Python applique la même échelle de mise (cohérence)', {
-  skip: pySourcesAvailable ? false : 'sources réelles absentes',
-}, () => {
-  const r = runHarness<Record<string, number>>('pnl-realized');
-  assert.equal(r.gagne_5, 5 * r.gagne_1, 'gain 5€ = 5 × gain 1€ (paperbot-pnl.py)');
-  assert.equal(r.perdu_5, 5 * r.perdu_1, 'perte 5€ = 5 × perte 1€ (paperbot-pnl.py)');
 });

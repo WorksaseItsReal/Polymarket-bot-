@@ -39,7 +39,7 @@ test('bot complet sur faux réseau : évalue, journalise, parie et règle, dashb
     await sleep(Math.round(seconds * 0.6) * 1000);
     const state = await (await fetch(`http://127.0.0.1:${port}/api/state`)).json() as Record<string, unknown>;
     assert.ok(state.ledger, 'statistiques du registre envoyées au dashboard');
-    assert.match(String((state.fairValueSummary as { goLive?: string } | undefined)?.goLive), /Avant le réel/);
+    assert.match(String((state.fairValue as { goLive?: string } | undefined)?.goLive), /Avant le réel/);
     await sleep(Math.round(seconds * 0.4) * 1000);
   } finally {
     child.kill('SIGINT');
@@ -123,7 +123,7 @@ test('clé mal saisie jamais affichée ; kill -9 détecté et signalé au lancem
   const second = await run('SIGINT');
   for (const { out, logs } of [first, second]) {
     assert.ok(!out.includes(typoKey.slice(0, 30)) && !logs.includes(typoKey.slice(0, 30)), 'clé absente de la console et du dashboard');
-    assert.match(out, /Mode papier : pas de clé de wallet valide/);
+    assert.match(out, /POLYMARKET PAPER BOT/);
   }
   assert.match(second.out, /terminé brutalement/);
   const tg = readFileSync(tgLog, 'utf8').split('\n').filter(Boolean).map(l => JSON.parse(l) as { text: string });

@@ -1,193 +1,53 @@
 import { useEffect, useState } from 'react';
-import type { BotState, BotConfig } from '../types';
-import { NetworkStatus } from './NetworkStatus';
+import type { BotState } from '../types';
+import { duration } from '../format';
 
 interface HeaderProps {
   state: BotState | null;
-  config: BotConfig | null;
   connected: boolean;
-  onHistoryClick?: () => void;
-  onPositionsClick?: () => void;
-  onToggleDryRun?: () => void;
+  onHistoryClick: () => void;
 }
 
-export function Header({ state, config, connected, onHistoryClick, onPositionsClick, onToggleDryRun }: HeaderProps) {
-  const [runtime, setRuntime] = useState('0m');
-  const [copied, setCopied] = useState(false);
+const LAYER_LABEL: Record<string, string> = {
+  daily: 'perte du jour', monthly: 'perte du mois', drawdown: 'baisse depuis le plus haut', total: 'perte totale',
+};
 
+export function Header({ state, connected, onHistoryClick }: HeaderProps) {
+  const [now, setNow] = useState(Date.now());
   useEffect(() => {
-    if (!state?.startTime) return;
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
 
-    const updateRuntime = () => {
-      // jamais négatif (horloges du serveur et du navigateur légèrement décalées)
-      const diff = Math.max(0, Date.now() - state.startTime);
-      const hours = Math.floor(diff / 3600000);
-      const minutes = Math.floor((diff % 3600000) / 60000);
-      const seconds = Math.floor((diff % 60000) / 1000);
-
-      if (hours > 0) {
-        setRuntime(`${hours}h ${minutes}m`);
-      } else if (minutes > 0) {
-        setRuntime(`${minutes}m ${seconds}s`);
-      } else {
-        setRuntime(`${seconds}s`);
-      }
-    };
-
-    updateRuntime();
-    const interval = setInterval(updateRuntime, 1000);
-    return () => clearInterval(interval);
-  }, [state?.startTime]);
-
-  const isPaused = state?.isPaused ?? false;
-  const isDryRun = config?.dryRun ?? true;
-
-  // Adresse réelle du bot, envoyée par le bot. Avant : une adresse codée en dur venue du
-  // dépôt d'origine (celle d'un inconnu), présentée comme « le » wallet avec un bouton copier.
-  const walletAddress = config?.walletAddress ?? '';
-  const shortWallet = walletAddress ? `${walletAddress.slice(0, 6)}...${walletAddress.slice(-4)}` : '';
-
-  const copyWallet = async () => {
-    if (!walletAddress) return;
-    await navigator.clipboard.writeText(walletAddress);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
-  };
-
-  const signalCount = state?.dipArb?.signals?.length ?? 0;
-  const opportunityCount = state?.arbitrage?.opportunitiesFound ?? 0;
+  const risk = state?.risk;
+  const block = state?.health.entryBlock ?? null;
+  const status = !state
+    ? { text: 'en attente du bot', cls: 'bg-gray-500/20 text-gray-300 border-gray-500/30' }
+    : risk && !risk.allowed
+      ? { text: `⏸️ entrées bloquées · ${LAYER_LABEL[risk.layer ?? ''] ?? risk.layer}`, cls: 'bg-red-500/20 text-red-300 border-red-500/30' }
+      : block
+        ? { text: `⏸️ entrées bloquées · ${block.slice(0, 60)}`, cls: 'bg-yellow-500/20 text-yellow-300 border-yellow-500/30' }
+        : { text: '▶️ actif · évalue et parie', cls: 'bg-green-500/20 text-green-300 border-green-500/30' };
 
   return (
-    <header className="glass-card border-b border-white/5 px-6 py-4">
-      <div className="flex items-center justify-between">
-        {/* Left: Logo + Status */}
-        <div className="flex items-center gap-6">
-          {/* Logo */}
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-purple-500 to-blue-500 flex items-center justify-center text-xl shadow-glow-purple">
-              🤖
-            </div>
-            <div>
-              <h1 className="text-xl font-bold text-white tracking-tight">
-                Polymarket Bot
-              </h1>
-              <div className="text-xs text-gray-500">v3.0 Professional</div>
+    <header className="border-b border-white/5 bg-poly-card/60 backdrop-blur px-4 py-3">
+      <div className="max-w-[1800px] mx-auto flex flex-wrap items-center justify-between gap-3">
+        <div className="flex items-center gap-3">
+          <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-blue-500/30 to-green-500/30 flex items-center justify-center text-lg">📐</div>
+          <div>
+            <h1 className="text-lg font-semibold leading-tight">Polymarket paper bot — « Up or Down 5 min »</h1>
+            <div className="text-xs text-gray-500">
+              stratégie juste valeur · {state ? `démarré il y a ${duration(Math.max(0, now - state.startTime))}` : '—'}
             </div>
           </div>
-
-          {/* Status Badges */}
-          <div className="flex items-center gap-2">
-            <span
-              className={`badge flex items-center gap-1.5 ${connected
-                ? isPaused
-                  ? 'badge-yellow'
-                  : 'badge-green'
-                : 'badge-red'
-                }`}
-            >
-              <span className={`w-1.5 h-1.5 rounded-full ${connected
-                ? isPaused ? 'bg-yellow-400' : 'bg-green-400 animate-pulse'
-                : 'bg-red-400'
-                }`} />
-              {connected ? (isPaused ? 'PAUSED' : 'RUNNING') : 'OFFLINE'}
-            </span>
-
-            <span className={`badge ${isDryRun ? 'badge-blue' : 'badge-green'}`}>
-              {isDryRun ? '🧪 SIMULATION' : '💰 LIVE'}
-            </span>
-          </div>
         </div>
-
-        {/* Center: Network Status */}
-        <div className="hidden lg:block">
-          <NetworkStatus connected={connected} />
-        </div>
-
-        {/* Right: Stats + Wallet */}
-        <div className="flex items-center gap-6">
-          {/* History Button */}
-          <button
-            onClick={onHistoryClick}
-            className="btn btn-secondary text-sm"
-          >
-            <span>📚</span>
-            History
-          </button>
-
-          {/* Positions Button */}
-          <button
-            onClick={onPositionsClick}
-            className="btn btn-secondary text-sm"
-          >
-            <span>📦</span>
-            Positions
-          </button>
-
-          {/* Toggle Dry Run / Live — refusé par le bot s'il a démarré en papier : bouton désactivé */}
-          <button
-            onClick={onToggleDryRun}
-            disabled={isDryRun && config?.startedLive === false}
-            title={isDryRun && config?.startedLive === false
-              ? 'Démarré en papier : le passage en réel se fait au redémarrage (DRY_RUN=false), jamais d\'un clic'
-              : undefined}
-            className={`btn text-sm ${isDryRun
-                ? (config?.startedLive === false
-                  ? 'bg-white/5 border-white/10 text-gray-500 cursor-not-allowed'
-                  : 'bg-green-500/10 border-green-500/30 hover:bg-green-500/20 text-green-300')
-                : 'bg-red-500/10 border-red-500/30 hover:bg-red-500/20 text-red-300'
-              }`}
-          >
-            <span>{isDryRun ? '💰' : '🧪'}</span>
-            Switch to {isDryRun ? 'LIVE' : 'DRY RUN'}
-          </button>
-
-          <div className="w-px h-8 bg-white/10" />
-
-          {/* Notification Badges */}
-          <div className="flex items-center gap-3">
-            {signalCount > 0 && (
-              <div className="relative tooltip" data-tooltip="Recent Signals">
-                <div className="w-9 h-9 rounded-lg bg-purple-500/20 flex items-center justify-center text-sm">
-                  🎯
-                </div>
-                <span className="absolute -top-1 -right-1 w-5 h-5 rounded-full bg-purple-500 text-white text-xs flex items-center justify-center font-bold">
-                  {Math.min(signalCount, 99)}
-                </span>
-              </div>
-            )}
-            {opportunityCount > 0 && (
-              <div className="relative tooltip" data-tooltip="Opportunities Found">
-                <div className="w-9 h-9 rounded-lg bg-green-500/20 flex items-center justify-center text-sm">
-                  💎
-                </div>
-                <span className="absolute -top-1 -right-1 w-5 h-5 rounded-full bg-green-500 text-white text-xs flex items-center justify-center font-bold">
-                  {Math.min(opportunityCount, 99)}
-                </span>
-              </div>
-            )}
-          </div>
-
-          {/* Runtime */}
-          <div className="text-right">
-            <div className="text-xs text-gray-500 uppercase tracking-wider">Runtime</div>
-            <div className="text-lg font-mono font-bold text-white">{runtime}</div>
-          </div>
-
-          <div className="w-px h-10 bg-white/10" />
-
-          {/* Wallet */}
-          {walletAddress && <button
-            onClick={copyWallet}
-            className="flex items-center gap-2 px-3 py-2 rounded-lg bg-poly-dark/50 border border-poly-border hover:border-poly-purple/50 transition-all group"
-          >
-            <div className="w-6 h-6 rounded-full bg-gradient-to-br from-purple-400 to-blue-400" />
-            <span className="font-mono text-sm text-gray-300 group-hover:text-white transition-colors">
-              {shortWallet}
-            </span>
-            <span className="text-gray-500 group-hover:text-gray-300 transition-colors">
-              {copied ? '✓' : '📋'}
-            </span>
-          </button>}
+        <div className="flex items-center gap-3 text-sm">
+          <span className={`px-3 py-1 rounded-full border text-xs font-medium ${status.cls}`}>{status.text}</span>
+          <span className="flex items-center gap-2 text-xs">
+            <span className={`status-dot ${connected ? 'status-dot-active' : 'status-dot-error'}`} />
+            {connected ? 'connecté' : 'déconnecté'}
+          </span>
+          <button onClick={onHistoryClick} className="btn btn-secondary text-xs">Historique des sessions</button>
         </div>
       </div>
     </header>

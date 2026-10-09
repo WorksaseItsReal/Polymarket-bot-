@@ -9,17 +9,15 @@ import { homedir } from 'os';
 import { fileURLToPath } from 'url';
 
 // Types
+/** Trade d'une session (noms de champs conservés : les anciens fichiers restent lisibles). */
 export interface TradeRecord {
   id: string;
   timestamp: string;
-  strategy: 'smartMoney' | 'arbitrage' | 'dipArb' | 'direct' | 'fairValue';
   market: string;
   side: 'BUY' | 'SELL';
   size: number;
   price: number;
   profit: number;
-  wallet?: string;
-  txHash?: string;
 }
 
 export interface SessionSummary {
@@ -37,32 +35,7 @@ export interface SessionSummary {
   avgProfitPerTrade: number;
   largestWin: number;
   largestLoss: number;
-  strategyStats: {
-    smartMoney: { trades: number; profit: number };
-    arbitrage: { trades: number; profit: number };
-    dipArb: { trades: number; profit: number };
-    direct: { trades: number; profit: number };
-  };
-  walletPerformance: {
-    wallet: string;
-    trades: number;
-    profit: number;
-    winRate: number;
-  }[];
-  onChainOps: {
-    splits: number;
-    merges: number;
-    redeems: number;
-    swaps: number;
-  };
   trades: TradeRecord[];
-  dryRun: boolean;
-  strategies: {
-    smartMoney: boolean;
-    arbitrage: boolean;
-    dipArb: boolean;
-    direct: boolean;
-  };
 }
 
 export interface HistoryData {
@@ -223,118 +196,38 @@ export function addSession(session: SessionSummary): void {
 /**
  * Create a session summary from current bot state
  */
-export function createSessionFromState(
+/**
+ * Bilan de session du bot papier. `trades` : trades du registre RÉGLÉS pendant la session ;
+ * `opened` : paris ouverts pendant la session.
+ */
+export function createFairValueSession(
   startTime: number,
-  state: {
-    totalPnL: number;
-    tradesExecuted: number;
-    smartMoneyTrades: number;
-    arbTrades: number;
-    dipArbTrades: number;
-    directTrades: number;
-    arbProfit: number;
-    followedWallets: string[];
-    splits: number;
-    merges: number;
-    redeems: number;
-    swaps: number;
-    usdcBalance: number;
-    usdcEBalance: number;
-  },
-  config: {
-    dryRun: boolean;
-    smartMoney: { enabled: boolean };
-    arbitrage: { enabled: boolean };
-    dipArb: { enabled: boolean };
-    directTrading: { enabled: boolean };
-  },
-  trades: TradeRecord[] = []
+  capital: number,
+  trades: ReadonlyArray<{ id: string; slug: string; resolvedAt?: string; stake: number; costPerShare: number; pnl: number | null }>,
+  opened: number,
 ): SessionSummary {
-  const endTime = Date.now();
-  const durationMs = endTime - startTime;
-  
-  // Calculate wins/losses from trades
-  const wins = trades.filter(t => t.profit > 0).length;
-  const losses = trades.filter(t => t.profit < 0).length;
-  const winRate = trades.length > 0 ? (wins / trades.length) * 100 : 0;
-  // Si le détail des trades n'est pas fourni, `trades.length` vaut 0 alors que
-  // `state.tradesExecuted` peut être > 0 → on retombe sur ce dernier pour que
-  // « P&L moyen par trade » ne soit pas silencieusement affiché à 0.
-  const tradeCount = trades.length > 0 ? trades.length : state.tradesExecuted;
-  const avgProfitPerTrade = tradeCount > 0 ? state.totalPnL / tradeCount : 0;
-  const largestWin = trades.length > 0 ? Math.max(...trades.map(t => t.profit), 0) : 0;
-  const largestLoss = trades.length > 0 ? Math.min(...trades.map(t => t.profit), 0) : 0;
-  
-  // Calculate wallet performance
-  const walletMap = new Map<string, { trades: number; profit: number; wins: number }>();
-  trades.filter(t => t.wallet).forEach(t => {
-    const existing = walletMap.get(t.wallet!) || { trades: 0, profit: 0, wins: 0 };
-    existing.trades++;
-    existing.profit += t.profit;
-    if (t.profit > 0) existing.wins++;
-    walletMap.set(t.wallet!, existing);
-  });
-  
-  const walletPerformance = Array.from(walletMap.entries()).map(([wallet, data]) => ({
-    wallet,
-    trades: data.trades,
-    profit: data.profit,
-    winRate: data.trades > 0 ? (data.wins / data.trades) * 100 : 0,
-  })).sort((a, b) => b.profit - a.profit);
-  
-  // Calculate strategy profits (estimated from trade counts if no detailed data)
-  const strategyStats = {
-    smartMoney: { 
-      trades: state.smartMoneyTrades, 
-      profit: trades.filter(t => t.strategy === 'smartMoney').reduce((s, t) => s + t.profit, 0) 
-    },
-    arbitrage: { 
-      trades: state.arbTrades, 
-      profit: state.arbProfit 
-    },
-    dipArb: { 
-      trades: state.dipArbTrades, 
-      profit: trades.filter(t => t.strategy === 'dipArb').reduce((s, t) => s + t.profit, 0) 
-    },
-    direct: { 
-      trades: state.directTrades, 
-      profit: trades.filter(t => t.strategy === 'direct').reduce((s, t) => s + t.profit, 0) 
-    },
-  };
-  
-  const startingBalance = state.usdcBalance + state.usdcEBalance - state.totalPnL;
-  
+  const recs: TradeRecord[] = trades.map(t => ({
+    id: t.id, timestamp: t.resolvedAt ?? new Date().toISOString(), market: t.slug, side: 'BUY',
+    size: t.stake, price: t.costPerShare, profit: t.pnl ?? 0,
+  }));
+  const pnl = recs.reduce((a, r) => a + r.profit, 0);
+  const wins = recs.filter(r => r.profit > 0).length;
+  const losses = recs.filter(r => r.profit < 0).length;
   return {
     id: `session-${startTime}`,
     startTime: new Date(startTime).toISOString(),
-    endTime: new Date(endTime).toISOString(),
-    durationMs,
-    totalPnL: state.totalPnL,
-    startingBalance: Math.max(0, startingBalance),
-    endingBalance: state.usdcBalance + state.usdcEBalance,
-    totalTrades: state.tradesExecuted,
-    wins,
-    losses,
-    winRate,
-    avgProfitPerTrade,
-    largestWin,
-    largestLoss,
-    strategyStats,
-    walletPerformance,
-    onChainOps: {
-      splits: state.splits,
-      merges: state.merges,
-      redeems: state.redeems,
-      swaps: state.swaps,
-    },
-    trades,
-    dryRun: config.dryRun,
-    strategies: {
-      smartMoney: config.smartMoney.enabled,
-      arbitrage: config.arbitrage.enabled,
-      dipArb: config.dipArb.enabled,
-      direct: config.directTrading.enabled,
-    },
+    endTime: new Date().toISOString(),
+    durationMs: Date.now() - startTime,
+    totalPnL: pnl,
+    startingBalance: capital,
+    endingBalance: capital + pnl,
+    totalTrades: Math.max(recs.length, opened),
+    wins, losses,
+    winRate: recs.length ? (wins / recs.length) * 100 : 0,
+    avgProfitPerTrade: recs.length ? pnl / recs.length : 0,
+    largestWin: recs.length ? Math.max(0, ...recs.map(r => r.profit)) : 0,
+    largestLoss: recs.length ? Math.min(0, ...recs.map(r => r.profit)) : 0,
+    trades: recs,
   };
 }
 

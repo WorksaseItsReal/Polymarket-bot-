@@ -1,69 +1,55 @@
 import type { BotState } from '../types';
+import { num, pct } from '../format';
 
-interface FairValuePanelProps {
-  state: BotState | null;
-}
-
-const money = (v: number) => `${v >= 0 ? '+' : '−'}$${Math.abs(v).toFixed(2)}`;
+interface Props { state: BotState | null }
 
 /**
- * Stratégie juste valeur (celle qui tourne) : résultats RÉELS du registre papier, mesure
- * « modèle vs carnet » et critères à remplir avant d'envisager l'argent réel — les mêmes
- * lignes que le bilan Telegram.
+ * La stratégie qui tourne : calibration réelle, mesure « modèle vs carnet » et critères à
+ * remplir avant d'envisager l'argent réel — les mêmes lignes que le bilan Telegram.
  */
-export function FairValuePanel({ state }: FairValuePanelProps) {
-  const ledger = state?.ledger;
-  const summary = state?.fairValueSummary;
-  const now = Date.now();
+export function FairValuePanel({ state }: Props) {
+  const l = state?.ledger;
+  const fv = state?.fairValue;
+  const sh = fv?.shadowStats ?? null;
+  const shadowCls = !sh || sh.tDiff === null || sh.n < 500 ? 'text-gray-300' : sh.tDiff <= -2 ? 'text-green-400' : sh.tDiff >= 2 ? 'text-red-400' : 'text-yellow-300';
   return (
-    <div className="panel">
+    <div className="panel h-full">
       <div className="panel-header">
         <h2 className="section-header mb-0">
           <div className="section-header-icon bg-gradient-to-br from-blue-500/20 to-green-500/20">📐</div>
-          Stratégie juste valeur (papier)
+          Le modèle voit-il quelque chose que le marché ne voit pas ?
         </h2>
       </div>
       <div className="panel-body space-y-4">
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-center">
-          <div>
-            <div className="text-2xl font-bold font-mono text-white">{ledger?.trades ?? 0}</div>
-            <div className="text-xs text-gray-500 uppercase tracking-wider mt-1">Trades réglés</div>
-          </div>
-          <div>
-            <div className="text-2xl font-bold font-mono text-purple-400">
-              {ledger?.winRate != null ? `${(ledger.winRate * 100).toFixed(0)}%` : '—'}
-            </div>
-            <div className="text-xs text-gray-500 uppercase tracking-wider mt-1">Réussite</div>
-          </div>
-          <div>
-            <div className={`text-2xl font-bold font-mono ${(ledger?.pnl ?? 0) >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-              {money(ledger?.pnl ?? 0)}
-            </div>
-            <div className="text-xs text-gray-500 uppercase tracking-wider mt-1">PnL réalisé</div>
-          </div>
-          <div>
-            <div className="text-2xl font-bold font-mono text-gray-300">
-              {ledger?.tStat != null ? ledger.tStat.toFixed(2) : '—'}
-            </div>
-            <div className="text-xs text-gray-500 uppercase tracking-wider mt-1">t (≥ 2 = significatif)</div>
+        <div>
+          <div className="text-[11px] uppercase tracking-wider text-gray-500 mb-1">Modèle vs carnet (tous les rounds observés)</div>
+          <div className={`font-mono text-sm ${shadowCls}`}>{fv?.shadow ?? '—'}</div>
+          <div className="text-xs text-gray-500 mt-1">
+            t ≤ −2 sur ≥ 500 rounds : le modèle prédit mieux que les prix Polymarket → continuer. t ≥ +2 : le carnet prédit mieux → aucun réglage ne rendra la stratégie rentable.
           </div>
         </div>
-        <div className="text-sm text-gray-300 leading-relaxed">{summary?.shadow ?? '—'}</div>
-        <div className="text-sm text-gray-300 leading-relaxed">{summary?.goLive ?? '—'}</div>
-        {summary && summary.openPositions.length > 0 && (
+        <div>
+          <div className="text-[11px] uppercase tracking-wider text-gray-500 mb-1">Avant le réel</div>
+          <div className="font-mono text-sm text-gray-200 whitespace-pre-wrap">{fv?.goLive ?? '—'}</div>
+        </div>
+        <div className="grid grid-cols-3 gap-3 text-center">
           <div>
-            <div className="text-xs text-gray-500 uppercase tracking-wider mb-2">Positions ouvertes</div>
-            <div className="space-y-1">
-              {summary.openPositions.map((p, i) => (
-                <div key={i} className="flex justify-between text-sm font-mono text-gray-300">
-                  <span>{p.coin} {p.side === 'UP' ? '⬆️' : '⬇️'}</span>
-                  <span>${p.stake.toFixed(2)} @ {p.costPerShare.toFixed(3)}</span>
-                  <span className="text-gray-500">fin dans {Math.max(0, Math.round((p.endMs - now) / 1000))} s</span>
-                </div>
-              ))}
-            </div>
+            <div className="text-xl font-mono font-bold">{l ? String(l.calibN) : '—'}</div>
+            <div className="text-[11px] uppercase tracking-wider text-gray-500 mt-1">trades à issue connue</div>
           </div>
-        )}
+          <div>
+            <div className="text-xl font-mono font-bold">{pct(l?.calibWinRate)}</div>
+            <div className="text-[11px] uppercase tracking-wider text-gray-500 mt-1">côté choisi gagnant</div>
+          </div>
+          <div>
+            <div className="text-xl font-mono font-bold">{pct(l?.avgModelProb)}</div>
+            <div className="text-[11px] uppercase tracking-wider text-gray-500 mt-1">annoncé par le modèle</div>
+          </div>
+        </div>
+        <div className="text-xs text-gray-500">
+          Calibration : le taux de réussite doit rejoindre la probabilité annoncée. Une réussite nettement en dessous = modèle trop confiant (le garde-fou bloque les entrées si c'est significatif).
+          {l && l.tStat !== null && <span> · PnL par trade : t = {num(l.tStat)} sur {l.trades} trades.</span>}
+        </div>
       </div>
     </div>
   );

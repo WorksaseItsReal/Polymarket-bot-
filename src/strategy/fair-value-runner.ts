@@ -123,8 +123,9 @@ export interface RunnerDeps {
   /** Rappels optionnels (journal historique, compteurs du dashboard). */
   onTradeOpened?: (e: TradeOpenedEvent) => void;
   onTradeClosed?: (t: LedgerTrade) => void;
-  /** Chaque évaluation complète (pari ou abstention), pour le journal des décisions. */
-  onEvaluation?: (r: DecisionRecord) => void;
+  /** Chaque évaluation complète (pari ou abstention), pour le journal des décisions.
+   *  `reason` : la ligne lisible correspondante (HOLD et pourquoi, ou le pari pris). */
+  onEvaluation?: (r: DecisionRecord, reason: string) => void;
   /** Raison de bloquer les NOUVELLES entrées (arrêt de performance), ou null. Les
    *  évaluations continuent d'être journalisées : on garde l'œil sur le marché. */
   entryBlock?: () => string | null;
@@ -225,7 +226,11 @@ export class FairValueRunner {
     return ledgerStatsShared(this.d.ledgerPath);
   }
 
+  /** Dernière ligne lisible par marché (même si le journal l'a tue par throttling). */
+  private readonly lastReason = new Map<string, string>();
+
   private holdLog(id: string, msg: string): void {
+    this.lastReason.set(id, msg);
     const now = this.d.now();
     if (now - (this.lastHoldLog.get(id) ?? 0) < 60_000) return;
     this.lastHoldLog.set(id, now);
@@ -638,12 +643,15 @@ export class FairValueRunner {
           modelProb: q.prob, costPerShare: entryCost, edge: edgeAtFill, stake, winProfit, timeZone: this.d.timeZone,
         }));
         rec = { ...(rec as DecisionRecord), act: 'buy', side: decision.side, stake };
+        this.lastReason.set(market.conditionId, description);
         this.d.onTradeOpened?.({ trade, market, data, ask: fill.avgPrice, tauSec, winProfit, description });
       } catch (err) {
         this.holdLog(market.conditionId, `   ↳ ${market.slug} : erreur d'analyse (${String((err as Error)?.message ?? err).slice(0, 160)}) → pas de mise`);
       } finally {
         if (rec) {
-          try { this.d.onEvaluation?.(rec); } catch { /* le journal ne doit jamais bloquer la stratégie */ }
+          const reason = (this.lastReason.get(market.conditionId) ?? '').replace(/^\s*↳\s*/, '');
+          if (this.lastReason.size > 200) this.lastReason.clear();
+          try { this.d.onEvaluation?.(rec, reason); } catch { /* le journal ne doit jamais bloquer la stratégie */ }
         }
       }
     }

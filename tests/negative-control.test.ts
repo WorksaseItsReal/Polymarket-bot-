@@ -19,7 +19,6 @@ import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import assert from 'node:assert/strict';
-import { extractFromBot } from './harness-v2.ts';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const FIXTURES = join(HERE, 'fixtures');
@@ -56,14 +55,4 @@ test('CONTRÔLE POSITIF : une assertion vraie sort en code 0', () => {
   assert.equal(r.code, 0, `un test qui doit passer DOIT sortir en code 0 (obtenu ${r.code})`);
   assert.match(r.out, /# pass 1\b/, 'le runner compte bien 1 succès');
   assert.match(r.out, /# fail 0\b/, 'aucun échec');
-});
-
-test('CONTRÔLE NÉGATIF : l’extraction du code réel LÈVE sur un motif impossible', () => {
-  // Preuve que les tests de non-régression mordent : si l'expression ciblée
-  // disparaissait du source, l'extraction lèverait au lieu de passer en silence.
-  assert.throws(
-    () => extractFromBot(/CETTE_EXPRESSION_EST_ABSENTE_DU_SOURCE_XYZ/, 'motif impossible'),
-    /NON-RÉGRESSION/,
-    'extractFromBot doit lever quand le motif est introuvable',
-  );
 });

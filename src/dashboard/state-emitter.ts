@@ -21,35 +21,15 @@ class DashboardEmitter extends EventEmitter {
   private maxLogs = 500;
 
   updateState(newState: BotState): void {
-    // Copie à un niveau des sous-objets mutables : sans cela, `updateStrategyStatus()`
-    // écrirait `this.state.dipArb.status` sur l'objet `state` VIVANT du bot
-    // (références partagées par la copie superficielle) — alias non voulu et
-    // impossible à déboguer.
-    this.state = {
-      ...newState,
-      dipArb: { ...newState.dipArb },
-      arbitrage: { ...newState.arbitrage },
-    };
+    // L'état reçu est un instantané neuf construit par le bot : aucune copie défensive
+    // nécessaire, et personne ne le mute ici.
+    this.state = newState;
     this.emit('state', this.state);
   }
 
   updateConfig(newConfig: BotConfig): void {
     this.config = { ...newConfig };
     this.emit('config', this.config);
-  }
-
-  updateStrategyStatus(strategy: 'arbitrage' | 'dipArb' | 'smartMoney', status: string, details?: any): void {
-    if (!this.state) return;
-
-    if (strategy === 'dipArb') {
-      this.state.dipArb.status = status as any;
-      if (details) this.state.dipArb.marketName = details;
-    } else if (strategy === 'arbitrage') {
-      this.state.arbitrage.status = status as any;
-      if (details) this.state.arbitrage.currentMarket = details;
-    }
-
-    this.emit('state', this.state);
   }
 
   log(level: LogLevel, message: string, data?: unknown): void {
