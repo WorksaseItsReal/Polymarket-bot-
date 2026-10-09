@@ -72,6 +72,8 @@ export async function main(env: Record<string, string | undefined> = process.env
   let crashStart: StartReport | null = null;
   let spotStream: SpotStream | null = null;
   let journal: DecisionJournal | null = null;
+  let pollTimer: NodeJS.Timeout | null = null;
+  let scheduler: MoveScheduler | null = null;
   let sessionTrades = 0;
 
   const notify = (html: string): void => { try { telegram?.send(html); } catch { /* jamais bloquant */ } };
@@ -103,6 +105,10 @@ export async function main(env: Record<string, string | undefined> = process.env
     if (shuttingDown) return;
     shuttingDown = true;
     log(code ? 'ERROR' : 'INFO', `Arrêt du bot (${reason})`);
+    // Plus aucun passage ne démarre pendant la fenêtre d'arrêt : un règlement arrivé après le
+    // bilan de session en serait absent et son message partirait après « Bot arrêté ».
+    if (pollTimer) clearInterval(pollTimer);
+    scheduler?.stop();
     try { spotStream?.stop(); } catch { /* déjà arrêté */ }
     // Telegram pas (encore) connecté : arrêt compté mais pas « signalé » (le démarrage suivant le dira).
     const stop = crashStart ? noteStop(paths.runState, code !== 0, Date.now(), process.pid, telegram !== null) : { alert: true, recentCrashes: 0, nextGapMs: 0 };
@@ -140,20 +146,30 @@ export async function main(env: Record<string, string | undefined> = process.env
   console.log('║     POLYMARKET PAPER BOT — « Up or Down 5 min », juste valeur       ║');
   console.log('╚════════════════════════════════════════════════════════════════════╝\n');
   for (const w of warnings) log('WARN', `Configuration : ${w}`);
+  // Garde-fou de plantage AVANT tout refus : sous PM2, un refus répété (config fausse) est une
+  // boucle de relance comme une autre — comptée, et ses alertes Telegram espacées.
+  crashStart = noteStart(paths.runState);
+  if (crashStart.brutal) log('WARN', 'Le lancement précédent s\'est terminé brutalement sans passer par l\'arrêt (mémoire saturée, kill -9, coupure ?) — voir paperbot.error.log.');
+  if (crashStart.otherInstance) log('WARN', `Un autre bot semble tourner avec le même dossier ${config.dataDir} : deux bots écriraient le même registre.`);
+
   if (!config.dryRun) {
     log('ERROR', 'DRY_RUN=false : le mode RÉEL n\'est pas implémenté par ce bot (aucun ordre ne peut partir). Il refuse de démarrer pour ne pas faire croire le contraire. Retirer DRY_RUN=false.');
-    process.exit(1);
+    // Client Telegram sans vérification préalable : juste de quoi dire « arrêté sur erreur » (espacé).
+    if (config.telegram) telegram = new TelegramClient({ ...config.telegram, log: (level, msg) => log(level, msg) });
+    await shutdown('DRY_RUN=false refusé : mode réel non implémenté, retirer DRY_RUN=false du .env', 1);
+    return;
   }
   const capWarn = capitalWarning(config, MAX_VARIANCE_PCT);
   if (capWarn) log('WARN', capWarn);
 
-  startDashboard(config.dashboard.port, { host: config.dashboard.host, token: config.dashboard.token ?? undefined });
-  const exposed = config.dashboard.host === '0.0.0.0' && !!config.dashboard.token;
-  log('INFO', `🌐 Dashboard : http://${exposed ? '<ip-du-serveur>' : config.dashboard.host === '0.0.0.0' ? '127.0.0.1' : config.dashboard.host}:${config.dashboard.port}`);
-
-  crashStart = noteStart(paths.runState);
-  if (crashStart.brutal) log('WARN', 'Le lancement précédent s\'est terminé brutalement sans passer par l\'arrêt (mémoire saturée, kill -9, coupure ?) — voir paperbot.error.log.');
-  if (crashStart.otherInstance) log('WARN', `Un autre bot semble tourner avec le même dossier ${config.dataDir} : deux bots écriraient le même registre.`);
+  try {
+    startDashboard(config.dashboard.port, { host: config.dashboard.host, token: config.dashboard.token ?? undefined });
+    const exposed = config.dashboard.host === '0.0.0.0' && !!config.dashboard.token;
+    log('INFO', `🌐 Dashboard : http://${exposed ? '<ip-du-serveur>' : config.dashboard.host === '0.0.0.0' ? '127.0.0.1' : config.dashboard.host}:${config.dashboard.port}`);
+  } catch (err) {
+    // listen() peut lever de façon synchrone (port invalide) : jamais fatal pour un affichage.
+    log('ERROR', `Dashboard impossible à démarrer (${String((err as Error)?.message ?? err).slice(0, 120)}) — le bot continue SANS dashboard.`);
+  }
 
   const dashboardConfig: DashboardConfig = {
     mode: 'paper', capital: config.capital, coins: [...config.coins], pollSec: config.pollMs / 1000, exitEdge: config.exitEdge,
@@ -172,7 +188,6 @@ export async function main(env: Record<string, string | undefined> = process.env
   let lastRisk: RiskVerdict | null = null;
   let shadow: ShadowTracker | null = null;
   const lastEvals = new Map<string, LastEvaluation>();
-  let entryBlockNow: string | null = null;
   function publishState(): void {
     const st = ledgerStats();
     const trades = readLedgerShared(paths.ledger) ?? [];
@@ -205,7 +220,9 @@ export async function main(env: Record<string, string | undefined> = process.env
         lastMarketsFoundAt: runnerRef?.lastMarketsFoundAt ?? 0,
         consecutiveTickFailures: runnerRef?.consecutiveTickFailures ?? 0,
         journal: !!journal,
-        entryBlock: entryBlockNow,
+        // Calculé à chaque publication (lectures pures) : avant, une valeur mémorisée seulement
+        // quand un signal passait la porte de risque — donc figée pendant une pause ou un blocage levé.
+        entryBlock: shuttingDown ? 'arrêt du bot en cours' : (clockBlock() ?? guard.current() ?? sessionStop),
       },
       session: { opened: sessionTrades, settled: sessionSettled.length, pnl: sessionSettled.reduce((a, t) => a + (t.pnl as number), 0) },
     };
@@ -381,10 +398,7 @@ export async function main(env: Record<string, string | undefined> = process.env
       shadowRef.observe(r);
       lastEvals.set(r.coin, { coin: r.coin, t: r.t, tau: r.tau, pUp: r.pUp, upAsk: r.upAsk, downAsk: r.downAsk, act: r.act, side: r.side, reason });
     },
-    entryBlock: () => {
-      entryBlockNow = (shuttingDown ? 'arrêt du bot en cours' : null) ?? clockBlock() ?? perfGuard();
-      return entryBlockNow;
-    },
+    entryBlock: () => (shuttingDown ? 'arrêt du bot en cours' : null) ?? clockBlock() ?? perfGuard(),
     onRiskStop: reason => {
       const streak = /pertes consécutives/.test(reason);
       alertOnce(streak ? 'risk-streak' : 'risk-stake-drawdown', streak
@@ -400,12 +414,12 @@ export async function main(env: Record<string, string | undefined> = process.env
   // Passage régulier refusé parce qu'un passage « saut du spot » tient le verrou : nouvel
   // essai toutes les 0,5 s pendant au plus 1,5 s (au-delà, le passage suivant serait trop proche).
   const regularTick = async () => {
-    for (let attempt = 0; attempt < 4; attempt++) {
+    for (let attempt = 0; attempt < 4 && !shuttingDown; attempt++) {
       if (await runner.tick()) return;
       if (attempt < 3) await new Promise(r => setTimeout(r, 500));
     }
   };
-  setInterval(() => { void regularTick(); }, config.pollMs);
+  pollTimer = setInterval(() => { void regularTick(); }, config.pollMs);
 
   // Chien de garde : boucle bloquée, aucun marché, échecs en série — se voir, pas se découvrir des heures après.
   setInterval(() => {
@@ -428,8 +442,9 @@ export async function main(env: Record<string, string | undefined> = process.env
 
   if (stream) {
     // Réaction immédiate à un mouvement du spot (au plus une évaluation par coin toutes les 1,5 s).
-    const scheduler = new MoveScheduler({ run: coins => runner.tick(coins) });
-    stream.on('move', (coin: string) => scheduler.onMove(coin));
+    const sched = new MoveScheduler({ run: coins => runner.tick(coins) });
+    scheduler = sched;
+    stream.on('move', (coin: string) => sched.onMove(coin));
     stream.on('clockSkew', (ms: number) => {
       log('WARN', `⏱️ Horloge suspecte : réception − horodatage Binance = ${ms} ms (médiane). Le temps restant des rounds peut être faux : synchronise l'heure du serveur (NTP).`);
       alertOnce('clock', `horloge du serveur décalée d'environ ${(ms / 1000).toFixed(1)} s par rapport à Binance — active la synchro NTP (timedatectl set-ntp true)`);

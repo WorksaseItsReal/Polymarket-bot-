@@ -87,3 +87,12 @@ test('redémarrage : tout découle du registre, aucun compteur en mémoire à co
   assert.deepEqual({ ...a, until: 0 }, { ...b, until: 0 });
   assert.equal(evaluateRisk(250, computeStats(trades), trades, L, Date.UTC(2026, 9, 16, 0, 1)).allowed, true, 'le lendemain : libre');
 });
+
+test('calendrier : un trade réglé sans resolvedAt compte à sa date d\'ouverture (comme les statistiques)', () => {
+  const t = trade(-5, NOW - H);
+  delete t.resolvedAt;
+  assert.deepEqual(calendarPnl([t], NOW), { today: -5, month: -5 });
+  const v = evaluateRisk(100, computeStats([t]), [t], L, NOW);
+  assert.equal(v.allowed, false, 'perte du jour 5 % = limite quotidienne, comptée');
+  assert.equal(v.layer, 'daily');
+});

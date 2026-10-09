@@ -92,3 +92,22 @@ test('limites de perte : réglables, hiérarchie vérifiée (sinon défauts + av
   assert.match(bad.warnings.join('\n'), /limites de perte incohérentes/);
   assert.match(loadBotConfig({ TOTAL_MAX_LOSS_PCT: '2' }).warnings.join('\n'), /TOTAL_MAX_LOSS_PCT=2 ignoré/);
 });
+
+test('port non entier, capital invalide, coin inconnu : avertissements exacts et valeurs sûres', () => {
+  const a = loadBotConfig({ DASHBOARD_PORT: '3001.5' });
+  assert.equal(a.config.dashboard.port, 3001, 'listen(3001.5) lèverait de façon synchrone');
+  assert.match(a.warnings.join('\n'), /DASHBOARD_PORT=3001\.5 ignoré \(attendu : entier entre 1 et 65535\)/);
+  const b = loadBotConfig({ PAPER_CAPITAL: 'abc', CAPITAL_USD: '300' });
+  assert.equal(b.config.capital, 300);
+  assert.match(b.warnings.join('\n'), /PAPER_CAPITAL=abc ignoré .*valeur par défaut 300/, 'cite la valeur réellement utilisée');
+  const c = loadBotConfig({ PAPER_CAPITAL: '0' });
+  assert.equal(c.config.capital, 50);
+  assert.match(c.warnings.join('\n'), /PAPER_CAPITAL=0 ignoré .*valeur par défaut 50/);
+  const d = loadBotConfig({ FV_COINS: 'BTC,ADA' });
+  assert.deepEqual(d.config.coins, ['BTC']);
+  assert.match(d.warnings.join('\n'), /FV_COINS=BTC,ADA : ADA inconnu \(coins possibles : BTC, ETH, SOL, XRP, DOGE\) — coins utilisés : BTC/);
+  const e = loadBotConfig({ FV_COINS: 'ADA, dot' });
+  assert.equal(e.config.coins.length, 5);
+  assert.match(e.warnings.join('\n'), /ADA, DOT inconnus .*— les 5 sont utilisés/);
+  assert.deepEqual(loadBotConfig({ FV_COINS: 'btc, eth' }).warnings, []);
+});

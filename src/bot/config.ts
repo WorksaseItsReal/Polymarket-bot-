@@ -11,7 +11,7 @@
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { fairValueConfigFromEnv, type FairValueConfig } from '../services/fair-value.js';
-import { coinsFromEnv, type StrategyCoin } from '../strategy/fair-value-runner.js';
+import { STRATEGY_COINS, coinsFromEnv, type StrategyCoin } from '../strategy/fair-value-runner.js';
 import { isValidTimeZone } from '../services/telegram-messages.js';
 import { looksLikeBotToken, telegramConfigFromEnv } from '../services/telegram.js';
 
@@ -103,7 +103,9 @@ export function loadBotConfig(env: Env = process.env): { config: BotConfig; warn
 
   // Capital de référence UNIQUE : PAPER_CAPITAL, sinon CAPITAL_USD, sinon 50 $ (le doctor
   // avertit sous 100 $ : la mise de 1 % n'atteint pas le minimum Polymarket).
-  const capital = num(env, 'PAPER_CAPITAL', 0, 0.01, 1e9, warnings) || num(env, 'CAPITAL_USD', 50, 0.01, 1e9, warnings);
+  // Le repli est calculé d'abord pour que l'avertissement d'un PAPER_CAPITAL invalide cite la
+  // valeur réellement utilisée (CAPITAL_USD ou 50), pas « 0 ».
+  const capital = num(env, 'PAPER_CAPITAL', num(env, 'CAPITAL_USD', 50, 0.01, 1e9, warnings), 0.01, 1e9, warnings);
 
   const fv = fairValueConfigFromEnv(env);
   // Les FV_* invalides sont ramenés au défaut par fairValueConfigFromEnv : on le dit.
@@ -124,13 +126,24 @@ export function loadBotConfig(env: Env = process.env): { config: BotConfig; warn
 
   const coinsRaw = (env.FV_COINS ?? '').trim();
   const coins = coinsFromEnv(coinsRaw);
-  if (coinsRaw && coins.length === 5 && coinsRaw.split(',').map(c => c.trim().toUpperCase()).filter(Boolean).some(c => !coins.includes(c as StrategyCoin))) {
-    warnings.push(`FV_COINS=${coinsRaw} : aucun coin reconnu (BTC, ETH, SOL, XRP, DOGE) — les 5 sont utilisés`);
+  const asked = coinsRaw ? coinsRaw.split(',').map(c => c.trim().toUpperCase()).filter(Boolean) : [];
+  const unknown = asked.filter(c => !(STRATEGY_COINS as readonly string[]).includes(c));
+  if (unknown.length) {
+    // Chaque coin inconnu est nommé (avant : silence tant qu'un coin au moins était reconnu).
+    warnings.push(`FV_COINS=${coinsRaw} : ${unknown.join(', ')} inconnu${unknown.length > 1 ? 's' : ''} (coins possibles : ${STRATEGY_COINS.join(', ')})`
+      + (asked.length === unknown.length ? ' — les 5 sont utilisés' : ` — coins utilisés : ${coins.join(', ')}`));
   }
 
   const tz = (env.TELEGRAM_TZ ?? '').trim() || 'Europe/Paris';
   const timeZone = isValidTimeZone(tz) ? tz : 'Europe/Paris';
   if (timeZone !== tz) warnings.push(`TELEGRAM_TZ=${tz} n'est pas un fuseau valide — Europe/Paris`);
+
+  // Port : entier obligatoire (server.listen(3001.5) lève de façon synchrone, pas via 'error').
+  let port = num(env, 'DASHBOARD_PORT', 3001, 1, 65535, warnings);
+  if (!Number.isInteger(port)) {
+    warnings.push(`DASHBOARD_PORT=${(env.DASHBOARD_PORT ?? '').trim()} ignoré (attendu : entier entre 1 et 65535) — valeur par défaut 3001`);
+    port = 3001;
+  }
 
   const telegram = telegramConfigFromEnv(env);
   if (telegram && !looksLikeBotToken(telegram.token)) {
@@ -170,7 +183,7 @@ export function loadBotConfig(env: Env = process.env): { config: BotConfig; warn
     telegram,
     summaryEveryMin: num(env, 'TELEGRAM_SUMMARY_MIN', 60, 15, 24 * 60, warnings),
     timeZone,
-    dashboard: { port: num(env, 'DASHBOARD_PORT', 3001, 1, 65535, warnings), host, token },
+    dashboard: { port, host, token },
     httpTimeoutMs: num(env, 'HTTP_TIMEOUT_MS', 10_000, 1000, 120_000, warnings),
     dataDir: join((env.HOME ?? '').trim() || homedir(), '.polymarket'),
   };

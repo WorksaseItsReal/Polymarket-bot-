@@ -509,7 +509,9 @@ export class FairValueRunner {
         if (block) {
           if (gateBlock) {
             // Pause de risque (peut durer des jours) : une ligne toutes les 10 min au total,
-            // pas une par marché et par minute.
+            // pas une par marché et par minute — mais la raison de CHAQUE évaluation est gardée
+            // (dashboard « dernière évaluation ») : l'opérateur doit voir POURQUOI rien n'est parié.
+            this.lastReason.set(market.conditionId, `${ctx} → signal ${decision.side} ignoré : entrées bloquées (${block})`);
             const t = this.d.now();
             if (t - this.lastPauseLog >= 600_000) {
               this.lastPauseLog = t;

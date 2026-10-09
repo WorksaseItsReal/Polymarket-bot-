@@ -44,7 +44,9 @@ export function calendarPnl(trades: readonly LedgerTrade[], nowMs: number): { to
   let month = 0;
   for (const t of trades) {
     if (t.status === 'open' || typeof t.pnl !== 'number') continue;
-    const at = Date.parse(t.resolvedAt ?? '');
+    // Registre ancien ou édité à la main sans resolvedAt : même repli que computeStats
+    // (date d'ouverture), sinon le trade compterait pour la baisse/total mais pas pour le jour/mois.
+    const at = Date.parse(t.resolvedAt ?? t.openedAt ?? '');
     if (!Number.isFinite(at)) continue;
     if (at >= monthStart) month += t.pnl;
     if (at >= dayStart) today += t.pnl;

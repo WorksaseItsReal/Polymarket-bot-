@@ -579,12 +579,15 @@ test('mélange actif, redémarrage avec entrées bloquées : la revente reste po
 });
 
 test('pause de risque : aucun pari, mais la MESURE continue (journal, marchés) — pas de trou pendant les mauvaises périodes', async () => {
-  const evals: Array<{ act: string }> = [];
-  const env = setup({ canTrade: () => false, onEvaluation: r => evals.push({ act: r.act }) });
+  const evals: Array<{ act: string; reason: string }> = [];
+  const env = setup({ canTrade: () => false, onEvaluation: (r, reason) => evals.push({ act: r.act, reason }) });
   const r = env.runner();
   await r.tick();
   assert.equal(loadLedger(env.ledgerPath)!.length, 0, 'aucun pari en pause');
-  assert.deepEqual(evals, [{ act: 'hold' }], 'évaluation journalisée malgré la pause');
+  assert.equal(evals.length, 1, 'évaluation journalisée malgré la pause');
+  assert.equal(evals[0].act, 'hold');
+  // La raison de l'abstention est conservée (dashboard « dernière évaluation ») : avant, vide.
+  assert.match(evals[0].reason, /signal (UP|DOWN) ignoré : entrées bloquées \(pause de risque\)/, evals[0].reason);
   assert.ok(r.lastMarketsFoundAt > 0, 'marchés rafraîchis : pas de fausse alerte « aucun marché »');
   assert.ok(env.logs.some(l => /entrées bloquées \(pause de risque\)/.test(l)));
 });
