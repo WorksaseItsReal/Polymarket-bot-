@@ -311,8 +311,11 @@ par round toutes les 10 s, avec probabilité, bruit, asks, meilleurs bids, fenê
 `npx tsx scripts/analysis/fv-report.ts --days 7` règle les rounds et répond dans l'ordre :
 0. **Prix à battre** : notre estimation vs celle publiée par Polymarket (décalage, dispersion,
    gain possible en lisant le prix officiel).
-1. **Le modèle prédit-il mieux que le carnet ?** (Brier, t groupé par créneau). 1b : mélange
-   modèle/carnet estimé sur une moitié, jugé sur l'autre.
+1. **Le modèle prédit-il mieux que le carnet ?** (Brier, t groupé par créneau). 1c : quelle
+   volatilité prédit le mieux (clôture-à-clôture, Parkinson, mélange — `FV_VOL_ESTIMATOR`).
+   1d : **dernière minute** (TWAP en partie acquis) — le modèle « fin de round » voit-il mieux
+   que le carnet, et des entrées hypothétiques y auraient-elles rapporté (le bot n'y entre jamais).
+   1b : mélange modèle/carnet estimé sur une moitié, jugé sur l'autre.
 2. **Est-il calibré ?** (« 70 % » gagne-t-il ~70 % du temps ?), `FV_Z_SCALE` suggéré avec IC.
 3. **Quels seuils auraient rapporté**, sur chaque moitié, et selon la marge de bruit `k`.
 4. Paris réellement pris.
