@@ -49,6 +49,10 @@ test('SpotStream.meanSince : dernier prix par seconde, report sur les secondes v
   assert.equal(s.meanSince('BTC', 1_789_999_990_000, 1_789_999_995_000), null, 'aucun prix connu au début');
   assert.equal(s.meanSince('ETH', 1_790_000_000_000, 1_790_000_006_000), null);
   assert.equal(s.meanSince('BTC', 1_790_000_003_000, 1_790_000_003_000), null, 'intervalle vide');
+  // Flux coupé pendant 30 s au milieu de la fenêtre : pas de moyenne fictive
+  now += 30_000; tick(111); // seconde 35
+  assert.equal(s.meanSince('BTC', 1_790_000_000_000, 1_790_000_036_000), null, 'trou de 30 s : flux coupé → null');
+  assert.ok(Math.abs(s.meanSince('BTC', 1_790_000_035_000, 1_790_000_036_000)! - 111) < 1e-9, 'après la coupure, la fenêtre récente est valide');
 });
 
 test('journal : une mesure fin de round n\'est pas écrasée par le passage régulier du même round', () => {
@@ -85,6 +89,8 @@ test('analyse : lateRounds ramène pl en pUp, rejeu et comparaison appariée fon
   assert.ok(c.brierA! < c.brierB! && c.t! < -2, `modèle ${c.brierA} < carnet ${c.brierB}, t=${c.t}`);
   assert.equal(lateRounds(rounds.map(l => l.filter(x => !x.lt))).length, 0);
   assert.equal(loadBotConfig({ FV_LATE_MEASURE: 'false' }).config.fv.lateMeasure, false);
+  assert.equal(loadBotConfig({ FV_LATE_MEASURE: 'off' }).config.fv.lateMeasure, false, 'mêmes orthographes que les autres booléens');
+  assert.deepEqual(loadBotConfig({ FV_LATE_MEASURE: '0' }).warnings, []);
   assert.equal(loadBotConfig({}).config.fv.lateMeasure, true);
   assert.match(loadBotConfig({ FV_LATE_MEASURE: 'peut-être' }).warnings.join('\n'), /FV_LATE_MEASURE=peut-être ignoré/);
 });

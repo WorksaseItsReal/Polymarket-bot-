@@ -319,7 +319,7 @@ export async function main(env: Record<string, string | undefined> = process.env
         summary: () => ({ stats: ledgerStats(), capital: config.capital, shadow: shadow?.stats() }),
         risk: () => ({ verdict: freshRisk(), limits: config.risk, capital: config.capital }),
         positions: () => ({ positions: openPositions(), nowMs: Date.now(), timeZone: config.timeZone }),
-      }, client.chatType));
+      }, client.chatType, client.botUsername));
       log('INFO', '💬 Commandes Telegram écoutées : /status /bilan /risque /positions /aide (TELEGRAM_COMMANDS=false pour couper)');
     }
     if (crashStart && !crashStart.announce) {

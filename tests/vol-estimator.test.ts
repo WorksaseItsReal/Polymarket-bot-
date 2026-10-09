@@ -79,9 +79,10 @@ test('selectSigma : réglage respecté, repli si un estimateur manque', () => {
   assert.equal(selectSigma(2, 3, 'cc'), 2);
   assert.equal(selectSigma(2, 3, 'parkinson'), 3);
   assert.ok(Math.abs(selectSigma(3, 4, 'blend')! - Math.sqrt((9 + 16) / 2)) < 1e-12);
-  assert.equal(selectSigma(null, 3, 'cc'), 3);
+  assert.equal(selectSigma(null, 3, 'cc'), null, 'défaut : sans σ clôture-à-clôture, pas de données → pas de pari (pas de repli croisé)');
   assert.equal(selectSigma(2, null, 'parkinson'), 2);
   assert.equal(selectSigma(2, null, 'blend'), 2);
+  assert.equal(selectSigma(null, 3, 'blend'), null);
   assert.equal(selectSigma(null, null, 'blend'), null);
   assert.equal(fairValueConfigFromEnv({ FV_VOL_ESTIMATOR: 'parkinson' }).volEstimator, 'parkinson');
   assert.equal(fairValueConfigFromEnv({ FV_VOL_ESTIMATOR: 'n importe quoi' }).volEstimator, 'cc');

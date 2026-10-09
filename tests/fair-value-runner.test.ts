@@ -784,3 +784,25 @@ test('fin de round (τ < 60 s) : mesure journalisée (lt, pl, kn), raison visibl
   await env3.runner().tick();
   assert.equal(books, 0);
 });
+
+test('fin de round : carnets lents → données relues à l\'instant des carnets (kn + τ = W) ; τ ≥ W jamais mesuré', async () => {
+  const evals: Array<Parameters<NonNullable<RunnerDeps['onEvaluation']>>[0]> = [];
+  let now = (SLOT + 270) * 1000; // τ = 30 s à la première lecture
+  let reads = 0;
+  const env = setup({
+    now: () => now,
+    getRoundData: async (_c, _s, nowMs) => { reads++; return { spot: 100.06, strike: 100, sigmaPerSqrtSec: SIGMA, source: 'binance+ws', candleAgeMs: 0, twapPartial: { mean: 100.05, knownSec: 60 - (SLOT * 1000 + 300_000 - nowMs) / 1000 } }; },
+    getBook: async id => { now += 3000; return { asks: [{ price: id === 'UP' ? 0.6 : 0.41, size: 5 }], bids: [] }; }, // 6 s de carnets lents
+    onEvaluation: rec => evals.push(rec),
+  });
+  await env.runner().tick();
+  assert.equal(evals.length, 1);
+  assert.equal(reads, 2, 'données relues après des carnets lents');
+  assert.equal((evals[0].kn as number) + (evals[0].tau as number), 60, 'secondes acquises + temps restant = fenêtre');
+  // τ = 75 s avec FV_MIN_TAU_SEC = 90 : hors fenêtre d'entrée mais TWAP pas commencé → aucune lecture
+  let reads2 = 0;
+  const env2 = setup({ cfg: { ...DEFAULT_FAIR_VALUE_CONFIG, minTauSec: 90 }, getRoundData: async () => { reads2++; return null; } });
+  env2.setNow((SLOT + 225) * 1000);
+  await env2.runner().tick();
+  assert.equal(reads2, 0, 'rien à mesurer avant la fenêtre de moyenne');
+});

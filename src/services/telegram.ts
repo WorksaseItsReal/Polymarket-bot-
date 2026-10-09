@@ -114,7 +114,10 @@ export class TelegramClient {
   private draining: Promise<void> | null = null;
   private lastSentAt = 0;
   private polling = false;
+  private pollGen = 0;
   private pollOffset = 0;
+  /** Nom du bot (@…), connu après `check()` : les commandes adressées à un autre bot sont ignorées. */
+  botUsername: string | null = null;
   private conflictLoggedAt = -Infinity;
   private foreignLoggedAt = -Infinity;
   /** Type du chat configuré (private, group, supergroup…), connu après `check()`. */
@@ -180,6 +183,7 @@ export class TelegramClient {
         };
       }
       const username = (me.result as TgChatLike | undefined)?.username;
+      this.botUsername = username ?? null;
       const chat = await this.call('getChat', { chat_id: this.chatId });
       const chatRes = chat.result as TgChatLike | undefined;
       if (!chat.ok) {
@@ -230,32 +234,37 @@ export class TelegramClient {
   startPolling(handler: TelegramCommandHandler, opts: { maxAgeSec?: number } = {}): void {
     if (this.polling) return;
     this.polling = true;
-    void this.pollLoop(handler, opts.maxAgeSec ?? 300).catch(() => undefined).finally(() => { this.polling = false; });
+    // Génération : une boucle arrêtée puis relancée pendant un getUpdates en vol ne doit pas
+    // laisser DEUX boucles (conflit 409, chaque commande traitée deux fois).
+    const gen = ++this.pollGen;
+    void this.pollLoop(handler, opts.maxAgeSec ?? 300, gen).catch(() => undefined).finally(() => { if (gen === this.pollGen) this.polling = false; });
   }
 
   stopPolling(): void {
     this.polling = false;
+    this.pollGen++;
   }
 
   get isPolling(): boolean {
     return this.polling;
   }
 
-  private async pollLoop(handler: TelegramCommandHandler, maxAgeSec: number): Promise<void> {
+  private async pollLoop(handler: TelegramCommandHandler, maxAgeSec: number, gen: number): Promise<void> {
     let backoff = 5_000;
-    while (this.polling) {
+    const alive = () => this.polling && gen === this.pollGen;
+    while (alive()) {
       const t0 = Date.now();
       let r: TgResponse;
       try {
         r = await this.call('getUpdates', { offset: this.pollOffset, timeout: 20, allowed_updates: ['message'] }, 30_000);
       } catch (err) {
-        if (!this.polling) return;
+        if (!alive()) return;
         this.log('WARN', `Telegram (commandes) injoignable : ${this.redact(String((err as Error)?.message ?? err)).slice(0, 120)} — nouvel essai dans ${backoff / 1000} s`);
         await this.sleep(backoff);
         backoff = Math.min(60_000, backoff * 2);
         continue;
       }
-      if (!this.polling) return;
+      if (!alive()) return;
       if (!r.ok) {
         if (r.error_code === 409) {
           if (Date.now() - this.conflictLoggedAt > 3_600_000) {
@@ -288,6 +297,7 @@ export class TelegramClient {
           continue;
         }
         if (typeof msg.date === 'number' && Date.now() / 1000 - msg.date > maxAgeSec) continue; // envoyée pendant un arrêt
+        if (!alive()) return;
         this.stats.commands++;
         try {
           const reply = await handler({ text: msg.text, chatId: String(msg.chat?.id), date: msg.date ?? 0, from: msg.from?.username ?? msg.from?.first_name });

@@ -48,9 +48,10 @@ const intern = (x: string) => strings.get(x) ?? (strings.set(x, x), x);
 function slim(r: DecisionRecord): DecisionRecord {
   return {
     // strike et sig gardés : comparaison avec le prix à battre publié par Polymarket (section 0)
-    // spot, sc, sp gardés : probabilités recalculées avec chaque estimateur de volatilité (section 1c)
-    t: r.t, slug: intern(r.slug), coin: intern(r.coin), tau: r.tau, spot: r.spot, strike: r.strike, sig: r.sig, pUp: r.pUp, pRaw: r.pRaw, zs: r.zs,
-    ...(r.sc ? { sc: r.sc } : {}), ...(r.sp ? { sp: r.sp } : {}), ...(r.tw ? { tw: r.tw } : {}),
+    // spot, sc, sp gardés seulement quand les deux σ existent (section 1c : probabilités recalculées) —
+    // un journal de 30 jours ≈ 1 million de lignes, chaque champ compte.
+    t: r.t, slug: intern(r.slug), coin: intern(r.coin), tau: r.tau, spot: r.sc && r.sp && !r.lt ? r.spot : 0, strike: r.strike, sig: r.sig, pUp: r.pUp, pRaw: r.pRaw, zs: r.zs,
+    ...(r.sc && r.sp && !r.lt ? { sc: r.sc, sp: r.sp } : {}), ...(r.tw ? { tw: r.tw } : {}),
     ...(r.lt ? { lt: true as const, pl: r.pl ?? null, kn: r.kn } : {}), // mesures fin de round (section 1d)
     upAsk: r.upAsk, downAsk: r.downAsk, upAskSz: r.upAskSz, downAskSz: null, upBid: r.upBid, src: '', act: r.act === 'buy' ? 'buy' : 'hold',
     // GARDER mv (exclusion des mesures) et tl (loi du modèle) : sans eux, le filtre des
@@ -147,7 +148,8 @@ async function main() {
   // Mesures : passages réguliers seulement (ni « saut du spot », ni « fin de round », section 1d).
   const measureRounds = rounds.map(l => l.filter(r => !r.mv && !r.lt)).filter(l => l.length);
   const evals = measureRounds.flat();
-  console.log(`\n=== Journal : ${records.length} évaluations, ${new Set(records.map(r => r.slug)).size} rounds, ${rounds.length} rounds réglés ===\n`);
+  const lateCount = records.filter(r => r.lt).length;
+  console.log(`\n=== Journal : ${records.length - lateCount} évaluations${lateCount ? ` (+ ${lateCount} mesures fin de round)` : ''}, ${new Set(records.map(r => r.slug)).size} rounds, ${rounds.length} rounds réglés ===\n`);
   if (!rounds.length) return;
 
   // 0. Notre prix à battre (estimé) vs celui de Polymarket, s'il est publié dans Gamma.
@@ -303,7 +305,7 @@ async function main() {
   }
 
   // 3c. Carnet : coût d'un aller-retour et profondeur
-  const books = bookStats(records);
+  const books = bookStats(records.filter(r => !r.lt)); // carnets lus à τ < 60 s (près du règlement) exclus
   if (books.length) {
     console.log('\n3c) Carnet du token Up (écart achat/vente, profondeur au meilleur ask)');
     for (const b of books) {

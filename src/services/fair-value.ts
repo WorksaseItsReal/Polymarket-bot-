@@ -261,13 +261,17 @@ export function parkinsonVolPerSqrtSec(
   return Math.sqrt(sum / n / (4 * Math.LN2)) / Math.sqrt(intervalSec);
 }
 
-/** σ retenue selon le réglage ; repli sur l'autre estimateur si l'un manque. */
+/**
+ * σ retenue selon le réglage. 'cc' (défaut) ne se replie JAMAIS sur Parkinson : sans σ
+ * clôture-à-clôture, pas de données → pas de pari, comme avant. Les deux autres se replient
+ * sur clôture-à-clôture si Parkinson manque (bougies sans plus haut/plus bas).
+ */
 export function selectSigma(cc: number | null, park: number | null, estimator: VolEstimator = 'cc'): number | null {
   const a = isPos(cc) ? cc : null;
   const b = isPos(park) ? park : null;
   if (estimator === 'parkinson') return b ?? a;
-  if (estimator === 'blend') return a !== null && b !== null ? Math.sqrt((a * a + b * b) / 2) : a ?? b;
-  return a ?? b;
+  if (estimator === 'blend') return a !== null && b !== null ? Math.sqrt((a * a + b * b) / 2) : a;
+  return a;
 }
 
 /**
@@ -667,7 +671,7 @@ export function fairValueConfigFromEnv(env: Record<string, string | undefined>):
     blendModel: num('FV_BLEND_MODEL', d.blendModel, 0, 3),
     blendMarket: num('FV_BLEND_MARKET', d.blendMarket, 0, 3),
     volEstimator: VOL_ESTIMATORS.includes((env.FV_VOL_ESTIMATOR ?? '').trim() as VolEstimator) ? (env.FV_VOL_ESTIMATOR as string).trim() as VolEstimator : 'cc',
-    lateMeasure: (env.FV_LATE_MEASURE ?? '').trim().toLowerCase() !== 'false',
+    lateMeasure: !['false', '0', 'no', 'off'].includes((env.FV_LATE_MEASURE ?? '').trim().toLowerCase()),
   };
   // Fenêtre vide (y compris à cause de la minute finale moyennée) : aucun pari possible → défauts.
   if (entryMinTauSec(cfg) > cfg.maxTauSec) { cfg.minTauSec = d.minTauSec; cfg.maxTauSec = d.maxTauSec; }

@@ -465,28 +465,37 @@ export class FairValueRunner {
     if (this.lateAt.size > 200) this.lateAt.clear();
     let rec: DecisionRecord | null = null;
     try {
-      const data = await this.d.getRoundData(market.underlying, slot, now0);
+      let data = await this.d.getRoundData(market.underlying, slot, now0);
       if (!data?.twapPartial) return; // sans flux temps réel, rien à mesurer
       const [upBook, downBook] = await Promise.all([this.d.getBook(market.upTokenId), this.d.getBook(market.downTokenId)]);
       const now = this.d.now();
       const tauSec = (endMs - now) / 1000;
-      if (tauSec < LATE_MIN_TAU_SEC || tauSec >= entryMinTauSec(cfg)) return;
+      if (tauSec < LATE_MIN_TAU_SEC || tauSec >= Math.min(60, cfg.twapWindowSec)) return;
+      if (now - now0 > 500) {
+        // Carnets lents : spot et part acquise relus à l'instant des carnets (sinon les secondes
+        // d'attente seraient comptées comme « connues » : kn + τ ≠ W, probabilité trop sûre).
+        const fresh = await this.d.getRoundData(market.underlying, slot, now);
+        if (!fresh?.twapPartial) return;
+        data = fresh;
+      }
+      const partial = data.twapPartial;
+      if (!partial) return;
       const upBest = bestLevel(upBook.asks, 'ask');
       const downBest = bestLevel(downBook.asks, 'ask');
       const upBid = bestLevel(upBook.bids, 'bid');
       const downBid = bestLevel(downBook.bids, 'bid');
-      const pl = probUpLate({ spot: data.spot, strike: data.strike, sigmaPerSqrtSec: data.sigmaPerSqrtSec, tauSec, partialMean: data.twapPartial.mean, knownSec: data.twapPartial.knownSec }, cfg);
+      const pl = probUpLate({ spot: data.spot, strike: data.strike, sigmaPerSqrtSec: data.sigmaPerSqrtSec, tauSec, partialMean: partial.mean, knownSec: partial.knownSec }, cfg);
       const pRaw = probUp({ spot: data.spot, strike: data.strike, sigmaPerSqrtSec: data.sigmaPerSqrtSec, tauSec }, cfg);
       rec = {
         t: now, slug: market.slug, coin: market.underlying, tau: Math.round(tauSec * 10) / 10, spot: data.spot, strike: data.strike,
-        sig: data.sigmaPerSqrtSec, pUp: pRaw, pRaw, zs: cfg.zScale, lt: true, pl, kn: Math.round(data.twapPartial.knownSec),
+        sig: data.sigmaPerSqrtSec, pUp: pRaw, pRaw, zs: cfg.zScale, lt: true, pl, kn: Math.round(partial.knownSec),
         ...(data.sigmaCcPerSqrtSec ? { sc: data.sigmaCcPerSqrtSec } : {}), ...(data.sigmaParkPerSqrtSec ? { sp: data.sigmaParkPerSqrtSec } : {}),
         ...(cfg.tails === 't4' ? { tl: 't4' as const } : {}), ...(cfg.twapWindowSec > 0 ? { tw: cfg.twapWindowSec } : {}),
         upAsk: upBest?.price ?? null, downAsk: downBest?.price ?? null, upAskSz: upBest?.size ?? null, downAskSz: downBest?.size ?? null,
         upBid: upBid?.price ?? null, downBid: downBid?.price ?? null, upBidSz: upBid?.size ?? null, downBidSz: downBid?.size ?? null,
         src: data.source, act: 'hold',
       };
-      this.lastReason.set(key, `${market.underlying} fin de round (τ ${Math.round(tauSec)} s, TWAP acquis ${Math.round(data.twapPartial.knownSec)} s) : `
+      this.lastReason.set(key, `${market.underlying} fin de round (τ ${Math.round(tauSec)} s, TWAP acquis ${Math.round(partial.knownSec)} s) : `
         + `P(hausse) fin de round ${pl === null ? '—' : pl.toFixed(3)} · asks hausse ${upBest ? upBest.price.toFixed(2) : '—'} / baisse ${downBest ? downBest.price.toFixed(2) : '—'} — mesure seulement, jamais d'entrée`);
     } catch {
       /* mesure silencieuse : ne doit jamais gêner la stratégie */
@@ -508,7 +517,8 @@ export class FairValueRunner {
       const endMs = slot * 1000 + 300_000;
       const now = this.d.now();
       let tauSec = (endMs - now) / 1000;
-      if (tauSec < entryMinTauSec(cfg) && tauSec >= LATE_MIN_TAU_SEC && cfg.lateMeasure !== false && cfg.twapWindowSec > 0) {
+      // Dernière minute = fenêtre de moyenne (τ < W, jamais dans la fenêtre d'entrée qui commence à max(minTau, W)).
+      if (tauSec < Math.min(60, cfg.twapWindowSec) && tauSec >= LATE_MIN_TAU_SEC && cfg.lateMeasure !== false && cfg.twapWindowSec > 0) {
         await this.measureLate(market, slot, endMs);
         continue;
       }

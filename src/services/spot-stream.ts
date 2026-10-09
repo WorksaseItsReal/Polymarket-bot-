@@ -148,7 +148,7 @@ export class SpotStream extends EventEmitter {
    * sur une seconde sans échange : la part déjà acquise du TWAP de règlement. null sans prix
    * connu au début de l'intervalle (tolérance 2 s) ou si l'intervalle est vide.
    */
-  meanSince(coin: string, fromMs: number, toMs: number): number | null {
+  meanSince(coin: string, fromMs: number, toMs: number, maxGapSec = 10): number | null {
     const s = this.state.get(coin as StreamCoin);
     if (!s || !s.secs.length) return null;
     const from = Math.floor(fromMs / 1000);
@@ -156,13 +156,17 @@ export class SpotStream extends EventEmitter {
     if (to <= from) return null;
     let i = 0;
     let price: number | null = null;
-    while (i < s.secs.length && s.secs[i][0] < from) { price = s.secs[i][1]; i++; }
+    let lastSec = -Infinity;
+    while (i < s.secs.length && s.secs[i][0] < from) { price = s.secs[i][1]; lastSec = s.secs[i][0]; i++; }
     if (price === null && (i >= s.secs.length || s.secs[i][0] > from + 2)) return null;
     let sum = 0;
     let n = 0;
     for (let sec = from; sec < to; sec++) {
-      while (i < s.secs.length && s.secs[i][0] <= sec) { price = s.secs[i][1]; i++; }
+      while (i < s.secs.length && s.secs[i][0] <= sec) { price = s.secs[i][1]; lastSec = s.secs[i][0]; i++; }
       if (price === null) continue;
+      // Plus de `maxGapSec` sans échange : flux coupé (une crypto liquide traite chaque seconde),
+      // la moyenne serait fictive → pas de mesure plutôt qu'une fausse.
+      if (sec - lastSec > maxGapSec) return null;
       sum += price;
       n++;
     }

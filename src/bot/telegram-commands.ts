@@ -18,19 +18,22 @@ export interface CommandProviders {
   positions(): { positions: PositionLike[]; nowMs: number; timeZone?: string };
 }
 
-/** Nom de commande (« /status@MonBot 1 » → « status »), null si ce n'est pas une commande. */
-export function parseCommand(text: string): string | null {
-  const m = /^\/([A-Za-zÀ-ÿ_]+)(?:@\w+)?(?:\s|$)/.exec(text.trim());
-  return m ? m[1].toLowerCase() : null;
+/** Commande (« /Status@MonBot 1 » → status, bot « MonBot »), null si ce n'est pas une commande. */
+export function parseCommand(text: string): { cmd: string; bot: string | null } | null {
+  const m = /^\/([A-Za-zÀ-ÿ_]+)(?:@(\w+))?(?:\s|$)/.exec(text.trim());
+  return m ? { cmd: m[1].toLowerCase(), bot: m[2] ?? null } : null;
 }
 
 /**
  * Réponse à un message du chat configuré. Texte libre : aide dans un chat privé, silence
- * dans un groupe (ne pas répondre à chaque conversation).
+ * dans un groupe (ne pas répondre à chaque conversation). Une commande adressée à un AUTRE
+ * bot du groupe (« /status@AutreBot ») est ignorée.
  */
-export function answerCommand(text: string, p: CommandProviders, chatType: string | null = null): string | null {
-  const cmd = parseCommand(text);
-  if (cmd === null) return chatType === 'private' ? msgHelp() : null;
+export function answerCommand(text: string, p: CommandProviders, chatType: string | null = null, botUsername: string | null = null): string | null {
+  const parsed = parseCommand(text);
+  if (parsed === null) return chatType === 'private' ? msgHelp() : null;
+  if (parsed.bot && botUsername && parsed.bot.toLowerCase() !== botUsername.toLowerCase()) return null;
+  const cmd = parsed.cmd;
   switch (cmd) {
     case 'status': case 'etat': case 'état': case 'state':
       return msgStatus(p.status());

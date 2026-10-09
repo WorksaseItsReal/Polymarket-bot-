@@ -34,12 +34,19 @@ function providers(over: Partial<{ risk: RiskVerdict; positions: LedgerTrade[]; 
 }
 const noJunk = (s: string | null) => { assert.ok(s); assert.doesNotMatch(s, /undefined|NaN|null|\[object/, s); return s; };
 
-test('parseCommand : « /status@MonBot 1 » → status, texte libre → null', () => {
-  assert.equal(parseCommand('/status'), 'status');
-  assert.equal(parseCommand('  /Status@MonBot arg'), 'status');
-  assert.equal(parseCommand('/aide\n'), 'aide');
+test('parseCommand : « /status@MonBot 1 » → status + bot, texte libre → null', () => {
+  assert.deepEqual(parseCommand('/status'), { cmd: 'status', bot: null });
+  assert.deepEqual(parseCommand('  /Status@MonBot arg'), { cmd: 'status', bot: 'MonBot' });
+  assert.deepEqual(parseCommand('/aide\n'), { cmd: 'aide', bot: null });
   assert.equal(parseCommand('bonjour'), null);
   assert.equal(parseCommand('/'), null);
+});
+
+test('commande adressée à un autre bot du groupe : silence ; au nôtre (toute casse) : réponse', () => {
+  assert.equal(answerCommand('/status@AutreBot', providers(), 'supergroup', 'MonBot'), null);
+  assert.equal(answerCommand('/start@AutreBot', providers(), 'supergroup', 'MonBot'), null);
+  assert.match(noJunk(answerCommand('/status@monbot', providers(), 'supergroup', 'MonBot')), /ÉTAT/);
+  assert.match(noJunk(answerCommand('/status@AutreBot', providers(), 'supergroup', null)), /ÉTAT/, 'nom du bot inconnu : on répond');
 });
 
 test('/status : entrées autorisées, capital, trades, positions, santé ; bloqué = raison affichée', () => {

@@ -366,3 +366,35 @@ test('commandes : erreur réseau → nouvel essai après attente, erreur du hand
   assert.deepEqual(fake.calls.filter(x => x.method === 'sendMessage').map(x => x.body.text), ['⚠️ Erreur interne en traitant cette commande (voir les logs du bot).']);
   assert.ok(logs.some(l => /token refusé \(401\), écoute des commandes arrêtée/.test(l)));
 });
+
+test('commandes : arrêt puis relance pendant un getUpdates en vol → une seule boucle vivante, aucun doublon', async () => {
+  const logs: string[] = [];
+  const handled: string[] = [];
+  let release: (() => void) | null = null;
+  let c: TelegramClient | null = null;
+  const fake = fakeTelegram((method) => {
+    if (method === 'sendMessage') return ok({});
+    const polls = fake.calls.filter(x => x.method === 'getUpdates').length;
+    if (polls === 1) return ok([]); // la 1re boucle attendra ensuite (voir sleep ci-dessous)
+    if (polls === 2) return ok([{ update_id: 7, message: { message_id: 7, date: Math.floor(Date.now() / 1000), text: '/status', chat: { id: 42 } } }]);
+    c!.stopPolling();
+    return ok([]);
+  });
+  let sleeps = 0;
+  c = new TelegramClient({
+    token: TOKEN, chatId: '42', fetchImpl: fake.fetchImpl, minIntervalMs: 0, log: (_l, m) => logs.push(m),
+    // 1er sleep (anti-boucle serrée de la 1re boucle) : bloqué jusqu'à `release` → stop + start pendant ce temps
+    sleep: () => (sleeps++ === 0 ? new Promise<void>(r => { release = r; }) : Promise.resolve()),
+  });
+  c.startPolling(msg => { handled.push(msg.text); return 'ok'; });
+  for (let i = 0; i < 100 && !release; i++) await new Promise(r => setTimeout(r, 2));
+  assert.ok(release, 'première boucle en attente');
+  c.stopPolling();
+  c.startPolling(msg => { handled.push(msg.text); return 'ok'; });
+  (release as unknown as () => void)(); // l'ancienne boucle se réveille : elle doit se taire
+  for (let i = 0; i < 300 && c.isPolling; i++) await new Promise(r => setTimeout(r, 5));
+  assert.equal(c.isPolling, false);
+  await c.flush();
+  assert.deepEqual(handled, ['/status'], 'commande traitée une seule fois (une seule boucle)');
+  assert.equal(fake.calls.filter(x => x.method === 'getUpdates').length, 3, 'l\'ancienne boucle ne relance pas getUpdates');
+});
