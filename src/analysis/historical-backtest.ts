@@ -17,7 +17,7 @@
  * Fonctions PURES (aucune I/O).
  */
 
-import { entryMinTauSec, probNoiseSd, probUp, realizedVolPerSqrtSec, type FairValueConfig } from '../services/fair-value.js';
+import { entryMinTauSec, parkinsonVolPerSqrtSec, probNoiseSd, probUp, realizedVolPerSqrtSec, type FairValueConfig } from '../services/fair-value.js';
 import { strikeFromCandles, type Candle } from '../services/round-market-data.js';
 import type { ResolvedRecord } from './fv-analysis.js';
 import { clusteredMeanT, slotKey } from './stats.js';
@@ -69,16 +69,26 @@ export interface HistoricalRound {
   upWon: boolean;
 }
 
-/** Estimateurs de volatilité comparés (par √seconde, depuis des clôtures 1 min). */
-export const VOL_VARIANTS: Record<string, (closes: number[]) => number | null> = {
-  'max(60,15)': closes => {
-    const a = realizedVolPerSqrtSec(closes, 60, 10);
-    const b = realizedVolPerSqrtSec(closes.slice(-16), 60, 10);
-    const m = Math.max(a ?? 0, b ?? 0);
-    return m > 0 ? m : null;
+/** max(fenêtre longue, 16 dernières bougies) — même règle que le bot (deriveRoundData). */
+function maxWindows(candles: Candle[], f: (c: Candle[]) => number | null): number | null {
+  const m = Math.max(f(candles) ?? 0, f(candles.slice(-16)) ?? 0);
+  return m > 0 ? m : null;
+}
+const cc = (c: Candle[]) => realizedVolPerSqrtSec(c.map(x => x.close), 60, 10);
+const park = (c: Candle[]) => parkinsonVolPerSqrtSec(c, 60, 10);
+
+/** Estimateurs de volatilité comparés (par √seconde, depuis les bougies 1 min terminées). */
+export const VOL_VARIANTS: Record<string, (candles: Candle[]) => number | null> = {
+  'max(60,15)': c => maxWindows(c, cc),
+  '60 min': cc,
+  '15 min': c => cc(c.slice(-16)),
+  // FV_VOL_ESTIMATOR=parkinson / blend (plus haut/plus bas) : null si les bougies n'en ont pas
+  'parkinson': c => maxWindows(c, park),
+  'mélange': c => {
+    const a = maxWindows(c, cc);
+    const b = maxWindows(c, park);
+    return a !== null && b !== null ? Math.sqrt((a * a + b * b) / 2) : null;
   },
-  '60 min': closes => realizedVolPerSqrtSec(closes, 60, 10),
-  '15 min': closes => realizedVolPerSqrtSec(closes.slice(-16), 60, 10),
 };
 export const LIVE_VARIANT = 'max(60,15)';
 
@@ -136,12 +146,12 @@ export function evaluateRound(
     const spotCandle = byOpen.get((tSec - 60) * 1000); // se termine à tSec
     if (!spotCandle) continue;
     const pMarket = mk.p;
-    // Clôtures des bougies terminées à tSec (les 61 dernières → 60 rendements).
-    const closes = sorted.filter(c => c.openTimeMs <= (tSec - 60) * 1000).slice(-61).map(c => c.close);
+    // Bougies terminées à tSec (les 61 dernières → 60 rendements).
+    const done = sorted.filter(c => c.openTimeMs <= (tSec - 60) * 1000).slice(-61);
     const pModel: Record<string, number | null> = {};
     let sig = 0;
     for (const [name, f] of Object.entries(VOL_VARIANTS)) {
-      const s = f(closes);
+      const s = f(done);
       if (name === LIVE_VARIANT && s) sig = s;
       pModel[name] = s ? probUp({ spot: spotCandle.close, strike, sigmaPerSqrtSec: s, tauSec: tauM }, cfg) : null;
     }
@@ -187,6 +197,35 @@ export function compareBrier(points: BacktestPoint[], variant = LIVE_VARIANT): B
   // 5 min sont corrélées : les compter comme indépendantes gonflerait le t).
   const tDiff = clusteredMeanT([...perRound.entries()].map(([slug, r]) => ({ key: slotKey(slug), x: r.d / r.n }))).t;
   return { rounds: perRound.size, points: n, brierModel: n ? sm / n : null, brierMarket: n ? sk / n : null, tDiff };
+}
+
+/**
+ * Variante de volatilité contre celle du bot, APPARIÉE (mêmes points, les deux connues),
+ * différence de Brier moyennée par round, t groupé par créneau ; négatif = variante meilleure.
+ */
+export function compareVariantToLive(points: BacktestPoint[], variant: string): { rounds: number; brierVariant: number | null; brierLive: number | null; t: number | null } {
+  const perRound = new Map<string, { d: number; v: number; l: number; n: number }>();
+  for (const pt of points) {
+    const pv = pt.pModel[variant];
+    const pl = pt.pModel[LIVE_VARIANT];
+    if (pv === null || pv === undefined || pl === null || pl === undefined) continue;
+    const y = pt.upWon ? 1 : 0;
+    const r = perRound.get(pt.slug) ?? { d: 0, v: 0, l: 0, n: 0 };
+    r.v += (pv - y) ** 2;
+    r.l += (pl - y) ** 2;
+    r.d += (pv - y) ** 2 - (pl - y) ** 2;
+    r.n++;
+    perRound.set(pt.slug, r);
+  }
+  if (!perRound.size) return { rounds: 0, brierVariant: null, brierLive: null, t: null };
+  const rows = [...perRound.entries()];
+  const mean = (xs: number[]) => xs.reduce((a, b) => a + b, 0) / xs.length;
+  return {
+    rounds: rows.length,
+    brierVariant: mean(rows.map(([, r]) => r.v / r.n)),
+    brierLive: mean(rows.map(([, r]) => r.l / r.n)),
+    t: clusteredMeanT(rows.map(([slug, r]) => ({ key: slotKey(slug), x: r.d / r.n }))).t,
+  };
 }
 
 /**

@@ -9,7 +9,7 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
-  compareBrier, evaluateRound, marketProbAt, parsePriceHistory, toResolvedRecords, LIVE_VARIANT, type BacktestPoint,
+  compareBrier, compareVariantToLive, evaluateRound, marketProbAt, parsePriceHistory, toResolvedRecords, LIVE_VARIANT, type BacktestPoint,
 } from '../src/analysis/historical-backtest.ts';
 import { fetchKlinesRange, fetchPriceHistory, fetchRoundsMeta, mapLimit } from '../src/analysis/historical-data.ts';
 import { DEFAULT_FAIR_VALUE_CONFIG as CFG, normCdf, probUp } from '../src/services/fair-value.ts';
@@ -194,4 +194,24 @@ test('contrôle négatif de bout en bout : marché JUSTE → jamais « significa
   assert.doesNotMatch(out, /SIGNIFICATIVEMENT meilleur que le marché/);
   assert.doesNotMatch(out, /essayer FV_BLEND_MODEL/);
   if (process.env.SHOW_REPORT) console.log(out);
+});
+
+test('variantes de volatilité : parkinson et mélange calculées avec plus haut/plus bas, absentes sans eux ; comparaison appariée', () => {
+  const price = (m: number) => 100 * Math.exp((m % 2 ? 1 : -1) * 0.0005 + (m >= 0 ? 0.0002 * (m + 1) : 0));
+  const hl = candlesAround(SLOT, price).map(c => ({ ...c, high: Math.max(c.open, c.close) * 1.0004, low: Math.min(c.open, c.close) * 0.9996 }));
+  const hist = [0, 60, 120, 180, 240].map(k => ({ t: SLOT + k, p: 0.5 }));
+  const pts = evaluateRound({ slug: 's', coin: 'BTC', slotSec: SLOT, upWon: true }, hl, hist, CFG);
+  assert.ok(pts.length > 0);
+  assert.ok(pts.every(p => typeof p.pModel.parkinson === 'number' && typeof p.pModel['mélange'] === 'number'));
+  const noHl = evaluateRound({ slug: 's', coin: 'BTC', slotSec: SLOT, upWon: true }, candlesAround(SLOT, price), hist, CFG);
+  assert.ok(noHl.every(p => p.pModel.parkinson === null && typeof p.pModel[LIVE_VARIANT] === 'number'), 'sans plus haut/plus bas : variante absente, modèle du bot inchangé');
+  // Variante parfaite (prob = issue) vs bot à 0,5 sur 40 rounds : t très négatif
+  const mk = (i: number, up: boolean): BacktestPoint => ({
+    slug: `btc-updown-5m-${SLOT + i * 300}`, coin: 'BTC', slotSec: SLOT + i * 300, tau: 120, spot: 1, strike: 1, sig: 1e-4, pMarket: 0.5,
+    pModel: { [LIVE_VARIANT]: 0.5, parkinson: up ? 0.9 : 0.1 }, upWon: up, lagSec: 0,
+  });
+  const c = compareVariantToLive(Array.from({ length: 40 }, (_, i) => mk(i, i % 2 === 0)), 'parkinson');
+  assert.equal(c.rounds, 40);
+  assert.ok(c.brierVariant! < c.brierLive! && c.t! < -2, JSON.stringify(c));
+  assert.equal(compareVariantToLive([mk(0, true)], 'absente').rounds, 0);
 });

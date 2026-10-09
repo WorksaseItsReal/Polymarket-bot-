@@ -18,7 +18,7 @@ import { entryMinTauSec, fairValueConfigFromEnv } from '../../src/services/fair-
 import { coinsFromEnv } from '../../src/strategy/fair-value-runner.js';
 import type { DiscoveryCoin } from '../../src/services/round-discovery.js';
 import {
-  compareBrier, evaluateRound, toResolvedRecords, VOL_VARIANTS, LIVE_VARIANT, type BacktestPoint, type PricePoint,
+  compareBrier, compareVariantToLive, evaluateRound, toResolvedRecords, VOL_VARIANTS, LIVE_VARIANT, type BacktestPoint, type PricePoint,
 } from '../../src/analysis/historical-backtest.js';
 import { fetchKlinesRange, fetchPriceHistory, fetchRoundsMeta, mapLimit, type RoundMeta } from '../../src/analysis/historical-data.js';
 import {
@@ -141,11 +141,20 @@ async function main() {
       : '   → pas de différence significative : pas d\'edge démontré.');
 
   // B. Estimateurs de volatilité
-  console.log('\n2) Estimateur de volatilité (Brier du modèle, plus bas = meilleur)');
+  console.log('\n2) Estimateur de volatilité (Brier du modèle, plus bas = meilleur ; t apparié vs celui du bot, t ≤ −2 = meilleur)');
   for (const name of Object.keys(VOL_VARIANTS)) {
-    const c = compareBrier(points, name);
-    console.log(`   ${name.padEnd(12)} ${num(c.brierModel)}${name === LIVE_VARIANT ? '   ← utilisé par le bot' : ''}`);
+    if (name === LIVE_VARIANT) {
+      console.log(`   ${name.padEnd(12)} ${num(compareBrier(points, name).brierModel)}   ← utilisé par le bot (FV_VOL_ESTIMATOR=cc)`);
+      continue;
+    }
+    const v = compareVariantToLive(points, name);
+    console.log(`   ${name.padEnd(12)} ${num(v.brierVariant)} vs ${num(v.brierLive)}  t ${num(v.t, 1)} (${v.rounds} rounds)`
+      + (name === 'parkinson' || name === 'mélange' ? `   ← FV_VOL_ESTIMATOR=${name === 'parkinson' ? 'parkinson' : 'blend'}` : ''));
   }
+  const best = ['parkinson', 'mélange'].map(n => ({ n, ...compareVariantToLive(points, n) })).filter(v => v.t !== null && v.t <= -2).sort((a, b) => (a.t as number) - (b.t as number))[0];
+  console.log(best
+    ? `   → ${best.n} prédit significativement mieux sur l'historique : à confirmer en direct (fv-report, section 1c) avant FV_VOL_ESTIMATOR=${best.n === 'parkinson' ? 'parkinson' : 'blend'}.`
+    : '   → aucun estimateur ne bat significativement celui du bot : garder FV_VOL_ESTIMATOR=cc.');
 
   // C. Calibration
   const recs = toResolvedRecords(points, 0.005, cfg.zScale, cfg);

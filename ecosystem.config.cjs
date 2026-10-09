@@ -1,8 +1,12 @@
+const path = require('path');
+
+// Chemins relatifs au dossier de ce fichier : la config marche quel que soit l'endroit où le
+// dépôt est cloné (avant : /root/clawd/Polymarket-bot codé en dur).
 module.exports = {
   apps: [{
     name: 'polymarket-paperbot',
     script: 'bot-with-dashboard.ts',
-    cwd: '/root/clawd/Polymarket-bot',
+    cwd: __dirname,
     // node + chargeur tsx dans LE MÊME process. Avant : le binaire `tsx` comme interpréteur
     // lançait le bot dans un process enfant ; à l'arrêt (pm2 stop/restart), tsx relaie
     // SIGINT puis tue l'enfant en SIGKILL s'il n'a pas répondu en ~60 ms — boucle
@@ -30,8 +34,8 @@ module.exports = {
     env: {
       NODE_ENV: 'production',
     },
-    out_file: '/root/clawd/Polymarket-bot/paperbot.log',
-    error_file: '/root/clawd/Polymarket-bot/paperbot.error.log',
+    out_file: path.join(__dirname, 'paperbot.log'),
+    error_file: path.join(__dirname, 'paperbot.error.log'),
     merge_logs: true,
     time: true,
   }],
