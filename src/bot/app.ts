@@ -12,6 +12,8 @@
  * peut partir de ce programme, et il ne doit jamais faire croire le contraire.
  */
 import axios from 'axios';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { format } from 'node:util';
 import { startDashboard, dashboardEmitter } from '../dashboard/index.js';
 import type { BotState, BotConfig as DashboardConfig, HealthSnapshot, LastEvaluation, LogLevel } from '../dashboard/types.js';
@@ -30,13 +32,18 @@ import { withTimeout } from '../utils/with-timeout.js';
 import { PersistentGuard, evaluateGuard } from '../strategy/performance-guard.js';
 import { ShadowTracker } from '../strategy/shadow-tracker.js';
 import { TelegramClient } from '../services/telegram.js';
-import { goLiveLine, msgAlert, msgStartup, msgSummary, shadowLine } from '../services/telegram-messages.js';
+import { escapeHtml, goLiveLine, msgAlert, msgStartup, msgSummary, shadowLine } from '../services/telegram-messages.js';
 import { maskPolyHeaders, secretRedactor } from '../services/redact.js';
 import { noteStart, noteStop, type StartReport } from '../services/crash-guard.js';
 import { fetchClobBook } from '../services/clob-book.js';
 import { MIN_SELL_SHARES, capitalWarning, dataPaths, loadBotConfig, type BotConfig } from './config.js';
 import { evaluateRisk, type RiskVerdict } from './risk-gate.js';
 import { answerCommand } from './telegram-commands.js';
+import { ReportRunner, stderrTail } from './report-runner.js';
+import { dailyReportDue, readLastDailyReport, writeLastDailyReport } from './daily-report.js';
+
+/** Racine du dépôt (scripts d'analyse lancés par /rapport et /backtest). */
+const REPO_DIR = fileURLToPath(new URL('../..', import.meta.url));
 
 const ICONS: Record<string, string> = { INFO: '📋', WARN: '⚠️', ERROR: '❌', TRADE: '💰', SIGNAL: '🎯' };
 
@@ -74,6 +81,10 @@ export async function main(env: Record<string, string | undefined> = process.env
   let spotStream: SpotStream | null = null;
   let journal: DecisionJournal | null = null;
   let pollTimer: NodeJS.Timeout | null = null;
+  // Déclaré ici (et non près de son usage) : shutdown() le lit, y compris lors d'un arrêt très
+  // précoce (refus de DRY_RUN=false) — une déclaration plus bas lèverait (zone morte temporelle).
+  let dailyTimer: NodeJS.Timeout | null = null;
+  let dailyArmed = false;
   let scheduler: MoveScheduler | null = null;
   let sessionTrades = 0;
 
@@ -88,6 +99,32 @@ export async function main(env: Record<string, string | undefined> = process.env
   };
 
   const ledgerStats = (): LedgerStats => ledgerStatsShared(paths.ledger);
+
+  // --- Rapports à la demande (/rapport, /backtest) : processus séparé, un à la fois ------
+  const reports = new ReportRunner({ cwd: REPO_DIR, timeoutMs: 20 * 60_000, env: { ...process.env, ...env } });
+  function startAnalysis(kind: 'rapport' | 'backtest', days: number, opts: { daily?: boolean } = {}): string {
+    if (reports.busy) return `⏳ Un calcul (${reports.busy}) est déjà en cours depuis ${Math.round(reports.elapsedSec())} s : son résultat arrive, réessaie ensuite.`;
+    const d = String(Number(days.toFixed(2)));
+    const job = kind === 'rapport'
+      ? { name: 'rapport', script: join(REPO_DIR, 'scripts', 'analysis', 'fv-report.ts'), args: ['--summary', '--days', d, '--dir', paths.journalDir] }
+      : { name: 'backtest', script: join(REPO_DIR, 'scripts', 'analysis', 'historical-backtest.ts'), args: ['--summary', '--days', d, '--coins', config.coins.join(',')] };
+    log('INFO', `📊 Commande Telegram : ${job.name} sur ${d} j lancé (processus séparé)`);
+    reports.start(job, r => {
+      const secs = Math.round(r.ms / 1000);
+      if (r.ok && r.stdout.trim()) {
+        log('INFO', `📊 ${job.name} terminé en ${secs} s`);
+        notify((opts.daily ? `🗓️ <b>Rapport quotidien</b> (heure : TELEGRAM_DAILY_REPORT ; /rapport 7 pour une semaine)\n\n` : '') + r.stdout.trim());
+        return;
+      }
+      const why = r.timedOut ? 'délai de 20 min dépassé' : r.code === null ? 'lancement impossible' : `code ${r.code}`;
+      log('WARN', `📊 ${job.name} en échec (${why}) : ${redact(stderrTail(r.stderr, 300))}`);
+      notify(`⚠️ <b>${job.name} en échec</b> (${why}, ${secs} s)\n<pre>${escapeHtml(redact(stderrTail(r.stderr)) || 'aucune sortie')}</pre>`);
+    });
+    const span = `${d.replace('.', ',')} jour${days >= 2 ? 's' : ''}`;
+    return kind === 'rapport'
+      ? `⏳ Rapport sur ${span} en calcul (1 à 5 min, règlement des rounds via Polymarket) : le verdict arrive dans un prochain message.`
+      : `⏳ Backtest sur ${span} en calcul (2 à 15 min la première fois : historiques Polymarket et Binance téléchargés puis gardés en cache) : le verdict arrive dans un prochain message.`;
+  }
 
   function recordSessionHistory(): void {
     try {
@@ -109,8 +146,10 @@ export async function main(env: Record<string, string | undefined> = process.env
     // Plus aucun passage ne démarre pendant la fenêtre d'arrêt : un règlement arrivé après le
     // bilan de session en serait absent et son message partirait après « Bot arrêté ».
     if (pollTimer) clearInterval(pollTimer);
+    if (dailyTimer) clearInterval(dailyTimer);
     scheduler?.stop();
     telegram?.stopPolling();
+    reports.stop();
     try { spotStream?.stop(); } catch { /* déjà arrêté */ }
     // Telegram pas (encore) connecté : arrêt compté mais pas « signalé » (le démarrage suivant le dira).
     const stop = crashStart ? noteStop(paths.runState, code !== 0, Date.now(), process.pid, telegram !== null) : { alert: true, recentCrashes: 0, nextGapMs: 0 };
@@ -295,6 +334,20 @@ export async function main(env: Record<string, string | undefined> = process.env
     return skew !== null && Math.abs(skew) > config.maxClockSkewMs ? `horloge du serveur décalée de ${(skew / 1000).toFixed(1)} s (synchroniser NTP)` : null;
   };
 
+  // Rapport quotidien : vérifié chaque minute une fois Telegram connecté ; une fois par jour
+  // local, à partir de l'heure choisie (rattrapé au démarrage s'il n'est pas encore parti).
+  const dailyStatePath = join(config.dataDir, 'daily-report.json');
+  let lastDaily = readLastDailyReport(dailyStatePath);
+  function checkDailyReport(): void {
+    const d = config.dailyReport;
+    if (!d || !telegram || shuttingDown || reports.busy) return;
+    const { due, date } = dailyReportDue(Date.now(), config.timeZone, d.atMinutes, lastDaily);
+    if (!due) return;
+    lastDaily = date; // une tentative par jour, même si l'écriture échoue ou si le calcul échoue
+    if (!writeLastDailyReport(dailyStatePath, date)) log('WARN', `Rapport quotidien : état non enregistré (${dailyStatePath}) — il pourrait repartir au prochain démarrage`);
+    startAnalysis('rapport', d.days, { daily: true });
+  }
+
   // --- Telegram ------------------------------------------------------------------------
   function activateTelegram(client: TelegramClient, detail: string): void {
     telegram = client;
@@ -319,8 +372,19 @@ export async function main(env: Record<string, string | undefined> = process.env
         summary: () => ({ stats: ledgerStats(), capital: config.capital, shadow: shadow?.stats() }),
         risk: () => ({ verdict: freshRisk(), limits: config.risk, capital: config.capital }),
         positions: () => ({ positions: openPositions(), nowMs: Date.now(), timeZone: config.timeZone }),
+        analysis: (kind, days) => startAnalysis(kind, days),
       }, client.chatType, client.botUsername));
-      log('INFO', '💬 Commandes Telegram écoutées : /status /bilan /risque /positions /aide (TELEGRAM_COMMANDS=false pour couper)');
+      log('INFO', '💬 Commandes Telegram écoutées : /status /bilan /risque /positions /rapport /backtest /aide (TELEGRAM_COMMANDS=false pour couper)');
+    }
+    if (config.dailyReport && !dailyArmed) {
+      dailyArmed = true;
+      const at = config.dailyReport.atMinutes;
+      log('INFO', `🗓️ Rapport quotidien sur Telegram à ${String(Math.floor(at / 60)).padStart(2, '0')}:${String(at % 60).padStart(2, '0')} (${config.timeZone}), ${config.dailyReport.days} j analysés (TELEGRAM_DAILY_REPORT=off pour couper)`);
+      // Premier contrôle 2 min après la connexion (le message de démarrage part d'abord), puis chaque minute.
+      setTimeout(() => {
+        checkDailyReport();
+        if (!shuttingDown) { dailyTimer = setInterval(checkDailyReport, 60_000); dailyTimer.unref?.(); }
+      }, 120_000).unref?.();
     }
     if (crashStart && !crashStart.announce) {
       log('WARN', `Message de démarrage Telegram non envoyé : ${crashStart.recentCrashes} arrêts anormaux dans l'heure, alertes espacées.`);

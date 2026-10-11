@@ -26,7 +26,7 @@ test('bot complet sur faux réseau : évalue, journalise, parie et règle, dashb
     env: {
       // DOTENV_CONFIG_PATH : le .env du serveur (FV_*, clés…) ne doit pas influencer le test
       ...process.env, HOME: home, DOTENV_CONFIG_PATH: '/dev/null', DRY_RUN: 'true', PAPER_CAPITAL: '1000', FV_POLL_SEC: '5', FV_SPOT_STREAM: 'false',
-      TELEGRAM_BOT_TOKEN: '123456789:' + 'A'.repeat(35), TELEGRAM_CHAT_ID: '42', FAKE_TELEGRAM_LOG: tgLog, FAKE_TELEGRAM_CMD: '/status',
+      TELEGRAM_BOT_TOKEN: '123456789:' + 'A'.repeat(35), TELEGRAM_CHAT_ID: '42', FAKE_TELEGRAM_LOG: tgLog, FAKE_TELEGRAM_CMD: '0:/status|10:/rapport 1',
       DASHBOARD_PORT: String(port), POLYMARKET_PRIVATE_KEY: '',
       FAKE_TIME_SPEED: '20', FAKE_BOOK_LAG_SEC: '45',
     },
@@ -59,6 +59,10 @@ test('bot complet sur faux réseau : évalue, journalise, parie et règle, dashb
   assert.deepEqual(tg.filter(m => m.problem).map(m => m.problem), [], 'HTML accepté par Telegram');
   assert.match(tg[tg.length - 1].text, /Bot arrêté \(SIGINT\)/, 'message d\'arrêt envoyé avant la sortie');
   assert.ok(tg.some(m => /ÉTAT.*bot papier en marche depuis.*Entrées : ▶️ autorisées/s.test(m.text)), 'réponse du vrai bot à la commande /status');
+  // /rapport : accusé immédiat, puis le résumé calculé par fv-report dans un processus séparé
+  assert.ok(tg.some(m => /Rapport sur 1 jour en calcul/.test(m.text)), 'accusé de réception de /rapport');
+  assert.ok(tg.some(m => /^📊 <b>Rapport edge/.test(m.text)), `résumé du rapport reçu :\n${tg.map(m => m.text.slice(0, 80)).join('\n')}\n${out.slice(-1500)}`);
+  assert.doesNotMatch(out, /rapport en échec/, out.slice(-2000));
   const tradesMsgs = tg.filter(m => /NOUVEAU PARI|GAGNÉ|PERDU|REVENDU/.test(m.text));
   if (process.env.SHOW_TELEGRAM) for (const m of tg) console.log('---\n' + m.text);
 
@@ -274,4 +278,22 @@ test('flux spot temps réel (faux WebSocket Binance) : santé « connecté », s
     assert.match(report, section, report.slice(0, 3000));
   }
   assert.doesNotMatch(report, /NaN|undefined|TypeError|ReferenceError/, report.slice(0, 3000));
+
+  // Résumé Telegram (/rapport) sur le même journal : verdict lisible, HTML simple, un message
+  const sum = spawn(process.execPath, ['--import', 'tsx', '--import', './tests/fixtures/fake-live-net.ts', 'scripts/analysis/fv-report.ts', '--days', '7', '--summary'], {
+    env: { ...process.env, HOME: home, DOTENV_CONFIG_PATH: '/dev/null', FAKE_TIME_SPEED: '1', FAKE_SIM_START_MS: String(lastT + 900_000), FAKE_T0_SEC: String(t0) },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let summary = '';
+  let summaryErr = '';
+  sum.stdout.on('data', d => { summary += d; });
+  sum.stderr.on('data', d => { summaryErr += d; });
+  const sumCode = await Promise.race([new Promise<number | null>(r => sum.on('exit', c => r(c))), sleep(90_000).then(() => 'timeout' as const)]);
+  if (sumCode === 'timeout') sum.kill('SIGKILL');
+  assert.equal(sumCode, 0, summaryErr.slice(-2000));
+  assert.match(summary, /^📊 <b>Rapport edge — 7 derniers jours<\/b>\n[1-9][\d ]* rounds réglés/, summary);
+  assert.match(summary, /<b>Le modèle bat-il le carnet \?<\/b>/);
+  assert.match(summary, /<b>Verdict<\/b> : /);
+  assert.doesNotMatch(summary, /NaN|undefined|=== Journal|1\) Le modèle/, 'résumé seul, sans le rapport complet');
+  assert.ok(summary.length < 4096, `un seul message (${summary.length} car.)`);
 });

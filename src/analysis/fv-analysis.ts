@@ -738,11 +738,93 @@ export function probWithSigma(
   sigma: number | null | undefined,
   cfg: Pick<FairValueConfig, 'strikeNoiseSec' | 'basisBps'>,
 ): number | null {
-  if (!(sigma && sigma > 0) || !(r.spot > 0) || !(r.strike > 0)) return null;
-  return probUp({ spot: r.spot, strike: r.strike, sigmaPerSqrtSec: sigma, tauSec: r.tau }, {
-    ...DEFAULT_FAIR_VALUE_CONFIG, strikeNoiseSec: cfg.strikeNoiseSec, basisBps: cfg.basisBps,
+  return probWith(r, sigma, r.strike, cfg.strikeNoiseSec, cfg.basisBps);
+}
+
+/** P(Up) du modèle seul aux réglages de l'évaluation, avec σ, strike et bruit de strike donnés. */
+function probWith(
+  r: Pick<DecisionRecord, 'spot' | 'tau' | 'tw' | 'zs' | 'tl'>,
+  sigma: number | null | undefined,
+  strike: number,
+  strikeNoiseSec: number,
+  basisBps: number,
+): number | null {
+  if (!(sigma && sigma > 0) || !(r.spot > 0) || !(strike > 0)) return null;
+  return probUp({ spot: r.spot, strike, sigmaPerSqrtSec: sigma, tauSec: r.tau }, {
+    ...DEFAULT_FAIR_VALUE_CONFIG, strikeNoiseSec, basisBps,
     twapWindowSec: r.tw ?? 0, zScale: r.zs ?? 1, tails: r.tl ?? 'normal',
   });
+}
+
+/** Rounds précédents (même coin) servant à estimer l'écart Binance/Chainlink : 12 ≈ 1 h. */
+export const OFFICIAL_STRIKE_LOOKBACK = 12;
+
+/**
+ * Prix à battre officiel CORRIGÉ de l'écart glissant entre notre flux (Binance, en USDT) et
+ * celui du règlement (Chainlink, en USD) : officiel × exp(moyenne des log(estimé / officiel)
+ * des rounds PRÉCÉDENTS du même coin). Sans correction, l'écart USDT/USD (quelques bps,
+ * comparable à σ√τ) biaiserait toutes les probabilités ; avec, il s'annule comme quand le
+ * spot et le strike viennent du même flux. null tant que moins de 3 rounds précédents.
+ */
+export function correctedOfficialStrike(official: number, previousLogGaps: readonly number[], lookback = OFFICIAL_STRIKE_LOOKBACK): number | null {
+  const prev = previousLogGaps.slice(-lookback).filter(Number.isFinite);
+  if (!(official > 0) || prev.length < 3) return null;
+  return official * Math.exp(prev.reduce((a, b) => a + b, 0) / prev.length);
+}
+
+/**
+ * Le modèle prédirait-il mieux avec le prix à battre OFFICIEL ? Pour chaque round dont le
+ * prix officiel est connu (publié au règlement, sinon lu en direct `ps`), P(Up) est
+ * recalculée avec ce prix corrigé de l'écart glissant (`correctedOfficialStrike`, rounds
+ * précédents seulement : aucune information future) et SANS bruit de strike (l'écart de flux
+ * `basisBps` reste), contre la probabilité du bot recalculée par la même formule avec le
+ * strike estimé. Brier apparié par round, t groupé par créneau ; négatif = officiel meilleur.
+ */
+export function compareOfficialStrike(
+  rounds: ResolvedRecord[][],
+  prices: Record<string, [number | null, number | null]>,
+  cfg: Pick<FairValueConfig, 'strikeNoiseSec' | 'basisBps'>,
+  opts: { minTau?: number; maxTau?: number } = {},
+): PairedComparison {
+  const corrected = correctedOfficialStrikes(rounds, prices);
+  const withOfficial = rounds.filter(l => corrected.has(l[0].slug));
+  return compareProbs(
+    withOfficial,
+    r => probWith(r, r.sig, corrected.get(r.slug) as number, 0, cfg.basisBps),
+    r => probWith(r, r.sig, r.strike, cfg.strikeNoiseSec, cfg.basisBps),
+    opts,
+  );
+}
+
+/** Prix à battre officiel corrigé (`correctedOfficialStrike`) par slug, rounds précédents du même coin seulement. */
+export function correctedOfficialStrikes(
+  rounds: ResolvedRecord[][],
+  prices: Record<string, [number | null, number | null]>,
+): Map<string, number> {
+  const officialOf = (list: ResolvedRecord[]): number | null => {
+    const p = prices[list[0].slug]?.[0];
+    if (p && p > 0) return p;
+    return list.find(r => typeof r.ps === 'number' && r.ps > 0)?.ps ?? null;
+  };
+  const byCoin = new Map<string, Array<{ slot: number; slug: string; off: number; est: number }>>();
+  for (const list of rounds) {
+    const off = officialOf(list);
+    const est = list[0].strike;
+    const slot = Number(list[0].slug.split('-').pop());
+    if (!off || !(est > 0) || !Number.isFinite(slot)) continue;
+    (byCoin.get(list[0].coin) ?? byCoin.set(list[0].coin, []).get(list[0].coin)!).push({ slot, slug: list[0].slug, off, est });
+  }
+  const corrected = new Map<string, number>();
+  for (const arr of byCoin.values()) {
+    arr.sort((a, b) => a.slot - b.slot);
+    const gaps: number[] = [];
+    for (const x of arr) {
+      const k = correctedOfficialStrike(x.off, gaps);
+      if (k !== null) corrected.set(x.slug, k);
+      gaps.push(Math.log(x.est / x.off));
+    }
+  }
+  return corrected;
 }
 
 export interface SigmaComparison {

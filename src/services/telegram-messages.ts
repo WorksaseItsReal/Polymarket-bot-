@@ -254,6 +254,8 @@ export function msgHelp(): string {
     '/bilan — bilan des trades et fiabilité statistique',
     '/risque — porte de risque : limites du jour, du mois, baisse, totale',
     '/positions — paris en cours',
+    '/rapport [jours] — verdict « edge ou pas » sur le journal en direct (défaut 3 jours, 1 à 5 min de calcul)',
+    '/backtest [jours] — le modèle rejoué sur les rounds Polymarket passés (défaut 2 jours)',
     '/aide — cette liste',
     'Bot papier : aucune commande ne passe d\'ordre réel ni ne change les réglages (.env).',
   ].join('\n');

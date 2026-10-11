@@ -1,0 +1,189 @@
+/**
+ * report-summary.ts — résumés COURTS des deux rapports (journal en direct, backtest
+ * historique) pour Telegram, avec un verdict en clair.
+ *
+ * Pourquoi : les rapports complets font 80 lignes et se lancent en SSH ; les décisions
+ * (y a-t-il un edge ? quel réglage changer ?) dépendent de leurs chiffres. `/rapport` et
+ * `/backtest` les calculent sur le serveur et envoient ce résumé (≤ 4 096 caractères).
+ *
+ * Fonctions PURES : les chiffres viennent des scripts (fv-report.ts, historical-backtest.ts).
+ * HTML Telegram : seuls <b> et des nombres sont émis (aucun texte externe).
+ */
+
+export interface ReplayLine {
+  n: number;
+  winRate: number | null;
+  /** PnL moyen par 1 $ misé. */
+  ev: number | null;
+  t: number | null;
+  evH1: number | null;
+  evH2: number | null;
+}
+
+export interface Thresholds {
+  minEdge: number;
+  minProb: number;
+}
+
+export interface JournalSummary {
+  days: number;
+  evaluations: number;
+  lateMeasures: number;
+  /** Rounds réglés (toutes évaluations confondues). */
+  rounds: number;
+  /** Modèle seul vs carnet, fenêtre d'entrée, apparié par round (t ≤ −2 = modèle meilleur). */
+  model: { rounds: number; brierModel: number | null; brierMarket: number | null; t: number | null };
+  current: ReplayLine & Thresholds;
+  /** Meilleur couple de seuils positif sur les deux moitiés (null si aucun). */
+  best: (ReplayLine & Thresholds & { tested: number }) | null;
+  late: (ReplayLine & { tModel: number | null; rounds: number }) | null;
+  vol: { rounds: number; tPark: number | null; tBlend: number | null; current: string } | null;
+  strike: { rounds: number; withPs: number; compared: number; same: number; tOfficial: number | null; officialRounds: number } | null;
+  zScale: { m: number; lo: number; hi: number; current: number } | null;
+  buys: { n: number; wins: number } | null;
+}
+
+export interface BacktestSummary {
+  days: number;
+  rounds: number;
+  all: { rounds: number; brierModel: number | null; brierMarket: number | null; t: number | null };
+  byTau: Array<{ tau: number; rounds: number; t: number | null }>;
+  current: (ReplayLine & Thresholds) | null;
+  /** Estimateur de volatilité significativement meilleur que celui du bot (null : aucun). */
+  betterVol: string | null;
+  zScale: { m: number; lo: number; hi: number; current: number } | null;
+  medianLagSec: number | null;
+}
+
+export type VerdictLevel = 'early' | 'negative' | 'none' | 'lead' | 'edge';
+
+export interface Verdict {
+  level: VerdictLevel;
+  text: string;
+}
+
+/** Rounds réglés minimum avant de conclure (≈ 8 h de marché à 5 cryptos ; groupés par créneau). */
+export const MIN_ROUNDS_VERDICT = 500;
+/** Couple de seuils retenu : t ≥ 2,9 (Bonferroni sur 36 couples), n ≥ 100, deux moitiés > 0. */
+export const T_BEST = 2.9;
+
+// ---------------------------------------------------------------- formatage (fr)
+
+const dec = (x: number, d: number) => x.toFixed(d).replace('.', ',');
+const signed = (x: number, d: number) => `${x > 0 ? '+' : x < 0 ? '−' : ''}${dec(Math.abs(x), d)}`;
+const tFmt = (t: number | null) => (t === null ? '—' : signed(t, 1));
+const evFmt = (ev: number | null) => (ev === null ? '—' : `${signed(ev * 100, 1)} %/$`);
+const pctFmt = (x: number | null) => (x === null ? '—' : `${dec(x * 100, 0)} %`);
+const int = (n: number) => String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, ' ');
+const halvesFmt = (r: Pick<ReplayLine, 'evH1' | 'evH2'>) => `moitiés ${evFmt(r.evH1)} / ${evFmt(r.evH2)}`;
+/** « 0 round réglé », « 1 pari », « 2 paris » : forme plurielle à partir de 2 (règle française). */
+const count = (n: number, one: string, many: string) => `${int(n)} ${Math.abs(n) >= 2 ? many : one}`;
+
+function replayFmt(r: ReplayLine): string {
+  if (!r.n) return 'aucun pari';
+  return `${count(r.n, 'pari', 'paris')} · ${pctFmt(r.winRate)} gagnés · ${evFmt(r.ev)} (t ${tFmt(r.t)}) · ${halvesFmt(r)}`;
+}
+
+const thrFmt = (t: Thresholds) => `edge ≥ ${dec(t.minEdge * 100, 0)} pt, proba ≥ ${dec(t.minProb * 100, 0)} %`;
+
+/** Positif, significatif et stable : n ≥ 100, t ≥ tMin, les deux moitiés > 0. */
+export function solid(r: ReplayLine | null | undefined, tMin = 2): boolean {
+  return !!r && r.n >= 100 && (r.t ?? 0) >= tMin && (r.evH1 ?? 0) > 0 && (r.evH2 ?? 0) > 0 && (r.ev ?? 0) > 0;
+}
+
+// ---------------------------------------------------------------- journal en direct
+
+export function journalVerdict(s: JournalSummary): Verdict {
+  if (s.model.rounds < MIN_ROUNDS_VERDICT) {
+    return { level: 'early', text: `⏳ Trop tôt : ${int(s.model.rounds)} rounds comparables, il en faut ≥ ${MIN_ROUNDS_VERDICT} (quelques heures à 5 cryptos). Rester en papier.` };
+  }
+  if ((s.model.t ?? 0) >= 2) {
+    return { level: 'negative', text: '❌ Le carnet prédit mieux que le modèle : PAS d\'edge dans la fenêtre d\'entrée. Ne pas passer en réel.' };
+  }
+  const lead = solid(s.late) ? ` Piste : dernière minute (${evFmt(s.late!.ev)}, t ${tFmt(s.late!.t)}) — à étudier, jamais jouée.` : '';
+  if ((s.model.t ?? 0) <= -2 && solid(s.current)) {
+    return { level: 'edge', text: `✅ Edge probable au réglage actuel (${evFmt(s.current.ev)}, t ${tFmt(s.current.t)}, deux moitiés positives). À confirmer sur ≥ 2 semaines avant tout argent réel.${lead}` };
+  }
+  if (lead) return { level: 'lead', text: `🔎 Pas d'edge démontré au réglage actuel.${lead}` };
+  return { level: 'none', text: '⏳ Pas d\'edge démontré : rester en papier et laisser tourner.' };
+}
+
+export function renderJournalSummary(s: JournalSummary): string {
+  const L: string[] = [];
+  L.push(`📊 <b>Rapport edge — ${int(s.days)} dernier${s.days >= 2 ? 's' : ''} jour${s.days >= 2 ? 's' : ''}</b>`);
+  L.push(`${count(s.rounds, 'round réglé', 'rounds réglés')} · ${count(s.evaluations, 'évaluation', 'évaluations')}${s.lateMeasures ? ` (+ ${int(s.lateMeasures)} fin de round)` : ''}`);
+  if (!s.rounds) {
+    L.push('', 'Aucun round réglé dans le journal pour cette période : laisser tourner le bot (journal FV_JOURNAL activé).');
+    return L.join('\n');
+  }
+  const m = s.model;
+  const better = m.t === null ? 'pas assez de données' : m.t <= -2 ? 'OUI (significatif)' : m.t >= 2 ? 'NON, le carnet est meilleur' : 'pas de différence significative';
+  L.push('', `<b>Le modèle bat-il le carnet ?</b> ${better}`);
+  L.push(`   erreur (Brier) modèle ${m.brierModel === null ? '—' : dec(m.brierModel, 4)} vs carnet ${m.brierMarket === null ? '—' : dec(m.brierMarket, 4)} · t ${tFmt(m.t)} (≤ −2 requis) · ${int(m.rounds)} rounds`);
+  L.push('', `<b>Réglage actuel</b> (${thrFmt(s.current)}) rejoué au meilleur ask :`);
+  L.push(`   ${replayFmt(s.current)}`);
+  if (s.best && (s.best.minEdge !== s.current.minEdge || s.best.minProb !== s.current.minProb)) {
+    L.push(`<b>Meilleur réglage testé</b> (${thrFmt(s.best)}) : ${evFmt(s.best.ev)} (t ${tFmt(s.best.t)}, n=${int(s.best.n)}) · ${halvesFmt(s.best)}`);
+    L.push(`   ${s.best.tested} couples testés : ne compte que si t ≥ ${dec(T_BEST, 1)} (sinon hasard probable).`);
+  }
+  if (s.late) {
+    L.push('', `<b>Dernière minute</b> (mesurée, jamais jouée) : modèle vs carnet t ${tFmt(s.late.tModel)} (${int(s.late.rounds)} rounds)`);
+    L.push(`   entrées hypothétiques : ${replayFmt(s.late)}`);
+  }
+  if (s.vol && s.vol.rounds) {
+    const best = (s.vol.tPark ?? 0) <= -2 ? 'Parkinson meilleur' : (s.vol.tBlend ?? 0) <= -2 ? 'mélange meilleur' : 'garder le réglage';
+    L.push(`<b>Volatilité</b> (${s.vol.current}) : Parkinson t ${tFmt(s.vol.tPark)}, mélange t ${tFmt(s.vol.tBlend)} → ${best}`);
+  }
+  if (s.strike && s.strike.rounds) {
+    const st = s.strike;
+    L.push(`<b>Prix à battre officiel</b> : lu en direct dans ${pctFmt(st.withPs / st.rounds)} des rounds`
+      + (st.compared ? `, identique au règlement ${pctFmt(st.same / st.compared)}` : '')
+      + (st.officialRounds ? ` · modèle avec prix officiel t ${tFmt(st.tOfficial)} (${int(st.officialRounds)} rounds, ≤ −2 = mieux)` : ''));
+  }
+  if (s.zScale) {
+    const z = s.zScale;
+    const inside = z.current >= z.lo && z.current <= z.hi;
+    L.push(`<b>Calibration</b> : FV_Z_SCALE optimal ${dec(z.m, 2)} (IC95 ${dec(z.lo, 2)}–${dec(z.hi, 2)}), actuel ${dec(z.current, 2)}${inside ? ' ✓' : ' → à revoir'}`);
+  }
+  if (s.buys && s.buys.n) L.push(`<b>Paris papier pris</b> : ${int(s.buys.n)}, gagnés ${pctFmt(s.buys.wins / s.buys.n)}`);
+  L.push('', `<b>Verdict</b> : ${journalVerdict(s).text}`);
+  return L.join('\n');
+}
+
+// ---------------------------------------------------------------- backtest historique
+
+export function backtestVerdict(s: BacktestSummary): Verdict {
+  if (s.all.rounds < MIN_ROUNDS_VERDICT) {
+    return { level: 'early', text: `⏳ Trop peu de rounds évaluables (${int(s.all.rounds)}) : relancer avec plus de jours (/backtest 3).` };
+  }
+  const t = s.all.t ?? 0;
+  if (t >= 2) return { level: 'negative', text: '❌ Les prix Polymarket prédisaient mieux que le modèle : pas d\'edge sur l\'historique.' };
+  if (t <= -2) {
+    return solid(s.current)
+      ? { level: 'edge', text: '✅ Modèle meilleur que les prix historiques ET seuils actuels rentables (asks reconstitués). Piste sérieuse — à confirmer en direct (/rapport).' }
+      : { level: 'lead', text: '🔎 Modèle meilleur que les prix historiques, mais seuils actuels pas rentables de façon stable. Les prix historiques peuvent être périmés : confirmer en direct (/rapport).' };
+  }
+  return { level: 'none', text: '⏳ Pas de différence significative avec le marché : pas d\'edge démontré.' };
+}
+
+export function renderBacktestSummary(s: BacktestSummary): string {
+  const L: string[] = [];
+  L.push(`🧪 <b>Backtest historique — ${dec(s.days, s.days % 1 ? 1 : 0)} jour${s.days >= 2 ? 's' : ''}</b>`);
+  L.push(`${count(s.rounds, 'round réglé', 'rounds réglés')} Polymarket rejoué${s.rounds >= 2 ? 's' : ''} (prix par minute + bougies Binance)`);
+  const a = s.all;
+  L.push('', `<b>Le modèle bat-il les prix Polymarket ?</b> ${a.t === null ? 'pas assez de données' : a.t <= -2 ? 'OUI (significatif)' : a.t >= 2 ? 'NON, le marché est meilleur' : 'pas de différence significative'}`);
+  L.push(`   Brier modèle ${a.brierModel === null ? '—' : dec(a.brierModel, 4)} vs marché ${a.brierMarket === null ? '—' : dec(a.brierMarket, 4)} · t ${tFmt(a.t)} · ${int(a.rounds)} rounds`);
+  if (s.byTau.length) L.push(`   par temps restant : ${s.byTau.map(x => `${x.tau} s t ${tFmt(x.t)}`).join(' · ')}`);
+  if (s.current) {
+    L.push('', `<b>Réglage actuel</b> (${thrFmt(s.current)}), asks reconstitués — indicatif :`);
+    L.push(`   ${replayFmt(s.current)}`);
+  }
+  L.push(`<b>Volatilité</b> : ${s.betterVol ? `${s.betterVol} prédit mieux (à confirmer en direct)` : 'aucun estimateur ne bat celui du bot'}`);
+  if (s.zScale) {
+    const z = s.zScale;
+    L.push(`<b>Calibration</b> : FV_Z_SCALE optimal ${dec(z.m, 2)} (IC95 ${dec(z.lo, 2)}–${dec(z.hi, 2)}), actuel ${dec(z.current, 2)}`);
+  }
+  if (s.medianLagSec !== null) L.push(`<i>Spot du modèle en retard de ${int(s.medianLagSec)} s (médiane) sur le prix marché : désavantage pour le modèle.</i>`);
+  L.push('', `<b>Verdict</b> : ${backtestVerdict(s).text}`);
+  return L.join('\n');
+}

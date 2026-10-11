@@ -5,7 +5,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { answerCommand, parseCommand, type CommandProviders } from '../src/bot/telegram-commands.ts';
+import { answerCommand, parseCommand, parseDays, type CommandProviders } from '../src/bot/telegram-commands.ts';
 import { DEFAULT_RISK_LIMITS } from '../src/bot/config.ts';
 import type { RiskVerdict } from '../src/bot/risk-gate.ts';
 import { computeStats, type LedgerTrade } from '../src/services/paper-ledger.ts';
@@ -35,11 +35,36 @@ function providers(over: Partial<{ risk: RiskVerdict; positions: LedgerTrade[]; 
 const noJunk = (s: string | null) => { assert.ok(s); assert.doesNotMatch(s, /undefined|NaN|null|\[object/, s); return s; };
 
 test('parseCommand : « /status@MonBot 1 » → status + bot, texte libre → null', () => {
-  assert.deepEqual(parseCommand('/status'), { cmd: 'status', bot: null });
-  assert.deepEqual(parseCommand('  /Status@MonBot arg'), { cmd: 'status', bot: 'MonBot' });
-  assert.deepEqual(parseCommand('/aide\n'), { cmd: 'aide', bot: null });
+  assert.deepEqual(parseCommand('/status'), { cmd: 'status', bot: null, args: '' });
+  assert.deepEqual(parseCommand('  /Status@MonBot arg'), { cmd: 'status', bot: 'MonBot', args: 'arg' });
+  assert.deepEqual(parseCommand('/aide\n'), { cmd: 'aide', bot: null, args: '' });
+  assert.deepEqual(parseCommand('/rapport  7 jours'), { cmd: 'rapport', bot: null, args: '7 jours' });
   assert.equal(parseCommand('bonjour'), null);
   assert.equal(parseCommand('/'), null);
+  assert.equal(parseCommand('/status123'), null);
+});
+
+test('parseDays : nombre (virgule acceptée) borné, défaut si absent ou illisible', () => {
+  assert.equal(parseDays('', 3, 0.25, 30), 3);
+  assert.equal(parseDays('7', 3, 0.25, 30), 7);
+  assert.equal(parseDays('1,5 jours', 3, 0.25, 30), 1.5);
+  assert.equal(parseDays('999', 3, 0.25, 30), 30);
+  assert.equal(parseDays('0.01', 3, 0.25, 30), 0.25);
+  assert.equal(parseDays('-2', 3, 0.25, 30), 3);
+  assert.equal(parseDays('beaucoup', 3, 0.25, 30), 3);
+});
+
+test('/rapport et /backtest : calcul lancé avec les jours demandés (bornés), accusé immédiat ; indisponible sinon', () => {
+  const calls: Array<[string, number]> = [];
+  const p = { ...providers(), analysis: (kind: 'rapport' | 'backtest', days: number) => { calls.push([kind, days]); return `⏳ ${kind} ${days}`; } };
+  assert.equal(answerCommand('/rapport', p), '⏳ rapport 3');
+  assert.equal(answerCommand('/rapport 7', p), '⏳ rapport 7');
+  assert.equal(answerCommand('/edge 90', p), '⏳ rapport 30');
+  assert.equal(answerCommand('/backtest', p), '⏳ backtest 2');
+  assert.equal(answerCommand('/backtest 40', p), '⏳ backtest 14');
+  assert.deepEqual(calls, [['rapport', 3], ['rapport', 7], ['rapport', 30], ['backtest', 2], ['backtest', 14]]);
+  assert.match(noJunk(answerCommand('/rapport', providers())), /indisponible/);
+  assert.match(noJunk(answerCommand('/aide', providers())), /\/rapport \[jours\][\s\S]*\/backtest \[jours\]/);
 });
 
 test('commande adressée à un autre bot du groupe : silence ; au nôtre (toute casse) : réponse', () => {

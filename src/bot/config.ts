@@ -14,6 +14,7 @@ import { fairValueConfigFromEnv, type FairValueConfig } from '../services/fair-v
 import { STRATEGY_COINS, coinsFromEnv, type StrategyCoin } from '../strategy/fair-value-runner.js';
 import { isValidTimeZone } from '../services/telegram-messages.js';
 import { looksLikeBotToken, telegramConfigFromEnv } from '../services/telegram.js';
+import { parseHHMM } from './daily-report.js';
 
 export type Env = Record<string, string | undefined>;
 
@@ -67,6 +68,9 @@ export interface BotConfig {
   summaryEveryMin: number;
   /** Répondre aux commandes Telegram (/status, /bilan…) du chat configuré. */
   telegramCommands: boolean;
+  /** Rapport quotidien (verdict « edge ou pas », comme /rapport) : heure locale en minutes
+   *  depuis minuit et jours analysés ; null = désactivé (TELEGRAM_DAILY_REPORT=off). */
+  dailyReport: { atMinutes: number; days: number } | null;
   /** Point d'entrée du flux spot (ws:// ou wss://, se terminant par `?streams=`) ; null = Binance.
    *  Avancé : proxy, ou faux flux des tests de bout en bout. */
   spotStreamUrl: string | null;
@@ -161,6 +165,16 @@ export function loadBotConfig(env: Env = process.env): { config: BotConfig; warn
     else warnings.push(`SPOT_STREAM_URL=${streamRaw} ignoré (attendu : ws(s)://…/stream?streams=) — flux Binance`);
   }
 
+  // Rapport quotidien : « 08:00 » par défaut, « off » pour couper.
+  const dailyRaw = (env.TELEGRAM_DAILY_REPORT ?? '').trim();
+  let dailyReport: BotConfig['dailyReport'] = { atMinutes: 8 * 60, days: num(env, 'TELEGRAM_DAILY_REPORT_DAYS', 3, 0.25, 30, warnings) };
+  if (['off', 'false', '0', 'no', 'non'].includes(dailyRaw.toLowerCase())) dailyReport = null;
+  else if (dailyRaw) {
+    const at = parseHHMM(dailyRaw);
+    if (at === null) warnings.push(`TELEGRAM_DAILY_REPORT=${dailyRaw} ignoré (attendu : HH:MM, ex. 08:00, ou off) — 08:00`);
+    else dailyReport.atMinutes = at;
+  }
+
   const telegram = telegramConfigFromEnv(env);
   if (telegram && !looksLikeBotToken(telegram.token)) {
     warnings.push('TELEGRAM_BOT_TOKEN ne ressemble pas à un token @BotFather (123456789:ABC…) : la connexion échouera');
@@ -199,6 +213,7 @@ export function loadBotConfig(env: Env = process.env): { config: BotConfig; warn
     telegram,
     summaryEveryMin: num(env, 'TELEGRAM_SUMMARY_MIN', 60, 15, 24 * 60, warnings),
     telegramCommands: bool(env, 'TELEGRAM_COMMANDS', true, warnings),
+    dailyReport,
     spotStreamUrl,
     timeZone,
     dashboard: { port, host, token },

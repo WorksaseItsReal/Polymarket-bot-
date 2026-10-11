@@ -85,7 +85,9 @@ Puis :
    lisait des fichiers (`history.json`, `pnl.json`) que le bot n'écrit plus.
 3. Vérifier dans les logs : `Flux spot temps réel connecté`, `Telegram connecté`, puis des
    lignes `HOLD : edge … requis` (le bot évalue, et s'abstient tant que le carnet est juste).
-4. Après 2–3 jours : `npx tsx scripts/analysis/fv-report.ts --days 3`.
+4. Sur Telegram : `/backtest` tout de suite (le modèle rejoué sur les rounds passés), puis
+   `/rapport` après 2–3 jours (verdict sur le journal en direct). Même chose en SSH :
+   `npx tsx scripts/analysis/fv-report.ts --days 3`.
 
 ---
 
@@ -222,6 +224,7 @@ npx tsx scripts/analysis/fv-report.ts --days 7   # le modèle a-t-il un edge ? (
 | `TELEGRAM_SUMMARY_MIN` | Période du bilan (défaut 60, bornée 15–1440). Envoyé s'il y a de nouveaux trades ; sinon (seule la mesure a avancé) au plus toutes les 6 h. |
 | `TELEGRAM_TZ` | Fuseau des heures de round (défaut `Europe/Paris`). |
 | `TELEGRAM_COMMANDS` | `false` pour ne plus répondre aux commandes (défaut : le bot écoute le chat configuré). |
+| `TELEGRAM_DAILY_REPORT` / `TELEGRAM_DAILY_REPORT_DAYS` | Rapport quotidien sur Telegram (le résumé de `/rapport`, avec son verdict), à cette heure locale (`TELEGRAM_TZ`), sur ces jours : défaut `08:00` / `3`. `off` pour couper. Un bot démarré après l'heure l'envoie à son démarrage (+2 min) s'il n'est pas déjà parti ; jamais deux fois le même jour. |
 
 **Au démarrage**, la connexion est vérifiée (`getMe` + `getChat`) et le log dit exactement quoi
 faire si elle échoue : token refusé → le régénérer chez @BotFather ; « chat introuvable » →
@@ -242,7 +245,12 @@ plantage, espacées 10 min → 6 h).
 `/status` (entrées autorisées ou bloquées et pourquoi, capital, trades, positions, santé du
 flux et des passages), `/bilan` (le bilan périodique, à la demande), `/risque` (les quatre
 limites chiffrées), `/positions` (paris en cours : côté, mise, prix, modèle, fin, gain si
-gagné), `/aide`. Seul `TELEGRAM_CHAT_ID` est écouté (les messages d'autres chats sont
+gagné), `/rapport [jours]` (le rapport d'analyse du journal en direct, résumé avec un
+verdict « edge ou pas » ; défaut 3 jours), `/backtest [jours]` (le modèle rejoué sur les rounds
+Polymarket passés ; défaut 2 jours), `/aide`. `/rapport` et `/backtest` répondent tout de
+suite puis envoient le résultat 1 à 15 min plus tard : le calcul tourne dans un processus
+séparé, en priorité basse, un seul à la fois, tué à l'arrêt du bot — la boucle de trading
+n'attend jamais. Seul `TELEGRAM_CHAT_ID` est écouté (les messages d'autres chats sont
 ignorés) ; une commande envoyée pendant un arrêt du bot (> 5 min) n'est pas rejouée. Si un
 autre programme lit déjà les messages du même bot (conflit 409 de `getUpdates`), les commandes
 ne répondent pas et le log le dit : utiliser un bot distinct par programme.
@@ -312,7 +320,9 @@ par round toutes les 10 s, avec probabilité, bruit, asks, meilleurs bids, fenê
 0. **Prix à battre** : notre estimation vs celle publiée par Polymarket (décalage, dispersion,
    gain possible en lisant le prix officiel). 0b : le prix officiel est-il **disponible pendant
    le round** (relu dans Gamma tant qu'il manque, journalisé `ps`), avec quel délai, et égal à la
-   valeur du règlement ? Prérequis avant de l'utiliser en direct.
+   valeur du règlement ? Prérequis avant de l'utiliser en direct. 0c : le modèle prédirait-il
+   **mieux** avec le prix officiel, corrigé de l'écart Binance (USDT) / Chainlink (USD) mesuré
+   sur les 12 rounds précédents (Brier apparié, t ≤ −2 = oui) ?
 1. **Le modèle prédit-il mieux que le carnet ?** (Brier, t groupé par créneau). 1c : quelle
    volatilité prédit le mieux (clôture-à-clôture, Parkinson, mélange — `FV_VOL_ESTIMATOR`).
    1d : **dernière minute** (TWAP en partie acquis) — le modèle « fin de round » voit-il mieux
@@ -324,6 +334,8 @@ par round toutes les 10 s, avec probabilité, bruit, asks, meilleurs bids, fenê
 
 Les évaluations d'un autre modèle (fenêtre TWAP différente) sont ignorées. Backtest rapide sur
 l'historique (prix par minute, indicatif) : `npx tsx scripts/analysis/historical-backtest.ts --days 3`.
+`--summary` (les deux scripts) n'affiche que le résumé Telegram et son verdict : c'est ce
+qu'exécutent `/rapport` et `/backtest`.
 
 **Limites honnêtes** : le prix à battre est **estimé** (bougie Binance), alors que Polymarket
 l'affiche exactement — d'où la marge de bruit (amélioration possible : lire le flux Chainlink

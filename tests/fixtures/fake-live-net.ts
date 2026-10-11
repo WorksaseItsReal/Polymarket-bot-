@@ -123,12 +123,18 @@ globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) =>
     if (method === 'getMe') return json({ ok: true, result: { id: 1, is_bot: true, username: 'faux_bot' } });
     if (method === 'getChat') return json({ ok: true, result: { id: 42, type: 'private' } });
     if (method === 'getUpdates') {
-      // Long polling simulé : une courte attente, et une commande injectée (FAKE_TELEGRAM_CMD)
-      // au premier appel pour tester la réponse du vrai bot.
+      // Long polling simulé : une courte attente, et des commandes injectées (FAKE_TELEGRAM_CMD)
+      // pour tester la réponse du vrai bot : « /status » (au premier appel) ou
+      // « 0:/status|25:/rapport 1 » (commande envoyée au N-ième appel, ~1,2 s chacun).
       await new Promise(r => setTimeout(r, 200));
-      const cmd = process.env.FAKE_TELEGRAM_CMD;
-      if (cmd && tgPolls++ === 0) {
-        return json({ ok: true, result: [{ update_id: 1, message: { message_id: 1, date: Math.floor(Date.now() / 1000), chat: { id: 42, type: 'private' }, from: { username: 'operateur' }, text: cmd } }] });
+      const poll = tgPolls++;
+      const cmds = (process.env.FAKE_TELEGRAM_CMD ?? '').split('|').filter(Boolean).map(c => {
+        const m = /^(\d+):([\s\S]*)$/.exec(c);
+        return m ? { at: Number(m[1]), text: m[2] } : { at: 0, text: c };
+      });
+      const due = cmds.filter(c => c.at === poll);
+      if (due.length) {
+        return json({ ok: true, result: due.map((c, i) => ({ update_id: poll * 10 + i + 1, message: { message_id: poll * 10 + i + 1, date: Math.floor(Date.now() / 1000), chat: { id: 42, type: 'private' }, from: { username: 'operateur' }, text: c.text } })) });
       }
       return json({ ok: true, result: [] });
     }
