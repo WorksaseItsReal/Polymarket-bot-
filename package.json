@@ -25,6 +25,7 @@
     "ledger:check-migration": "tsx scripts/analysis/ledger-migration-check.ts",
     "upgrade": "bash scripts/update.sh",
     "demo": "tsx scripts/demo.ts",
+    "llm:token": "tsx scripts/llm/save-token.ts",
     "test:watch": "vitest",
     "test:integration": "vitest run --config vitest.integration.config.ts",
     "example:basic": "tsx examples/01-basic-usage.ts",
