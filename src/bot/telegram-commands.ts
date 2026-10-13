@@ -21,6 +21,8 @@ export interface CommandProviders {
   /** Lance un calcul long (rapport du journal, backtest) en arrière-plan ; renvoie l'accusé
    *  de réception immédiat (le résultat part dans un second message). Absent = indisponible. */
   analysis?(kind: 'rapport' | 'backtest', days: number): string;
+  /** Stratégie llm : `/llm [status|on|off]`. Absent = non branchée. */
+  llm?(args: string): string;
 }
 
 /** Commande (« /Status@MonBot 1 » → status, bot « MonBot », args « 1 »), null si ce n'est pas une commande. */
@@ -64,6 +66,8 @@ export function answerCommand(text: string, p: CommandProviders, chatType: strin
       return p.analysis ? p.analysis('rapport', parseDays(parsed.args, 3, 0.25, 30)) : 'Rapport indisponible sur ce bot.';
     case 'backtest': case 'historique':
       return p.analysis ? p.analysis('backtest', parseDays(parsed.args, 2, 0.25, 14)) : 'Backtest indisponible sur ce bot.';
+    case 'llm':
+      return p.llm ? p.llm(parsed.args) : 'Stratégie llm non disponible sur ce bot (LLM_ENABLED=false).';
     case 'aide': case 'help': case 'start': case 'menu':
       return msgHelp();
     default:

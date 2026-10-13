@@ -352,16 +352,18 @@ export class FairValueRunner {
       if (!saved || !closed) continue;
       this.unresolvedWarned.delete(t.id);
       this.lastResolveTry.delete(t.id);
-      const late = strategyOf(t) === 'late';
-      const stats = this.statsFor(strategyOf(t));
-      this.d.log('TRADE', `[SIMULATION] ${won ? 'GAGNÉ' : 'PERDU'}${late ? ' (récolte fin de round)' : ''} ${t.coin} ${t.side} (${t.slug}) ${pnl >= 0 ? '+' : ''}$${pnl.toFixed(4)} — `
-        + `bilan ${late ? 'récolte' : 'juste valeur'} ${stats.n} trades, WR ${stats.winRate === null ? '—' : (stats.winRate * 100).toFixed(1) + ' %'}, PnL $${stats.pnl.toFixed(2)}`);
+      const key = strategyOf(t);
+      const late = key === 'late';
+      const llm = key === 'llm'; // stratégie llm (papier) : ses trades sont réglés ici comme les autres
+      const stats = this.statsFor(key);
+      this.d.log('TRADE', `[SIMULATION] ${won ? 'GAGNÉ' : 'PERDU'}${late ? ' (récolte fin de round)' : llm ? ' (llm)' : ''} ${t.coin} ${t.side} (${t.slug}) ${pnl >= 0 ? '+' : ''}$${pnl.toFixed(4)} — `
+        + `bilan ${late ? 'récolte' : llm ? 'llm' : 'juste valeur'} ${stats.n} trades, WR ${stats.winRate === null ? '—' : (stats.winRate * 100).toFixed(1) + ' %'}, PnL $${stats.pnl.toFixed(2)}`);
       // Récolte : des centaines de petits gains par jour → aucun message par gain (bilan
       // périodique), mais chaque perte est annoncée (rare, et c'est elle qui compte).
       if (!late || !won) {
         this.d.notify(msgTradeClosed({
           coin: t.coin, side: t.side, slotSec: t.slotSec ?? t.endMs / 1000 - 300, outcome: won ? 'won' : 'lost', pnl, stats, timeZone: this.d.timeZone,
-          ...(late ? { strategy: 'late' as const } : {}),
+          ...(late ? { strategy: 'late' as const } : llm ? { strategy: 'llm' as const } : {}),
         }));
       }
       this.d.onTradeClosed?.(closed);

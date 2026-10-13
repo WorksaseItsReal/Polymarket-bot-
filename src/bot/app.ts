@@ -26,6 +26,7 @@ import { getRoundMarketData } from '../services/round-market-data.js';
 import { fetchRoundOutcome, type LedgerStats, type LedgerTrade } from '../services/paper-ledger.js';
 import { ledgerStore } from '../services/ledger-store.js';
 import { FairValueRunner, type ScannedMarket } from '../strategy/fair-value-runner.js';
+import type { StrategyCoin } from '../strategy/fair-value-runner.js';
 import { RoundDiscovery } from '../services/round-discovery.js';
 import { SpotStream } from '../services/spot-stream.js';
 import { DecisionJournal, type DecisionRecord } from '../services/decision-journal.js';
@@ -41,6 +42,7 @@ import { fetchClobBook } from '../services/clob-book.js';
 import { MIN_SELL_SHARES, capitalWarning, dataPaths, loadBotConfig, type BotConfig } from './config.js';
 import { evaluateRisk, type RiskVerdict } from './risk-gate.js';
 import { answerCommand } from './telegram-commands.js';
+import { setupLlm, type LlmHandle } from './llm-setup.js';
 import { ReportRunner, stderrTail } from './report-runner.js';
 import { dailyReportDue, readLastDailyReport, writeLastDailyReport } from './daily-report.js';
 
@@ -77,6 +79,8 @@ export async function main(env: Record<string, string | undefined> = process.env
   // --- Cycle de vie ------------------------------------------------------------------
   const startTime = Date.now();
   let shuttingDown = false;
+  /** Stratégie llm (papier) : null tant que LLM_ENABLED n'est pas vrai (rien n'est alors construit). */
+  let llmHandle: LlmHandle | null = null;
   let telegram: TelegramClient | null = null;
   let telegramStatus: HealthSnapshot['telegram'] = 'off';
   let crashStart: StartReport | null = null;
@@ -159,6 +163,7 @@ export async function main(env: Record<string, string | undefined> = process.env
     scheduler?.stop();
     telegram?.stopPolling();
     reports.stop();
+    try { llmHandle?.stop(); } catch { /* arrêt best effort */ }
     try { spotStream?.stop(); } catch { /* déjà arrêté */ }
     // Telegram pas (encore) connecté : arrêt compté mais pas « signalé » (le démarrage suivant le dira).
     const stop = crashStart ? noteStop(paths.runState, code !== 0, Date.now(), process.pid, telegram !== null) : { alert: true, recentCrashes: 0, nextGapMs: 0 };
@@ -439,6 +444,7 @@ export async function main(env: Record<string, string | undefined> = process.env
         risk: () => ({ verdict: freshRisk(), limits: config.risk, capital: config.capital }),
         positions: () => ({ positions: openPositions(), nowMs: Date.now(), timeZone: config.timeZone }),
         analysis: (kind, days) => startAnalysis(kind, days),
+        llm: args => (llmHandle ? llmHandle.command(args) : 'Stratégie llm non disponible sur ce bot (LLM_ENABLED=false).'),
       }, client.chatType, client.botUsername));
       log('INFO', '💬 Commandes Telegram écoutées : /status /bilan /risque /positions /rapport /backtest /aide (TELEGRAM_COMMANDS=false pour couper)');
     }
@@ -576,6 +582,29 @@ export async function main(env: Record<string, string | undefined> = process.env
   });
 
   runnerRef = runner;
+
+  // Stratégie llm (papier) : construite SEULEMENT si LLM_ENABLED=true. Son propre minuteur, son
+  // propre capital (portée 'llm' du registre, hors du total) : formule et récolte inchangées.
+  if (config.llm.enabled) {
+    try {
+      llmHandle = setupLlm({
+        config, repoDir: REPO_DIR, ledger,
+        markets: async () => discovery.current(Date.now(), config.llm.coins as StrategyCoin[]),
+        getBook: tokenId => withTimeout(fetchClobBook(tokenId), 8000, 'carnet CLOB'),
+        getRoundData: (coin, slot, now) => (isSpotCoin(coin)
+          ? getRoundMarketData(coin as SpotCoin, slot, now, () => stream?.price(coin) ?? null, fv.twapWindowSec, fv.volEstimator ?? 'cc',
+            (from, to) => stream?.meanSince(coin, from, to) ?? null)
+          : Promise.resolve(null)),
+        globalBlock: () => (shuttingDown ? 'arrêt du bot en cours' : null) ?? clockBlock() ?? ledgerBlock(),
+        notify,
+        log: (level, msg) => log(level, msg),
+      });
+      log('INFO', `🤖 ${llmHandle.startupLine()}`);
+    } catch (err) {
+      llmHandle = null;
+      log('ERROR', `Stratégie llm non démarrée (${String((err as Error)?.message ?? err).slice(0, 200)}) — formule et récolte continuent`);
+    }
+  }
   await runner.tick();
   // Passage régulier refusé parce qu'un passage « saut du spot » tient le verrou : nouvel
   // essai toutes les 0,5 s pendant au plus 1,5 s (au-delà, le passage suivant serait trop proche).

@@ -383,6 +383,26 @@ perte coûte ~110 gains. Garde-fou propre (`~/.polymarket/fv-guard-late.json`) :
 significative (t ≤ −2 sur ≥ 50 paris), alerte si la réussite tombe nettement sous 99,7 %.
 Désactivée par défaut : `FV_HARVEST=true` l'active, `false` (ou l'absence du réglage) la coupe.
 
+### 5 ter. Stratégie llm (papier, agents Claude) — désactivée par défaut
+
+Trois agents Claude Haiku (analyste → décideur → sécurité), appelés l'un après l'autre par un
+orchestrateur **en code** (il ne décide rien), chacun en mode headless **sans aucun outil**.
+Toute erreur, tout délai dépassé, tout JSON invalide, toute limite d'usage = **abstention
+enregistrée**, jamais un pari. Les garde-fous du code s'appliquent **après** les agents et ont
+le dernier mot (mise ≤ 2 $ et ≤ limites du capital llm, prix limite recalculé frais compris,
+garde de fraîcheur, exécution simulée +1 s sur carnet relu). Capital papier **séparé**
+(`LLM_PAPER_CAPITAL`) : ses pertes ne touchent pas les limites de formule et récolte.
+
+Sécurité indépendante des options du CLI : délai dur qui tue tout le groupe de processus,
+compteur d'appels persistant, environnement minimal (aucune clé du bot, pas d'`ANTHROPIC_API_KEY`),
+HOME et dossier de travail isolés hors du dépôt, fil-piège qui tue le processus si un outil
+apparaît, pause automatique (3 échecs → 30 min doublées, limite d'usage → 60 min, plafond 6 h).
+
+Mise en route : voir `.env.example` (version du CLI figée, `claude setup-token` puis
+`npm run llm:token`, `npm run llm:probe` sur le serveur, puis `/llm on`). La sonde mesure la latence
+réelle d'une décision complète. Enregistrement : `~/.polymarket/llm/` (decisions.jsonl, instantanés,
+sorties brutes par agent) — hors du registre, référencé par `decisionId`.
+
 ### Mesurer si ça marche (journal des décisions)
 
 Chaque évaluation est écrite dans `~/.polymarket/journal/decisions-AAAA-MM-JJ.jsonl` (≤ 1 ligne

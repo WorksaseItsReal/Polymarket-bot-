@@ -175,17 +175,18 @@ export interface TradeClosedInfo {
   pnl: number;
   stats: LedgerStats;
   timeZone?: string;
-  /** 'late' : trade de la récolte de fin de round (bilan propre à cette stratégie). */
-  strategy?: 'late';
+  /** 'late' : trade de la récolte de fin de round ; 'llm' : agents Claude (bilan propre à chacune). */
+  strategy?: 'late' | 'llm';
 }
 
 export function msgTradeClosed(i: TradeClosedInfo): string {
   const head = i.outcome === 'won' ? '✅ <b>GAGNÉ</b>' : i.outcome === 'lost' ? '❌ <b>PERDU</b>' : '💱 <b>REVENDU avant la fin</b>';
   const late = i.strategy === 'late';
+  const llm = i.strategy === 'llm';
   return [
-    `${head}${late ? ' (récolte fin de round)' : ''} — ${escapeHtml(i.coin)} ${SIDE_LABEL[i.side]} · <b>${money(i.pnl)}</b>`,
+    `${head}${late ? ' (récolte fin de round)' : llm ? ' (llm, papier)' : ''} — ${escapeHtml(i.coin)} ${SIDE_LABEL[i.side]} · <b>${money(i.pnl)}</b>`,
     `Round ${roundWindow(i.slotSec, i.timeZone)}${late && i.outcome === 'lost' ? ' · favori à 0,99 retourné dans les dernières secondes (attendu ~0,3 % des paris)' : ''}`,
-    `Bilan${late ? ' récolte' : ''} : ${balanceLine(i.stats)}`,
+    `Bilan${late ? ' récolte' : llm ? ' llm' : ''} : ${balanceLine(i.stats)}`,
   ].join('\n');
 }
 

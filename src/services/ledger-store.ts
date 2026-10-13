@@ -92,14 +92,15 @@ function looksTorn(text: string): boolean {
 export type StatScope = 'total' | StrategyKey;
 
 /**
- * Stratégies comptées dans chaque portée. Aujourd'hui le total = tout le registre ; une
- * stratégie expérimentale pourrait en être EXCLUE plus tard (son PnL ne toucherait alors ni
- * la porte de risque ni le capital) en changeant seulement le prédicat de `total`.
+ * Stratégies comptées dans chaque portée. Le total (porte de risque, capital de formule et
+ * récolte) EXCLUT llm : elle a son propre capital papier et ses propres limites, ses pertes ne
+ * bloquent pas les autres stratégies (et inversement) — leur comportement reste identique.
  */
 export const STAT_SCOPES: Readonly<Record<StatScope, (k: StrategyKey) => boolean>> = {
-  total: () => true,
+  total: k => k !== 'llm',
   fv: k => k === 'fv',
   late: k => k === 'late',
+  llm: k => k === 'llm',
 };
 const SCOPE_KEYS = Object.keys(STAT_SCOPES) as StatScope[];
 

@@ -16,6 +16,7 @@ import { isValidTimeZone } from '../services/telegram-messages.js';
 import { looksLikeBotToken, telegramConfigFromEnv } from '../services/telegram.js';
 import { parseHHMM } from './daily-report.js';
 import { harvestConfigFromEnv, type HarvestConfig } from '../strategy/late-harvest.js';
+import { llmConfigFromEnv, type LlmConfig } from '../strategy/llm/llm-config.js';
 
 export type Env = Record<string, string | undefined>;
 
@@ -49,6 +50,8 @@ export interface BotConfig {
   fv: FairValueConfig;
   /** Récolte de fin de round (papier) : favori bloqué à 0,99 (late-harvest.ts). */
   harvest: HarvestConfig;
+  /** Stratégie llm (papier, agents Claude) : DÉSACTIVÉE par défaut (llm-config.ts). */
+  llm: LlmConfig;
   /** Marge de revente anticipée (bid net − p_modèle). Défaut : FV_MIN_EDGE. */
   exitEdge: number;
   /** Passage régulier de la stratégie (ms). */
@@ -204,6 +207,7 @@ export function loadBotConfig(env: Env = process.env): { config: BotConfig; warn
     capital,
     fv,
     harvest: harvestConfigFromEnv(env, warnings),
+    llm: llmConfigFromEnv(env, warnings),
     exitEdge: num(env, 'FV_EXIT_EDGE', fv.minEdge, 0, 0.5, warnings),
     pollMs: num(env, 'FV_POLL_SEC', 10, 5, 300, warnings) * 1000,
     moveBps: num(env, 'FV_MOVE_BPS', 3, 1, 50, warnings),

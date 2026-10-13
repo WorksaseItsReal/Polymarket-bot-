@@ -25,15 +25,19 @@ import { clusteredMeanT, slotKey } from '../analysis/stats.js';
 
 export type LedgerSide = 'UP' | 'DOWN';
 export type LedgerStatus = 'open' | 'won' | 'lost' | 'sold';
-/** Stratégie d'un trade : 'fv' juste valeur (défaut, champ absent), 'late' récolte de fin de round. */
-export type StrategyKey = 'fv' | 'late';
+/** Stratégie d'un trade : 'fv' juste valeur (défaut, champ absent), 'late' récolte de fin de round,
+ *  'llm' décision par agents Claude (papier, capital séparé : hors du total). */
+export type StrategyKey = 'fv' | 'late' | 'llm';
 
 export interface LedgerTrade {
   /** conditionId du marché (un seul trade par round et par stratégie : `<conditionId>|late`
    *  pour la récolte de fin de round). */
   id: string;
-  /** 'late' = récolte de fin de round (late-harvest.ts) ; absent = stratégie juste valeur. */
-  strategy?: 'late';
+  /** 'late' = récolte de fin de round (late-harvest.ts) ; 'llm' = agents Claude (src/strategy/llm) ;
+   *  absent = stratégie juste valeur. */
+  strategy?: 'late' | 'llm';
+  /** Stratégie llm : identifiant de la décision (journal ~/.polymarket/llm, sorties brutes). */
+  decisionId?: string;
   slug: string;
   coin: string;
   side: LedgerSide;
@@ -75,7 +79,7 @@ export interface LedgerFile {
   trades: LedgerTrade[];
 }
 
-export const strategyOf = (t: Pick<LedgerTrade, 'strategy'>): StrategyKey => (t.strategy === 'late' ? 'late' : 'fv');
+export const strategyOf = (t: Pick<LedgerTrade, 'strategy'>): StrategyKey => (t.strategy === 'late' ? 'late' : t.strategy === 'llm' ? 'llm' : 'fv');
 
 // ---------------------------------------------------------------------------
 // Logique pure
