@@ -25,7 +25,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DEFAULT_FAIR_VALUE_CONFIG as CFG, normCdf } from '../src/services/fair-value.ts';
 import { strikeFromCandles, type Candle } from '../src/services/round-market-data.ts';
-import { computeStats, loadLedger, readLedgerShared, type LedgerTrade } from '../src/services/paper-ledger.ts';
+import { computeStats, type LedgerTrade } from '../src/services/paper-ledger.ts';
+import { loadLedger, readLedgerShared } from '../src/services/ledger-store.ts';
 import { FairValueRunner, type Book, type ScannedMarket } from '../src/strategy/fair-value-runner.ts';
 
 function mulberry32(seed: number) {

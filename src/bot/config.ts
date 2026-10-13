@@ -243,7 +243,10 @@ export function capitalWarning(c: Pick<BotConfig, 'capital' | 'minOrderUsd'>, ma
 /** Chemins des fichiers d'état, tous sous `dataDir`. */
 export function dataPaths(dataDir: string) {
   return {
-    ledger: join(dataDir, 'fv-ledger.json'),
+    /** Registre papier : journal append-only (ledger-store.ts). */
+    ledger: join(dataDir, 'fv-ledger.jsonl'),
+    /** Ancien registre (un seul JSON) : migré au démarrage puis conservé renommé `.migre-<date>`. */
+    legacyLedger: join(dataDir, 'fv-ledger.json'),
     guard: join(dataDir, 'fv-guard.json'),
     shadow: join(dataDir, 'fv-shadow.json'),
     runState: join(dataDir, 'run-state.json'),

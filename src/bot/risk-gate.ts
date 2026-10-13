@@ -15,8 +15,12 @@
  *
  * Module PUR : aucune I/O, aucune horloge implicite.
  */
-import type { LedgerStats, LedgerTrade } from '../services/paper-ledger.js';
+import { calendarPnl, type CalendarPnl, type LedgerStats, type LedgerTrade } from '../services/paper-ledger.js';
 import type { RiskLimits } from './config.js';
+
+// Calcul sur une liste complète (tests, scripts) ; le bot passe le PnL calendaire déjà agrégé
+// par le registre (ledger-store.ts), sans reparcourir l'historique à chaque passage.
+export { calendarPnl };
 
 export type RiskLayer = 'daily' | 'monthly' | 'drawdown' | 'total';
 
@@ -35,25 +39,6 @@ export interface RiskVerdict {
   pnlMonth: number;
 }
 
-/** PnL réalisé depuis le début du jour et du mois CALENDAIRES (UTC). */
-export function calendarPnl(trades: readonly LedgerTrade[], nowMs: number): { today: number; month: number } {
-  const d = new Date(nowMs);
-  const dayStart = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
-  const monthStart = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1);
-  let today = 0;
-  let month = 0;
-  for (const t of trades) {
-    if (t.status === 'open' || typeof t.pnl !== 'number') continue;
-    // Registre ancien ou édité à la main sans resolvedAt : même repli que computeStats
-    // (date d'ouverture), sinon le trade compterait pour la baisse/total mais pas pour le jour/mois.
-    const at = Date.parse(t.resolvedAt ?? t.openedAt ?? '');
-    if (!Number.isFinite(at)) continue;
-    if (at >= monthStart) month += t.pnl;
-    if (at >= dayStart) today += t.pnl;
-  }
-  return { today, month };
-}
-
 export function nextUtcMidnight(nowMs: number): number {
   const d = new Date(nowMs);
   return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1);
@@ -68,17 +53,18 @@ const usd = (x: number) => `${x.toFixed(2)} $`;
 
 /**
  * Verdict de la porte. `stats` : statistiques du registre (PnL cumulé, plus haut du PnL
- * cumulé) ; `trades` : pour les fenêtres calendaires. Couches testées de la plus durable
- * (perte totale) à la plus courte (jour), pour que la raison affichée soit la plus grave.
+ * cumulé) ; `calendar` : PnL du jour et du mois UTC, ou les trades d'où le calculer. Couches
+ * testées de la plus durable (perte totale) à la plus courte (jour), pour que la raison
+ * affichée soit la plus grave.
  */
 export function evaluateRisk(
   capital: number,
   stats: Pick<LedgerStats, 'pnl' | 'peakPnl'>,
-  trades: readonly LedgerTrade[],
+  calendar: readonly LedgerTrade[] | CalendarPnl,
   limits: RiskLimits,
   nowMs: number,
 ): RiskVerdict {
-  const { today, month } = calendarPnl(trades, nowMs);
+  const { today, month } = Array.isArray(calendar) ? calendarPnl(calendar, nowMs) : (calendar as CalendarPnl);
   const currentCapital = capital + stats.pnl;
   const peakCapital = capital + Math.max(0, stats.peakPnl, stats.pnl);
   const drawdown = peakCapital > 0 ? Math.max(0, (peakCapital - currentCapital) / peakCapital) : 0;

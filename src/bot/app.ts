@@ -5,8 +5,9 @@
  * (config, porte de risque, modèle, runner, registre, journal, mesure, Telegram, dashboard)
  * et gère le cycle de vie du process (démarrage, arrêt propre, plantages, chiens de garde).
  *
- * Données : tout vit dans ~/.polymarket (voir `dataPaths`). Le registre fv-ledger.json est
- * la seule source de vérité du PnL ; tout ce qui est affiché ou décidé en découle.
+ * Données : tout vit dans ~/.polymarket (voir `dataPaths`). Le registre fv-ledger.jsonl
+ * (journal append-only, ledger-store.ts) est la seule source de vérité du PnL ; tout ce qui
+ * est affiché ou décidé en découle, sans jamais reparcourir l'historique.
  *
  * Mode réel : NON implémenté. `DRY_RUN=false` est refusé au démarrage — aucun ordre ne
  * peut partir de ce programme, et il ne doit jamais faire croire le contraire.
@@ -22,7 +23,8 @@ import { isSpotCoin, type SpotCoin } from '../services/spot-price-service.js';
 import { MAX_VARIANCE_PCT } from '../services/stake-sizing.js';
 import { entryMinTauSec } from '../services/fair-value.js';
 import { getRoundMarketData } from '../services/round-market-data.js';
-import { fetchRoundOutcome, ledgerStatsShared, ledgerStatsSharedFor, readLedgerShared, type LedgerStats, type LedgerTrade } from '../services/paper-ledger.js';
+import { fetchRoundOutcome, type LedgerStats, type LedgerTrade } from '../services/paper-ledger.js';
+import { ledgerStore } from '../services/ledger-store.js';
 import { FairValueRunner, type ScannedMarket } from '../strategy/fair-value-runner.js';
 import { RoundDiscovery } from '../services/round-discovery.js';
 import { SpotStream } from '../services/spot-stream.js';
@@ -98,10 +100,13 @@ export async function main(env: Record<string, string | undefined> = process.env
     notify(msgAlert(text));
   };
 
-  const ledgerStats = (): LedgerStats => ledgerStatsShared(paths.ledger);
+  // Registre : statistiques tenues à jour événement par événement (O(1) par lecture).
+  const ledger = ledgerStore(paths.ledger);
+  ledger.setSessionStart(startTime);
+  const ledgerStats = (): LedgerStats => ledger.stats('total');
   /** Juste valeur seule (garde-fou, critères « avant le réel ») et récolte de fin de round seule. */
-  const fvStats = (): LedgerStats => ledgerStatsSharedFor(paths.ledger, 'fv');
-  const lateStats = (): LedgerStats => ledgerStatsSharedFor(paths.ledger, 'late');
+  const fvStats = (): LedgerStats => ledger.stats('fv');
+  const lateStats = (): LedgerStats => ledger.stats('late');
 
   // --- Rapports à la demande (/rapport, /backtest) : processus séparé, un à la fois ------
   const reports = new ReportRunner({ cwd: REPO_DIR, timeoutMs: 20 * 60_000, env: { ...process.env, ...env } });
@@ -131,8 +136,9 @@ export async function main(env: Record<string, string | undefined> = process.env
 
   function recordSessionHistory(): void {
     try {
-      const recs = (readLedgerShared(paths.ledger) ?? [])
-        .filter(t => t.status !== 'open' && typeof t.pnl === 'number' && Date.parse(t.resolvedAt ?? '') >= startTime)
+      // Derniers règlements gardés par le registre (512) : les 500 derniers de la session.
+      const recs = ledger.recentSettled()
+        .filter(t => Date.parse(t.resolvedAt ?? '') >= startTime)
         .slice(-500);
       if (!recs.length && !sessionTrades) return; // redémarrage sans activité : rien à garder
       addSession(createFairValueSession(startTime, config.capital, recs, sessionTrades));
@@ -167,6 +173,7 @@ export async function main(env: Record<string, string | undefined> = process.env
       log('WARN', `Alerte Telegram d'arrêt non envoyée (${stop.recentCrashes} arrêts sur erreur dans l'heure, déjà signalés).`);
     }
     recordSessionHistory();
+    ledger.close(); // rend le verrou d'écrivain du registre
     await Promise.race([
       Promise.all([telegram?.flush(), journal?.flush()]),
       new Promise(r => setTimeout(r, 5000)),
@@ -206,6 +213,33 @@ export async function main(env: Record<string, string | undefined> = process.env
   const capWarn = capitalWarning(config, MAX_VARIANCE_PCT);
   if (capWarn) log('WARN', capWarn);
 
+  // --- Registre : verrou d'écrivain unique, migration de l'ancien fv-ledger.json (vérifiée),
+  // réparation d'une dernière ligne coupée. Les incidents partent sur Telegram une fois connecté.
+  const ledgerAlerts: string[] = [];
+  const writer = ledger.openWriter();
+  const mig = writer.migration;
+  if (mig.status === 'migre') {
+    log('INFO', `🗃️ Registre migré vers ${paths.ledger} : ${mig.trades} trades, statistiques vérifiées identiques (ancien fichier conservé : ${mig.archivedAs})`);
+  } else if (mig.status === 'deja-migre') {
+    const m = `${paths.legacyLedger} et ${paths.ledger} présents (migration interrompue, ou retour à une ancienne version) : ${paths.ledger} fait foi, l'ancien fichier est conservé sous ${mig.archivedAs}. S'il contient des trades plus récents : arrêter le bot, archiver ${paths.ledger}, renommer cette copie en ${paths.legacyLedger}, redémarrer.`;
+    log('WARN', `Registre : ${m}`);
+    ledgerAlerts.push(`registre : ${m}`);
+  } else if (mig.status === 'illisible' || mig.status === 'ecart') {
+    log('ERROR', `Registre NON migré : ${mig.detail}. Aucune position ne sera ouverte avant réparation.`);
+    ledgerAlerts.push(`registre non migré — ${mig.detail}. Le bot n'ouvre aucune position avant réparation.`);
+  }
+  // Verrou tenu par un autre bot : ce processus n'écrit pas le registre, donc n'ouvre rien.
+  const ledgerLocked = !writer.ok && ledger.readable() ? (writer.reason ?? 'registre verrouillé') : null;
+  if (ledgerLocked) {
+    log('ERROR', `Registre : ${ledgerLocked}`);
+    ledgerAlerts.push(`registre : ${ledgerLocked} — ce bot n'ouvre aucune position`);
+  }
+  for (const issue of ledger.loadIssues) {
+    log('WARN', `Registre : ${issue}`);
+    ledgerAlerts.push(`registre : ${issue}`);
+  }
+  const ledgerBlock = (): string | null => (ledgerLocked ? 'registre tenu par un autre processus' : null);
+
   try {
     startDashboard(config.dashboard.port, { host: config.dashboard.host, token: config.dashboard.token ?? undefined });
     const exposed = config.dashboard.host === '0.0.0.0' && !!config.dashboard.token;
@@ -234,10 +268,10 @@ export async function main(env: Record<string, string | undefined> = process.env
   const lastEvals = new Map<string, LastEvaluation>();
   function publishState(): void {
     const st = ledgerStats();
-    const trades = readLedgerShared(paths.ledger) ?? [];
     const sh = shadow?.stats();
-    const risk = lastRisk ?? evaluateRisk(config.capital, st, trades, config.risk, Date.now());
-    const sessionSettled = trades.filter(t => t.status !== 'open' && typeof t.pnl === 'number' && Date.parse(t.resolvedAt ?? '') >= startTime);
+    const now = Date.now();
+    const risk = lastRisk ?? evaluateRisk(config.capital, st, ledger.calendarPnl(now), config.risk, now);
+    const sessionSettled = ledger.sessionSettled();
     const state: BotState = {
       startTime,
       capital: config.capital,
@@ -251,7 +285,7 @@ export async function main(env: Record<string, string | undefined> = process.env
         shadow: sh ? shadowLine(sh) : 'Modèle vs carnet : mesure non démarrée',
         goLive: goLiveLine(fvStats(), sh),
         shadowStats: sh ? { n: sh.n, tDiff: sh.tDiff } : null,
-        openPositions: trades.filter(t => t.status === 'open').slice(-20).map(t => ({
+        openPositions: ledger.openTrades().slice(-20).map(t => ({
           coin: t.coin, side: t.side, stake: t.stake, costPerShare: t.costPerShare, shares: t.shares, modelProb: t.modelProb, endMs: t.endMs, openedAt: t.openedAt,
         })),
         lastEvaluations: [...lastEvals.values()],
@@ -266,24 +300,27 @@ export async function main(env: Record<string, string | undefined> = process.env
         journal: !!journal,
         // Calculé à chaque publication (lectures pures) : avant, une valeur mémorisée seulement
         // quand un signal passait la porte de risque — donc figée pendant une pause ou un blocage levé.
-        entryBlock: shuttingDown ? 'arrêt du bot en cours' : (clockBlock() ?? guard.current() ?? sessionStop),
+        entryBlock: shuttingDown ? 'arrêt du bot en cours' : (clockBlock() ?? ledgerBlock() ?? guard.current() ?? sessionStop),
       },
-      session: { opened: sessionTrades, settled: sessionSettled.length, pnl: sessionSettled.reduce((a, t) => a + (t.pnl as number), 0) },
+      session: { opened: sessionTrades, settled: sessionSettled.n, pnl: sessionSettled.pnl },
     };
     dashboardEmitter.updateState(state);
   }
   let runnerRef: FairValueRunner | null = null;
   const spotStreamStatus = (): 'disabled' | 'live' | 'stale' =>
     !spotStream ? 'disabled' : spotStream.isConnected() && config.coins.some(c => spotStream?.price(c)) ? 'live' : 'stale';
-  const freshRisk = (): RiskVerdict => evaluateRisk(config.capital, ledgerStats(), readLedgerShared(paths.ledger) ?? [], config.risk, Date.now());
-  const openPositions = (): LedgerTrade[] => (readLedgerShared(paths.ledger) ?? []).filter(t => t.status === 'open');
+  const freshRisk = (): RiskVerdict => {
+    const now = Date.now();
+    return evaluateRisk(config.capital, ledgerStats(), ledger.calendarPnl(now), config.risk, now);
+  };
+  const openPositions = (): LedgerTrade[] => ledger.openTrades();
 
   // --- Porte de risque (registre) -------------------------------------------------------
   let riskLoggedAt = 0;
   let riskLoggedLayer: string | null = null;
   function canTrade(): boolean {
     const now = Date.now();
-    const v = evaluateRisk(config.capital, ledgerStats(), readLedgerShared(paths.ledger) ?? [], config.risk, now);
+    const v = evaluateRisk(config.capital, ledgerStats(), ledger.calendarPnl(now), config.risk, now);
     lastRisk = v;
     if (!v.allowed) {
       // Une ligne au changement de couche, puis une par heure (une pause peut durer des jours).
@@ -293,7 +330,7 @@ export async function main(env: Record<string, string | undefined> = process.env
         log(v.layer === 'daily' ? 'WARN' : 'ERROR', `⏸️ Porte de risque : ${v.reason}${v.until ? ` (reprise ${new Date(v.until).toISOString()})` : ''}`);
       }
       alertOnce(`risk-${v.layer}`, v.layer === 'drawdown'
-        ? `${v.reason} — pour reprendre : ARRÊTER le bot, attendre qu'aucune position ne soit ouverte, archiver ~/.polymarket/fv-ledger.json, puis redémarrer`
+        ? `${v.reason} — pour reprendre : ARRÊTER le bot, attendre qu'aucune position ne soit ouverte, archiver ~/.polymarket/fv-ledger.jsonl, puis redémarrer`
         : v.layer === 'total' ? `${v.reason} (redémarrage manuel et nouveau registre requis)` : v.reason as string);
     } else if (riskLoggedLayer) {
       riskLoggedLayer = null;
@@ -390,7 +427,7 @@ export async function main(env: Record<string, string | undefined> = process.env
           const risk = freshRisk();
           return {
             uptimeSec: (now - startTime) / 1000, capital: config.capital, stats: ledgerStats(), fv: fvStats(), late: config.harvest.enabled ? lateStats() : undefined, risk,
-            entryBlock: shuttingDown ? 'arrêt du bot en cours' : (clockBlock() ?? guard.current() ?? sessionStop),
+            entryBlock: shuttingDown ? 'arrêt du bot en cours' : (clockBlock() ?? ledgerBlock() ?? guard.current() ?? sessionStop),
             positions: openPositions(),
             lastFullPassAgoSec: runnerRef?.lastFullPassAt ? (now - runnerRef.lastFullPassAt) / 1000 : null,
             lastMarketsFoundAgoSec: runnerRef?.lastMarketsFoundAt ? (now - runnerRef.lastMarketsFoundAt) / 1000 : null,
@@ -473,6 +510,7 @@ export async function main(env: Record<string, string | undefined> = process.env
     + `mélange modèle ${fv.blendModel} / carnet ${fv.blendMarket}, sortie si bid net > p + ${config.exitEdge}, scrutation ${config.pollMs / 1000} s, `
     + `coins ${config.coins.join(', ')}`);
   await setupTelegram();
+  for (const a of ledgerAlerts) notify(msgAlert(a)); // une fois, au démarrage
 
   const discovery = new RoundDiscovery();
   // Empreinte du modèle MESURÉ (sans le mélange) : si elle change, « modèle vs carnet » repart de zéro.
@@ -523,15 +561,15 @@ export async function main(env: Record<string, string | undefined> = process.env
       shadowRef.observe(r);
       lastEvals.set(r.coin, { coin: r.coin, t: r.t, tau: r.tau, pUp: r.pUp, upAsk: r.upAsk, downAsk: r.downAsk, act: r.act, side: r.side, reason });
     },
-    entryBlock: () => (shuttingDown ? 'arrêt du bot en cours' : null) ?? clockBlock() ?? perfGuard(),
+    entryBlock: () => (shuttingDown ? 'arrêt du bot en cours' : null) ?? clockBlock() ?? ledgerBlock() ?? perfGuard(),
     harvest: config.harvest,
     // La récolte a son propre garde-fou : l'arrêt de la juste valeur ne la bloque pas (et inversement).
-    harvestBlock: () => (shuttingDown ? 'arrêt du bot en cours' : null) ?? clockBlock() ?? harvestPerfGuard(),
+    harvestBlock: () => (shuttingDown ? 'arrêt du bot en cours' : null) ?? clockBlock() ?? ledgerBlock() ?? harvestPerfGuard(),
     onRiskStop: reason => {
       const streak = /pertes consécutives/.test(reason);
       alertOnce(streak ? 'risk-streak' : 'risk-stake-drawdown', streak
         ? `mise suspendue après une série de pertes (${reason.slice(0, 120)}) — reprise automatique quand ces pertes auront plus de 6 h`
-        : `mise suspendue : baisse ≥ 20 % depuis le plus haut. Arrêt de risque maintenu jusqu'à décision manuelle (analyser le journal ; pour repartir : arrêter le bot, archiver ~/.polymarket/fv-ledger.json une fois les positions réglées, redémarrer)`);
+        : `mise suspendue : baisse ≥ 20 % depuis le plus haut. Arrêt de risque maintenu jusqu'à décision manuelle (analyser le journal ; pour repartir : arrêter le bot, archiver ~/.polymarket/fv-ledger.jsonl une fois les positions réglées, redémarrer)`);
     },
     onTradeOpened: () => { sessionTrades++; publishState(); },
     onTradeClosed: (_t: LedgerTrade) => publishState(),
@@ -553,7 +591,7 @@ export async function main(env: Record<string, string | undefined> = process.env
   setInterval(() => {
     const idleMin = (Date.now() - runner.lastFullPassAt) / 60_000;
     const stuckMin = Math.max(3, (2 * config.pollMs + 60_000) / 60_000);
-    if (runner.lastFullPassAt && idleMin > stuckMin && readLedgerShared(paths.ledger) !== null) {
+    if (runner.lastFullPassAt && idleMin > stuckMin && ledger.readable()) {
       log('ERROR', `🐕 Chien de garde : aucun passage complet de la stratégie depuis ${idleMin.toFixed(1)} min`);
       alertOnce('watchdog-stuck', `la stratégie semble bloquée (aucun passage terminé depuis ${idleMin.toFixed(0)} min) — redémarrer le bot (pm2 restart)`);
     }

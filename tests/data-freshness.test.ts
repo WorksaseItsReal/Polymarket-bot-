@@ -23,7 +23,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DEFAULT_FAIR_VALUE_CONFIG, decide } from '../src/services/fair-value.ts';
 import { FairValueRunner } from '../src/strategy/fair-value-runner.ts';
-import { computeStats, loadLedger, type LedgerTrade } from '../src/services/paper-ledger.ts';
+import { computeStats, type LedgerTrade } from '../src/services/paper-ledger.ts';
+import { loadLedger } from '../src/services/ledger-store.ts';
 
 // ---------------------------------------------------------------------------
 // 1. Asks du carnet : absent → null, jamais un prix inventé

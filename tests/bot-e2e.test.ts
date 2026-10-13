@@ -13,7 +13,8 @@ import { spawn } from 'node:child_process';
 import { existsSync, mkdtempSync, readdirSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { saveLedger, type LedgerTrade } from '../src/services/paper-ledger.ts';
+import type { LedgerTrade } from '../src/services/paper-ledger.ts';
+import { loadLedger, writeLegacyLedger } from '../src/services/ledger-store.ts';
 
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
@@ -77,9 +78,9 @@ test('bot complet sur faux réseau : évalue, journalise, parie et règle, dashb
   assert.ok(lines.every(r => typeof r.slug === 'string' && 'pRaw' in r && r.zs === 1), 'champs du journal');
   assert.ok(lines.some(r => typeof r.ps === 'number' && r.ps > 0), 'prix à battre officiel lu en direct (faux Gamma : publié 20 s après l\'ouverture)');
 
-  assert.ok(existsSync(join(poly, 'fv-ledger.json')) || lines.every(r => r.act !== 'buy'));
-  if (existsSync(join(poly, 'fv-ledger.json'))) {
-    const trades = JSON.parse(readFileSync(join(poly, 'fv-ledger.json'), 'utf8')).trades as Array<Record<string, number | string | null>>;
+  assert.ok(existsSync(join(poly, 'fv-ledger.jsonl')) || lines.every(r => r.act !== 'buy'));
+  if (existsSync(join(poly, 'fv-ledger.jsonl'))) {
+    const trades = loadLedger(join(poly, 'fv-ledger.jsonl')) as unknown as Array<Record<string, number | string | null>>;
     assert.equal(new Set(trades.map(t => t.id)).size, trades.length, 'un pari par round');
     for (const t of trades) {
       assert.ok(['open', 'won', 'lost', 'sold'].includes(String(t.status)));
@@ -155,7 +156,8 @@ test('porte de risque câblée : registre à −26 % du plus haut → aucun pari
     id: 'seed-risk', slug: 'btc-updown-5m-1790000100', coin: 'BTC', side: 'UP', stake: 260, costPerShare: 0.5, shares: 520,
     modelProb: 0.7, edge: 0.1, openedAt: at, endMs: Date.now() - 600_000, status: 'lost', pnl: -260, resolvedAt: at,
   };
-  saveLedger(join(home, '.polymarket', 'fv-ledger.json'), [lost]);
+  // Ancien format : le bot le migre au démarrage (fv-ledger.jsonl), ancien fichier conservé.
+  writeLegacyLedger(join(home, '.polymarket', 'fv-ledger.json'), [lost]);
   const child = spawn(process.execPath, ['--import', 'tsx', '--import', './tests/fixtures/fake-live-net.ts', 'bot-with-dashboard.ts'], {
     env: {
       ...process.env, HOME: home, DOTENV_CONFIG_PATH: '/dev/null', DRY_RUN: 'true', PAPER_CAPITAL: '1000', FV_HARVEST: 'true', FV_POLL_SEC: '5', FV_SPOT_STREAM: 'false',
@@ -186,8 +188,9 @@ test('porte de risque câblée : registre à −26 % du plus haut → aucun pari
   const evals = (state.fairValue as { lastEvaluations: Array<{ reason: string; act: string }> }).lastEvaluations;
   assert.ok(evals.length >= 1, 'évaluations publiées malgré la pause (la mesure continue)');
   assert.ok(evals.some(e => /signal (UP|DOWN) ignoré : entrées bloquées/.test(e.reason)), `raison du refus visible : ${JSON.stringify(evals.map(e => e.reason))}`);
-  const trades = JSON.parse(readFileSync(join(home, '.polymarket', 'fv-ledger.json'), 'utf8')).trades as unknown[];
+  const trades = loadLedger(join(home, '.polymarket', 'fv-ledger.jsonl')) as unknown[];
   assert.equal(trades.length, 1, 'aucun nouveau pari pendant la pause');
+  assert.ok(!existsSync(join(home, '.polymarket', 'fv-ledger.json')), 'ancien registre migré (conservé renommé)');
   const tg = readFileSync(tgLog, 'utf8').split('\n').filter(Boolean).map(l => JSON.parse(l) as { text: string });
   assert.ok(tg.some(m => /ALERTE.*baisse de 26[.,]0 %.*ARRÊTER le bot/s.test(m.text)), `alerte Telegram attendue : ${tg.map(m => m.text.slice(0, 60)).join(' | ')}`);
   assert.doesNotMatch(out, /TypeError|ReferenceError|Rejet de promesse non géré|Exception non rattrapée/, out.slice(-3000));
@@ -265,7 +268,7 @@ test('flux spot temps réel (faux WebSocket Binance) : santé « connecté », s
   assert.equal(badLate, undefined, JSON.stringify(badLate));
   const harvestBuys = late.filter(r => r.hv === true);
   if (process.env.SHOW_HARVEST) console.log('récolte e2e :', harvestBuys.map(r => `${r.coin} τ${r.tau} ${r.side} ${r.upAsk}/${r.downAsk} hs${r.hs}`));
-  const trades = existsSync(join(poly, 'fv-ledger.json')) ? (JSON.parse(readFileSync(join(poly, 'fv-ledger.json'), 'utf8')).trades as Array<{ openedAt: string; endMs: number }>) : [];
+  const trades = (loadLedger(join(poly, 'fv-ledger.jsonl')) ?? []) as Array<{ openedAt: string; endMs: number }>;
   // Juste valeur : jamais dans la dernière minute. Récolte de fin de round : seulement entre 30 et ~2 s de la fin.
   for (const t of trades as Array<{ openedAt: string; endMs: number; strategy?: string }>) {
     const tau = (t.endMs - Date.parse(t.openedAt)) / 1000;

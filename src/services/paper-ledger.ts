@@ -1,5 +1,5 @@
 /**
- * paper-ledger.ts — registre des trades paper de la stratégie juste valeur, et
+ * paper-ledger.ts — modèle du registre des trades paper (types, statistiques PURES) et
  * résolution des rounds « Up/Down 5 min » via l'API Gamma.
  *
  * Pourquoi un registre propre : le PnL réalisé était calculé par des scripts externes
@@ -8,18 +8,19 @@
  * source de vérité de la stratégie : un trade y entre à l'ouverture, en sort résolu
  * (gagné / perdu / revendu), et toutes les statistiques en dérivent.
  *
+ * Le FICHIER (journal append-only fv-ledger.jsonl, statistiques incrémentales, migration de
+ * l'ancien fv-ledger.json) est dans ledger-store.ts ; ici, rien que du calcul sans I/O :
+ * `computeStats` sur une liste complète reste la référence que le registre incrémental doit
+ * reproduire (tests d'équivalence, vérification de la migration).
+ *
  * Résolution (chemin vérifié, cf. docs/backtest/resolve.py) :
  *   GET https://gamma-api.polymarket.com/events?slug=<coin>-updown-5m-<slot>
  *   → la réponse doit porter EXACTEMENT le slug demandé (le filtre `markets?condition_id=`
  *     est ignoré par l'API et renvoyait un autre marché) ;
  *   → marché `closed` ET prix de sortie ≥ 0,99 d'un côté. Un marché ouvert affiche des
  *     `outcomePrices` provisoires (ex. 0,5/0,5) : ce n'est PAS un résultat.
- *
- * Écriture atomique (fichier temporaire + rename) ; fichier illisible → jamais écrasé.
  */
 
-import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
-import { dirname } from 'node:path';
 import { clusteredMeanT, slotKey } from '../analysis/stats.js';
 
 export type LedgerSide = 'UP' | 'DOWN';
@@ -67,123 +68,14 @@ export interface LedgerTrade {
   outcomeUpWon?: boolean;
 }
 
+/** Ancien format (fv-ledger.json, un seul JSON réécrit à chaque modification) : migration,
+ *  export pour revenir à une version antérieure du bot. */
 export interface LedgerFile {
   version: 1;
   trades: LedgerTrade[];
 }
 
-// ---------------------------------------------------------------------------
-// Fichier
-// ---------------------------------------------------------------------------
-
-// Le registre est lu plusieurs fois par évaluation (stats, risque, garde-fous) : on ne le
-// relit et ne le re-parse que s'il a changé (date de modification + taille).
-const memo = new Map<string, { mtimeMs: number; size: number; trades: LedgerTrade[] }>();
-
-/** Gèle la copie partagée : une modification accidentelle corromprait le cache de tous les
- *  lecteurs ; en mode strict elle lève une erreur au lieu de passer inaperçue. */
-function freezeShared(trades: LedgerTrade[]): LedgerTrade[] {
-  for (const t of trades) if (t && typeof t === 'object') Object.freeze(t);
-  return Object.freeze(trades) as LedgerTrade[];
-}
-
-/**
- * Version PARTAGÉE (en cache) du registre : à ne JAMAIS modifier. [] si absent ; null si
- * présent mais illisible.
- */
-export function readLedgerShared(path: string): readonly LedgerTrade[] | null {
-  if (!existsSync(path)) {
-    memo.delete(path);
-    return [];
-  }
-  let st: { mtimeMs: number; size: number };
-  try {
-    st = statSync(path);
-  } catch {
-    return null;
-  }
-  const hit = memo.get(path);
-  if (hit && hit.mtimeMs === st.mtimeMs && hit.size === st.size) return hit.trades;
-  try {
-    const data = JSON.parse(readFileSync(path, 'utf-8')) as Partial<LedgerFile>;
-    if (!Array.isArray(data?.trades)) {
-      memo.delete(path);
-      return null;
-    }
-    const trades = freezeShared(data.trades);
-    memo.set(path, { mtimeMs: st.mtimeMs, size: st.size, trades });
-    return trades;
-  } catch {
-    memo.delete(path);
-    return null;
-  }
-}
-
-const statsMemo = new WeakMap<readonly LedgerTrade[], LedgerStats>();
-
-/**
- * Statistiques du registre partagé, recalculées seulement quand le fichier change (la copie
- * partagée est immuable : son identité suffit comme clé). [] si absent ou illisible.
- */
-export function ledgerStatsShared(path: string): LedgerStats {
-  const trades = readLedgerShared(path) ?? [];
-  let s = statsMemo.get(trades);
-  if (!s) {
-    s = computeStats(trades);
-    statsMemo.set(trades, s);
-  }
-  return s;
-}
-
 export const strategyOf = (t: Pick<LedgerTrade, 'strategy'>): StrategyKey => (t.strategy === 'late' ? 'late' : 'fv');
-
-const stratMemo = new WeakMap<readonly LedgerTrade[], Map<StrategyKey, LedgerStats>>();
-
-/** Statistiques d'UNE stratégie (mêmes règles de cache que `ledgerStatsShared`). Les limites de
- *  risque et le capital restent calculés sur l'ensemble du registre. */
-export function ledgerStatsSharedFor(path: string, key: StrategyKey): LedgerStats {
-  const trades = readLedgerShared(path) ?? [];
-  let m = stratMemo.get(trades);
-  if (!m) stratMemo.set(trades, (m = new Map()));
-  let s = m.get(key);
-  if (!s) {
-    s = computeStats(trades.filter(t => t && strategyOf(t) === key));
-    m.set(key, s);
-  }
-  return s;
-}
-
-/** Copie modifiable du registre. [] si absent ; null si illisible (ne rien écrire alors). */
-export function loadLedger(path: string): LedgerTrade[] | null {
-  const shared = readLedgerShared(path);
-  return shared === null ? null : structuredClone(shared as LedgerTrade[]);
-}
-
-export function saveLedger(path: string, trades: LedgerTrade[]): void {
-  mkdirSync(dirname(path), { recursive: true });
-  const tmp = `${path}.tmp-${process.pid}`;
-  const body: LedgerFile = { version: 1, trades };
-  // Écriture + fsync AVANT le renommage : un arrêt brutal ne peut pas laisser un registre
-  // vide ou tronqué (le renommage est atomique, le contenu est déjà sur disque).
-  const fd = openSync(tmp, 'w');
-  try {
-    // writeFileSync sur un descripteur boucle jusqu'à tout écrire (writeSync seul peut
-    // écrire partiellement, ex. disque plein → JSON tronqué renommé sur le bon registre).
-    // JSON compact : ~40 % plus petit qu'indenté, donc écriture et relecture plus rapides
-    // quand le registre grossit (lecture humaine : scripts/analysis/ledger.ts).
-    writeFileSync(fd, JSON.stringify(body));
-    fsyncSync(fd);
-  } finally {
-    closeSync(fd);
-  }
-  renameSync(tmp, path);
-  try {
-    const st = statSync(path);
-    memo.set(path, { mtimeMs: st.mtimeMs, size: st.size, trades: freezeShared(structuredClone(trades)) });
-  } catch {
-    memo.delete(path);
-  }
-}
 
 // ---------------------------------------------------------------------------
 // Logique pure
@@ -223,10 +115,29 @@ export interface LedgerStats {
   peakPnl: number;
 }
 
+/** Trade réglé avec un PnL utilisable : seul ce qui compte dans les statistiques. */
+export const isSettled = (t: Pick<LedgerTrade, 'status' | 'pnl'>): boolean =>
+  t.status !== 'open' && typeof t.pnl === 'number' && Number.isFinite(t.pnl);
+
+/** Côté choisi gagnant au ROUND ? (won/lost : par définition ; reventes : si l'issue a été
+ *  relevée ; sinon null = inconnu, hors calibration). */
+export function sideWon(t: Pick<LedgerTrade, 'status' | 'side' | 'outcomeUpWon'>): boolean | null {
+  if (t.status === 'won') return true;
+  if (t.status === 'lost') return false;
+  if (typeof t.outcomeUpWon === 'boolean') return t.outcomeUpWon === (t.side === 'UP');
+  return null;
+}
+
+/** Groupe du t (créneau de 5 min) : les cryptos d'un même round sont corrélées. */
+export const clusterKeyOf = (t: Pick<LedgerTrade, 'slotSec' | 'slug'>): string => String(t.slotSec ?? slotKey(t.slug));
+
+/** Clé d'ordre des résolutions (date de règlement, sinon d'ouverture pour un registre ancien). */
+export const settleOrderKey = (t: Pick<LedgerTrade, 'resolvedAt' | 'openedAt'>): string => t.resolvedAt ?? t.openedAt;
+
 export function computeStats(trades: readonly LedgerTrade[]): LedgerStats {
   const resolved = trades
-    .filter(t => t.status !== 'open' && typeof t.pnl === 'number' && Number.isFinite(t.pnl))
-    .sort((a, b) => (a.resolvedAt ?? a.openedAt).localeCompare(b.resolvedAt ?? b.openedAt));
+    .filter(isSettled)
+    .sort((a, b) => settleOrderKey(a).localeCompare(settleOrderKey(b)));
   const open = trades.filter(t => t.status === 'open');
   const pnls = resolved.map(t => t.pnl as number);
   const n = resolved.length;
@@ -236,17 +147,11 @@ export function computeStats(trades: readonly LedgerTrade[]): LedgerStats {
 
   // t groupé par créneau : les paris sur plusieurs cryptos d'un même round de 5 min sont
   // corrélés ; les compter comme indépendants gonflerait le t (critère « Avant le réel »).
-  const tStat = clusteredMeanT(resolved.map(t => ({ key: String(t.slotSec ?? slotKey(t.slug)), x: t.pnl as number }))).t;
+  const tStat = clusteredMeanT(resolved.map(t => ({ key: clusterKeyOf(t), x: t.pnl as number }))).t;
 
   let lossStreak = 0;
   for (let i = pnls.length - 1; i >= 0 && pnls[i] < 0; i--) lossStreak++;
   // Côté gagnant connu ? (won/lost : par définition ; reventes : si l'issue a été relevée)
-  const sideWon = (t: LedgerTrade): boolean | null => {
-    if (t.status === 'won') return true;
-    if (t.status === 'lost') return false;
-    if (typeof t.outcomeUpWon === 'boolean') return t.outcomeUpWon === (t.side === 'UP');
-    return null;
-  };
   const calib = resolved.filter(t => sideWon(t) !== null);
 
   let cum = 0;
@@ -285,12 +190,39 @@ export function computeStats(trades: readonly LedgerTrade[]): LedgerStats {
  */
 export function recentLossStreak(trades: readonly LedgerTrade[], nowMs: number, windowMs: number): number {
   const recent = trades
-    .filter(t => t.status !== 'open' && typeof t.pnl === 'number' && Number.isFinite(t.pnl)
-      && nowMs - Date.parse(t.resolvedAt ?? t.openedAt) <= windowMs)
-    .sort((a, b) => (a.resolvedAt ?? a.openedAt).localeCompare(b.resolvedAt ?? b.openedAt));
+    .filter(t => isSettled(t) && nowMs - Date.parse(settleOrderKey(t)) <= windowMs)
+    .sort((a, b) => settleOrderKey(a).localeCompare(settleOrderKey(b)));
   let streak = 0;
   for (let i = recent.length - 1; i >= 0 && (recent[i].pnl as number) < 0; i--) streak++;
   return streak;
+}
+
+export interface CalendarPnl {
+  today: number;
+  month: number;
+}
+
+/** Début du jour et du mois CALENDAIRES (UTC) contenant `ms`. */
+export function utcDayMonth(ms: number): { day: number; month: number } {
+  const d = new Date(ms);
+  return { day: Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()), month: Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1) };
+}
+
+/** PnL réalisé depuis le début du jour et du mois CALENDAIRES (UTC) — porte de risque. */
+export function calendarPnl(trades: readonly LedgerTrade[], nowMs: number): CalendarPnl {
+  const { day: dayStart, month: monthStart } = utcDayMonth(nowMs);
+  let today = 0;
+  let month = 0;
+  for (const t of trades) {
+    if (t.status === 'open' || typeof t.pnl !== 'number') continue;
+    // Registre ancien ou édité à la main sans resolvedAt : même repli que computeStats
+    // (date d'ouverture), sinon le trade compterait pour la baisse/total mais pas pour le jour/mois.
+    const at = Date.parse(t.resolvedAt ?? t.openedAt ?? '');
+    if (!Number.isFinite(at)) continue;
+    if (at >= monthStart) month += t.pnl;
+    if (at >= dayStart) today += t.pnl;
+  }
+  return { today, month };
 }
 
 // ---------------------------------------------------------------------------

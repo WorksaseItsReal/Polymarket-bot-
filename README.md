@@ -163,7 +163,8 @@ src/services/
   spot-stream.ts               flux WebSocket Binance + contrôle d'horloge
   round-discovery.ts           rounds par slug (Gamma)
   clob-book.ts                 carnet CLOB (lecture publique, sans SDK ni clé)
-  paper-ledger.ts              registre papier (source de vérité), résolution Gamma
+  paper-ledger.ts              modèle du registre papier (statistiques pures), résolution Gamma
+  ledger-store.ts              registre papier : journal append-only, statistiques incrémentales, migration
   decision-journal.ts          journal des évaluations (jsonl, compression, rétention)
   stake-sizing.ts              mise (Kelly ×0,25, plafonds, modérateurs)
   telegram.ts / telegram-messages.ts, crash-guard.ts, redact.ts, doctor.ts
@@ -231,7 +232,8 @@ Tout vit dans **`~/.polymarket/`** (`/root/.polymarket/`) :
 
 | Fichier | Contenu | Statut |
 |---|---|---|
-| `fv-ledger.json` | **Registre papier — SOURCE DE VÉRITÉ.** Un trade par round : mise, coût par part, `modelProb`, statut (`open`/`won`/`lost`/`sold`), PnL, horodatages. Le bot y lit PnL, baisse, série de pertes, positions ouvertes ; il résout lui-même les rounds (Gamma). Écriture atomique, jamais écrasé s'il est illisible (le bot n'ouvre alors plus rien). | **Autorité** |
+| `fv-ledger.jsonl` | **Registre papier — SOURCE DE VÉRITÉ.** Journal append-only : une ligne par événement (ouverture d'un trade, règlement, revente…), un trade par round et par stratégie : mise, coût par part, `modelProb`, statut (`open`/`won`/`lost`/`sold`), PnL, horodatages. Le bot en tient PnL, baisse, série de pertes, positions ouvertes à jour événement par événement (aucune relecture de l'historique) ; il résout lui-même les rounds (Gamma). Chaque ajout est synchronisé sur disque ; une ligne invalide au milieu rend le registre illisible (le bot n'ouvre alors plus rien, fichier jamais modifié) ; une dernière ligne coupée par un arrêt brutal est mise de côté (`.ligne-coupee-<date>`) et signalée. Un seul bot l'écrit (verrou `fv-ledger.jsonl.lock`). | **Autorité** |
+| `fv-ledger.json`, `fv-ledger.json.migre-<date>` | Ancien registre (un seul JSON réécrit à chaque trade). Migré au premier démarrage de cette version, après vérification que toutes les statistiques rejouées sont identiques (sinon : rien n'est migré, le bot n'ouvre aucune position et alerte) ; conservé renommé `.migre-<date>`. Répétition sur une copie : `npm run ledger:check-migration -- <copie>`. Retour à une version antérieure : `npx tsx scripts/analysis/ledger.ts --export-json` (bot arrêté) reconstruit `fv-ledger.json`. | Archive |
 | `journal/decisions-*.jsonl(.gz)` | Toutes les évaluations (pari ou abstention), 30 jours (jours révolus compressés), pour `fv-report.ts`. | Analyse |
 | `fv-shadow.json` | Agrégats « modèle vs carnet ». Repart de zéro si l'empreinte du modèle change. | Mesure continue |
 | `fv-guard.json` | Présent = **arrêt de sécurité actif** (perte significative). Le supprimer pour reprendre. | Garde-fou |
@@ -245,7 +247,7 @@ Tout vit dans **`~/.polymarket/`** (`/root/.polymarket/`) :
 ## 4. Lire son PnL, Telegram, dashboard
 
 ```bash
-npx tsx scripts/analysis/ledger.ts          # bilan + derniers trades du registre
+npx tsx scripts/analysis/ledger.ts          # bilan + derniers trades du registre (--export-json : ancien format)
 npx tsx scripts/analysis/fv-report.ts --days 7   # le modèle a-t-il un edge ? (sections 0 à 4)
 ```
 

@@ -10,12 +10,11 @@ import { join } from 'node:path';
 import {
   computeStats,
   fetchRoundOutcome,
-  loadLedger,
   parseGammaEvent,
-  saveLedger,
   settlePnl,
   type LedgerTrade,
 } from '../src/services/paper-ledger.ts';
+import { loadLedger, saveLedger } from '../src/services/ledger-store.ts';
 
 const SLUG = 'btc-updown-5m-1790000100';
 
@@ -127,7 +126,7 @@ test('série de pertes récente : les pertes de plus de 6 h ne comptent plus (pa
 });
 
 test('lecture en cache : relue seulement si le fichier change ; la copie modifiable n\'altère pas le cache', async () => {
-  const { readLedgerShared } = await import('../src/services/paper-ledger.ts');
+  const { readLedgerShared } = await import('../src/services/ledger-store.ts');
   const dir = mkdtempSync(join(tmpdir(), 'ledger-memo-'));
   const path = join(dir, 'fv-ledger.json');
   saveLedger(path, [trade({ id: 'a' })]);
@@ -138,7 +137,7 @@ test('lecture en cache : relue seulement si le fichier change ; la copie modifia
   assert.notEqual(readLedgerShared(path)![0].stake, 999, 'une copie modifiée ne pollue pas le cache');
   saveLedger(path, [trade({ id: 'a' }), trade({ id: 'b' })]);
   assert.equal(readLedgerShared(path)!.length, 2, 'écriture propre → cache à jour');
-  writeFileSync(path, JSON.stringify({ version: 1, trades: [] }));
+  writeFileSync(path, '');
   assert.equal(readLedgerShared(path)!.length, 0, 'modification externe détectée');
 });
 
@@ -157,7 +156,7 @@ test('calibration : issue du round (revente comprise si connue) ; outcomes illis
 });
 
 test('registre partagé : gelé (aucune modification accidentelle), stats recalculées seulement si le fichier change', async () => {
-  const { ledgerStatsShared, readLedgerShared } = await import('../src/services/paper-ledger.ts');
+  const { ledgerStatsShared, readLedgerShared } = await import('../src/services/ledger-store.ts');
   const path = join(mkdtempSync(join(tmpdir(), 'ledger-')), 'fv-ledger.json');
   saveLedger(path, [trade({ id: 'a' })]);
   const shared = readLedgerShared(path)!;

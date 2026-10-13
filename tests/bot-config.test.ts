@@ -78,7 +78,8 @@ test('capital face au minimum d\'ordre : trop petit, à peine, suffisant', () =>
 
 test('chemins des données : tous sous le dossier d\'état', () => {
   const p = dataPaths('/srv/poly');
-  assert.equal(p.ledger, '/srv/poly/fv-ledger.json');
+  assert.equal(p.ledger, '/srv/poly/fv-ledger.jsonl');
+  assert.equal(p.legacyLedger, '/srv/poly/fv-ledger.json');
   assert.equal(p.journalDir, '/srv/poly/journal');
   assert.ok(Object.values(p).every(x => x.startsWith('/srv/poly/')));
 });

@@ -12,8 +12,9 @@
  *   3. sorties anticipées si le marché paie plus que la position ne vaut ;
  *   4. nouvelles entrées : au plus une par round, décision `decide()`, mise
  *      `computeStake()`, exécution simulée au VWAP du carnet, re-contrôle de l'edge.
- * Le registre (fv-ledger.json) est écrit AVANT toute annonce : un trade non enregistré
- * n'est jamais notifié.
+ * Le registre (fv-ledger.jsonl, ledger-store.ts) est écrit AVANT toute annonce : un trade
+ * non enregistré n'est jamais notifié. Chaque modification y ajoute UNE ligne (ouverture,
+ * règlement, revente…) : aucun travail proportionnel à l'historique pendant un passage.
  */
 
 import {
@@ -34,12 +35,6 @@ import {
   type FairValueConfig,
 } from '../services/fair-value.js';
 import {
-  ledgerStatsShared,
-  ledgerStatsSharedFor,
-  loadLedger,
-  readLedgerShared,
-  recentLossStreak,
-  saveLedger,
   settlePnl,
   strategyOf,
   type LedgerStats,
@@ -47,6 +42,7 @@ import {
   type RoundOutcome,
   type StrategyKey,
 } from '../services/paper-ledger.js';
+import { ledgerStore, type LedgerStore } from '../services/ledger-store.js';
 import type { DecisionRecord } from '../services/decision-journal.js';
 import type { RoundMarketData } from '../services/round-market-data.js';
 import { computeStake, MAX_VARIANCE_PCT } from '../services/stake-sizing.js';
@@ -199,23 +195,26 @@ export class FairValueRunner {
   private ledgerBrokenWarned = false;
   /** Séries « favori bloqué à 0,99 » par marché (récolte de fin de round). */
   private readonly streaks = new FavoriteStreaks();
+  /** Registre partagé du processus (journal append-only, statistiques incrémentales). */
+  private readonly store: LedgerStore;
 
   constructor(deps: RunnerDeps) {
     this.d = deps;
-    // Après un redémarrage, ne jamais rejouer un round déjà joué.
-    for (const t of this.trades() ?? []) this.traded.add(t.id);
+    this.store = ledgerStore(deps.ledgerPath);
+    // Après un redémarrage, ne jamais rejouer un round déjà joué (un round ne se joue que
+    // pendant ses 5 minutes : les identifiants des 7 derniers jours suffisent).
+    if (this.trades() !== null) for (const id of this.store.recentIds()) this.traded.add(id);
   }
 
   // ---------------------------------------------------------------- registre
 
   /**
-   * Trades du registre, en LECTURE SEULE (copie partagée et gelée, relue seulement si le
-   * fichier change) ; null si le fichier est illisible (alerte une seule fois). Avant :
-   * copie profonde à chaque lecture — 33 ms par passage à 5 000 trades, 190 ms à 20 000,
-   * boucle d'événements bloquée d'autant.
+   * Trades VIVANTS du registre (positions ouvertes, reventes dont l'issue du round reste à
+   * relever), en lecture seule ; null si le registre est illisible (alerte une seule fois).
+   * L'historique réglé n'est jamais parcouru : les statistiques sont tenues par le registre.
    */
   private trades(): readonly LedgerTrade[] | null {
-    const t = readLedgerShared(this.d.ledgerPath);
+    const t = this.store.liveTrades();
     if (t === null) {
       if (!this.ledgerBrokenWarned) {
         this.ledgerBrokenWarned = true;
@@ -228,27 +227,27 @@ export class FairValueRunner {
     return t;
   }
 
-  private update(fn: (trades: LedgerTrade[]) => void): boolean {
-    if (this.trades() === null) return false; // illisible : alerte, et surtout ne rien écraser
-    const trades = loadLedger(this.d.ledgerPath); // copie modifiable, seulement pour écrire
-    if (trades === null) return false;
-    fn(trades);
+  /**
+   * Écrit au registre (une ligne ajoutée). `saved` faux : registre illisible (rien n'est écrit,
+   * alerte) ou écriture impossible (journalisée). `result` : ce que renvoie l'opération.
+   */
+  private write<T>(op: (store: LedgerStore) => T): { saved: boolean; result: T | null } {
+    if (this.trades() === null) return { saved: false, result: null }; // illisible : ne rien écrire
     try {
-      saveLedger(this.d.ledgerPath, trades);
-      return true;
+      return { saved: true, result: op(this.store) };
     } catch (err) {
       this.d.log('ERROR', `Registre : écriture impossible (${(err as Error).message})`);
-      return false;
+      return { saved: false, result: null };
     }
   }
 
   stats(): LedgerStats {
-    return ledgerStatsShared(this.d.ledgerPath);
+    return this.store.stats('total');
   }
 
   /** Statistiques d'une seule stratégie (messages, séries de pertes, garde-fous). */
   statsFor(key: StrategyKey): LedgerStats {
-    return ledgerStatsSharedFor(this.d.ledgerPath, key);
+    return this.store.stats(key);
   }
 
   /** Dernière ligne lisible par marché (même si le journal l'a tue par throttling). */
@@ -327,10 +326,7 @@ export class FairValueRunner {
       this.lastResolveTry.set(t.id, now);
       const outcome = await this.d.fetchOutcome(t.slug);
       if (outcome.resolved && t.status === 'sold') {
-        this.update(trades => {
-          const x = trades.find(y => y.id === t.id);
-          if (x) x.outcomeUpWon = outcome.upWon;
-        });
+        this.write(s => s.patch(t.id, { outcomeUpWon: outcome.upWon }));
         this.lastResolveTry.delete(t.id);
         continue;
       }
@@ -344,24 +340,15 @@ export class FairValueRunner {
         // paris sans bruit. Une alerte par trade.
         if (t.status === 'open' && now > t.endMs + 6 * 3_600_000 && !t.unresolvedAlertedAt && !this.unresolvedAlerted.has(t.id)) {
           this.unresolvedAlerted.add(t.id);
-          this.update(trades => {
-            const x = trades.find(y => y.id === t.id);
-            if (x) x.unresolvedAlertedAt = new Date(now).toISOString();
-          });
+          this.write(s => s.patch(t.id, { unresolvedAlertedAt: new Date(now).toISOString() }));
           this.d.notify(msgAlert(`round ${t.slug} toujours non réglé 6 h après la fin (${outcome.reason}) : la position reste comptée comme ouverte. Vérifier le marché sur Polymarket.`));
         }
         continue;
       }
       const won = outcome.upWon === (t.side === 'UP');
       const pnl = settlePnl(t, won);
-      let closed: LedgerTrade | null = null;
-      const saved = this.update(trades => {
-        const x = trades.find(y => y.id === t.id && y.status === 'open');
-        if (x) {
-          Object.assign(x, { status: won ? 'won' : 'lost', pnl, resolvedAt: new Date(now).toISOString(), outcomeUpWon: outcome.upWon });
-          closed = x;
-        }
-      });
+      const { saved, result: closed } = this.write(s => s.patch(t.id,
+        { status: won ? 'won' : 'lost', pnl, resolvedAt: new Date(now).toISOString(), outcomeUpWon: outcome.upWon }, { ifStatus: 'open' }));
       if (!saved || !closed) continue;
       this.unresolvedWarned.delete(t.id);
       this.lastResolveTry.delete(t.id);
@@ -446,14 +433,8 @@ export class FairValueRunner {
         const exitPrice = sale.avgPrice;
         const netPerShare = sale.netProceeds / pos.shares;
         const profit = sale.netProceeds - pos.stake;
-        let closed: LedgerTrade | null = null;
-        const saved = this.update(trades => {
-          const x = trades.find(y => y.id === pos.id && y.status === 'open');
-          if (x) {
-            Object.assign(x, { status: 'sold', pnl: profit, resolvedAt: new Date(at).toISOString(), exitPrice });
-            closed = x;
-          }
-        });
+        const { saved, result: closed } = this.write(s => s.patch(pos.id,
+          { status: 'sold', pnl: profit, resolvedAt: new Date(at).toISOString(), exitPrice }, { ifStatus: 'open' }));
         if (!saved || !closed) continue;
         this.d.log('TRADE', `[SIMULATION] VENTE ${pos.coin} ${pos.side} @ VWAP $${exitPrice.toFixed(3)} (net frais ${netPerShare.toFixed(3)} ≥ p_modèle ${pHeld.toFixed(3)} + ${this.d.exitEdge}${noiseMargin > 5e-4 ? ` + ${noiseMargin.toFixed(3)} bruit` : ''}) `
           + `round ${pos.slug} — PnL réalisé ${profit >= 0 ? '+' : ''}$${profit.toFixed(4)}`);
@@ -590,7 +571,6 @@ export class FairValueRunner {
     const best = bestLevel((side === 'UP' ? o.upBook : o.downBook).asks, 'ask');
     if (!best) return null;
     const now = this.d.now();
-    const all = readLedgerShared(this.d.ledgerPath) ?? [];
     const stats = this.stats();
     const equity = this.d.capital() + stats.pnl;
     const peak = this.d.capital() + stats.peakPnl;
@@ -598,7 +578,7 @@ export class FairValueRunner {
       capital: equity,
       entryPrice: effectiveCostPerShare(best.price, cfg.takerFeeRate),
       bookProb: HARVEST_EXPECTED_WIN,
-      consecutiveLosses: recentLossStreak(all.filter(t => strategyOf(t) === 'late'), now, LOSS_STREAK_WINDOW_MS),
+      consecutiveLosses: this.store.recentLossStreak('late', now, LOSS_STREAK_WINDOW_MS),
       drawdownCurrent: peak > 0 ? stats.drawdownNow / peak : 0,
       openExposureEur: stats.openExposure,
       openPositions: stats.open,
@@ -650,13 +630,8 @@ export class FairValueRunner {
       this.holdLog(id, `   ↳ ${ctx} → PAS de mise : ${finalBlock}`);
       return null;
     }
-    let pushed = false;
-    const saved = this.update(trades => {
-      if (!trades.some(t => t.id === trade.id)) {
-        trades.push(trade);
-        pushed = true;
-      }
-    });
+    // Refusé (false) si le round est déjà au registre pour cette stratégie.
+    const { saved, result: pushed } = this.write(s => s.open(trade));
     if (saved) this.traded.add(id);
     if (!saved || !pushed) return null;
     const description = `🌾 ${ctx} → achat ${side} @ VWAP $${fill.avgPrice.toFixed(3)} + frais = $${fill.avgCost.toFixed(4)}/part, mise $${stake.toFixed(2)}`
@@ -770,7 +745,7 @@ export class FairValueRunner {
           // de moitié vers le prix par computeStake (λ = 0,5) — prudence voulue, même si elle se cumule
           // avec le mélange.
           bookProb: q.prob,
-          consecutiveLosses: recentLossStreak((readLedgerShared(this.d.ledgerPath) ?? []).filter(t => strategyOf(t) === 'fv'), now, LOSS_STREAK_WINDOW_MS),
+          consecutiveLosses: this.store.recentLossStreak('fv', now, LOSS_STREAK_WINDOW_MS),
           drawdownCurrent: peakCapital > 0 ? stats.drawdownNow / peakCapital : 0,
           openExposureEur: stats.openExposure,
           openPositions: stats.open,
@@ -853,13 +828,7 @@ export class FairValueRunner {
           this.holdLog(market.conditionId, `   ↳ ${ctx} → PAS de mise : ${finalBlock}`);
           continue;
         }
-        let pushed = false;
-        const saved = this.update(trades => {
-          if (!trades.some(t => t.id === trade.id)) {
-            trades.push(trade);
-            pushed = true;
-          }
-        });
+        const { saved, result: pushed } = this.write(s => s.open(trade)); // false : déjà au registre
         if (saved) this.traded.add(market.conditionId); // déjà présent ou ajouté : round joué
         if (!saved || !pushed) {
           // Jamais d'annonce d'un trade non enregistré (ni en double s'il l'était déjà).

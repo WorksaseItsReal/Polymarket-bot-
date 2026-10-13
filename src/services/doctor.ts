@@ -12,7 +12,8 @@ import { existsSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { entryMinTauSec } from './fair-value.js';
 import { MAX_VARIANCE_PCT } from './stake-sizing.js';
-import { computeStats, readLedgerShared } from './paper-ledger.js';
+import { computeStats } from './paper-ledger.js';
+import { LedgerStore, readLegacyLedger } from './ledger-store.js';
 import { parseRoundTokens, roundSlug, slotStart } from './round-discovery.js';
 import { crashSummary } from './crash-guard.js';
 import { capitalWarning, loadBotConfig, type Env } from '../bot/config.js';
@@ -183,12 +184,25 @@ export function dashboardBuildCheck(repoDir: string): Check {
 
 export function fileChecks(polyDir: string, repoDir: string, nowMs = Date.now()): Check[] {
   const out: Check[] = [];
-  const ledgerPath = join(polyDir, 'fv-ledger.json');
-  const trades = readLedgerShared(ledgerPath);
-  if (trades === null) out.push(err('Registre', `${ledgerPath} illisible : le bot n'ouvrira aucune position (fichier préservé ; le réparer ou l'archiver).`));
-  else {
-    const st = computeStats(trades);
-    out.push(ok('Registre', existsSync(ledgerPath) ? `${st.n} trades réglés, ${st.open} en cours, PnL ${st.pnl.toFixed(2)} $` : 'pas encore créé (normal au premier lancement)'));
+  // Registre : journal fv-ledger.jsonl, lu sans le verrou d'écrivain (le bot peut tourner).
+  // Ancien fv-ledger.json pas encore migré (le bot le fait au démarrage) : lu tel quel.
+  const ledgerPath = join(polyDir, 'fv-ledger.jsonl');
+  const legacyPath = join(polyDir, 'fv-ledger.json');
+  if (!existsSync(ledgerPath) && existsSync(legacyPath)) {
+    const trades = readLegacyLedger(legacyPath);
+    if (trades === null) out.push(err('Registre', `${legacyPath} illisible : le bot ne pourra pas le migrer et n'ouvrira aucune position (fichier préservé ; le réparer ou l'archiver).`));
+    else {
+      const st = computeStats(trades);
+      out.push(warn('Registre', `ancien format (${legacyPath}) : ${st.n} trades réglés, ${st.open} en cours, PnL ${st.pnl.toFixed(2)} $ — migré vers fv-ledger.jsonl au prochain démarrage du bot (vérification préalable : npm run ledger:check-migration -- <copie du fichier>)`));
+    }
+  } else {
+    const ledger = new LedgerStore(ledgerPath);
+    const broken = ledger.brokenReason();
+    if (broken) out.push(err('Registre', `${ledgerPath} illisible (${broken}) : le bot n'ouvrira aucune position (fichier préservé ; le réparer ou l'archiver).`));
+    else {
+      const st = ledger.stats();
+      out.push(ok('Registre', existsSync(ledgerPath) ? `${st.n} trades réglés, ${st.open} en cours, PnL ${st.pnl.toFixed(2)} $` : 'pas encore créé (normal au premier lancement)'));
+    }
   }
   const guard = join(polyDir, 'fv-guard.json');
   out.push(existsSync(guard)

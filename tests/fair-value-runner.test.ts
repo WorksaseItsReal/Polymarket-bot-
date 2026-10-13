@@ -14,7 +14,8 @@ import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DEFAULT_FAIR_VALUE_CONFIG, blendWithMarket, decide, effectiveCostPerShare, maxBuyPriceForEdge, probNoiseSd, probUp } from '../src/services/fair-value.ts';
-import { loadLedger, type RoundOutcome } from '../src/services/paper-ledger.ts';
+import type { RoundOutcome } from '../src/services/paper-ledger.ts';
+import { loadLedger } from '../src/services/ledger-store.ts';
 import type { RoundMarketData } from '../src/services/round-market-data.ts';
 import { FairValueRunner, slotOf, type Book, type RunnerDeps, type ScannedMarket } from '../src/strategy/fair-value-runner.ts';
 
@@ -279,7 +280,7 @@ test('mise à 0 par série de pertes : alerte onRiskStop (plus d\'arrêt silenci
     shares: 0.83, modelProb: 0.7, edge: 0.1, openedAt: new Date(now - 3_600_000).toISOString(), endMs: now - 3_000_000,
     status: 'lost' as const, pnl: -0.5, resolvedAt: new Date(now - 3_000_000 + i * 1000).toISOString(),
   }));
-  const { saveLedger } = await import('../src/services/paper-ledger.ts');
+  const { saveLedger } = await import('../src/services/ledger-store.ts');
   saveLedger(env.ledgerPath, losses);
   await env.runner().tick();
   assert.equal(loadLedger(env.ledgerPath)!.length, 8, 'aucun nouveau pari');
@@ -378,7 +379,7 @@ test('sortie avec latence : un bid disparu entre-temps n\'est pas vendu', async 
 });
 
 test('mise sur le capital ACTUEL et minimum d\'ordre Polymarket', async () => {
-  const { saveLedger } = await import('../src/services/paper-ledger.ts');
+  const { saveLedger } = await import('../src/services/ledger-store.ts');
   const below: number[] = [];
   const env = setup({ minOrderUsd: 1, onBelowMinOrder: s => below.push(s) });
   await env.runner().tick();
@@ -399,7 +400,7 @@ test('mise sur le capital ACTUEL et minimum d\'ordre Polymarket', async () => {
 });
 
 test('registre réparé en cours de route : un round déjà présent n\'est jamais ré-annoncé', async () => {
-  const { saveLedger } = await import('../src/services/paper-ledger.ts');
+  const { saveLedger } = await import('../src/services/ledger-store.ts');
   const env = setup();
   writeFileSync(env.ledgerPath, '{oups'); // illisible au démarrage : mémoire des rounds vide
   const r = env.runner();
@@ -487,7 +488,7 @@ test('revente : issue du round relevée ensuite (calibration) ; petite position 
 });
 
 test('minimum d\'ordre : alerte seulement si la cause est le capital, pas un plafond temporaire', async () => {
-  const { saveLedger } = await import('../src/services/paper-ledger.ts');
+  const { saveLedger } = await import('../src/services/ledger-store.ts');
   const below: number[] = [];
   // Capital 200 $ (1 % = 2 $) mais exposition presque pleine (19 $ ouverts sur 20 $) → mise 1 $ max... sous 1,5 $
   const env = setup({ capital: () => 200, minOrderUsd: 1.5, onBelowMinOrder: s => below.push(s) });
