@@ -288,7 +288,7 @@ async function main() {
   // 1e. Récolte de fin de round (favori bloqué à 0,99) : paris pris et règle rejouée
   const hcfg = harvestConfigFromEnv(process.env);
   const ho = { minAsk: hcfg.minAsk, maxAsk: hcfg.maxAsk, minTau: hcfg.minTauSec, maxTau: hcfg.maxTauSec, stableSec: hcfg.stableSec, feeRate: cfg.takerFeeRate };
-  say(`\n1e) Récolte fin de round (favori bloqué à ≥ ${hcfg.minAsk} depuis ≥ ${hcfg.stableSec} s, τ ${hcfg.maxTauSec}→${hcfg.minTauSec} s) — ${hcfg.enabled ? 'ACTIVE en papier' : 'désactivée (FV_HARVEST=false)'}`);
+  say(`\n1e) Récolte fin de round (favori bloqué à ≥ ${hcfg.minAsk} depuis ≥ ${hcfg.stableSec} s, τ ${hcfg.maxTauSec}→${hcfg.minTauSec} s) — ${hcfg.enabled ? 'ACTIVE en papier' : 'désactivée (FV_HARVEST=true pour l\'activer)'}`);
   const toLine = (f: (rs: ResolvedRecord[][]) => ScanResult, rs: ResolvedRecord[][]): ReplayLine | null => {
     if (!rs.length) return null;
     const all = f(rs);

@@ -52,7 +52,7 @@ function setup(over: Partial<RunnerDeps> & { up?: () => number; down?: () => num
     notify: m => messages.push(m),
     log: (_l, m) => logs.push(m),
     onEvaluation: r => evals.push(r),
-    harvest: DEFAULT_HARVEST_CONFIG,
+    harvest: { ...DEFAULT_HARVEST_CONFIG, enabled: true },
     timeZone: 'Europe/Paris',
     ...over,
   };

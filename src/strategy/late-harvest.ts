@@ -37,8 +37,10 @@ export interface HarvestConfig {
   checkEveryMs: number;
 }
 
+/** Désactivée par défaut : une stratégie papier ne s'active que sur décision explicite de
+ *  l'opérateur (FV_HARVEST=true), jamais par une simple mise à jour du code. */
 export const DEFAULT_HARVEST_CONFIG: HarvestConfig = {
-  enabled: true,
+  enabled: false,
   minAsk: 0.99,
   maxAsk: 0.995,
   minTauSec: 8,
@@ -122,12 +124,14 @@ export function harvestDecision(i: HarvestInput, cfg: HarvestConfig): { side: Ha
   return { side: i.side, reason: `favori ${i.side} bloqué à ≥ ${cfg.minAsk} depuis ${i.stableSec.toFixed(0)} s, τ ${Math.round(i.tauSec)} s` };
 }
 
-/** Réglages depuis l'environnement (FV_HARVEST*) ; valeurs invalides → défaut + avertissement. */
+/** Réglages depuis l'environnement (FV_HARVEST*) ; valeurs invalides → défaut + avertissement.
+ *  FV_HARVEST : seule une valeur « vraie » l'active ; toute autre valeur la laisse coupée. */
 export function harvestConfigFromEnv(env: Record<string, string | undefined>, warnings: string[] = []): HarvestConfig {
   const c = { ...DEFAULT_HARVEST_CONFIG };
   const raw = (env.FV_HARVEST ?? '').trim().toLowerCase();
-  if (['false', '0', 'no', 'off'].includes(raw)) c.enabled = false;
-  else if (raw && !['true', '1', 'yes', 'on'].includes(raw)) warnings.push(`FV_HARVEST=${raw} ignoré (attendu : true ou false) — activé`);
+  if (['true', '1', 'yes', 'on'].includes(raw)) c.enabled = true;
+  else if (['false', '0', 'no', 'off'].includes(raw)) c.enabled = false;
+  else if (raw) warnings.push(`FV_HARVEST=${raw} ignoré (attendu : true ou false) — récolte désactivée`);
   const num = (key: string, lo: number, hi: number, set: (v: number) => void) => {
     const r = (env[key] ?? '').trim();
     if (!r) return;

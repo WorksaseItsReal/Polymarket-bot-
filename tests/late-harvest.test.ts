@@ -8,7 +8,8 @@ import assert from 'node:assert/strict';
 import { DEFAULT_HARVEST_CONFIG, FavoriteStreaks, harvestConfigFromEnv, harvestDecision, harvestSide } from '../src/strategy/late-harvest.ts';
 import { loadBotConfig } from '../src/bot/config.ts';
 
-const cfg = DEFAULT_HARVEST_CONFIG;
+// Règle testée récolte ACTIVÉE (désactivée par défaut : voir le test des réglages).
+const cfg = { ...DEFAULT_HARVEST_CONFIG, enabled: true };
 
 test('côté bloqué : ask dans [0,99 ; 0,995[ d\'un seul côté', () => {
   assert.equal(harvestSide(0.99, 0.02, cfg), 'UP');
@@ -57,10 +58,12 @@ test('décision : fenêtre de temps, stabilité, filtre de désaccord du modèle
 
 test('réglages : défauts, FV_HARVEST=false, bornes, incohérence min > max', () => {
   assert.deepEqual(harvestConfigFromEnv({}), DEFAULT_HARVEST_CONFIG);
+  assert.equal(DEFAULT_HARVEST_CONFIG.enabled, false, 'désactivée par défaut');
   assert.equal(harvestConfigFromEnv({ FV_HARVEST: 'false' }).enabled, false);
+  assert.equal(harvestConfigFromEnv({ FV_HARVEST: 'true' }).enabled, true);
   const w: string[] = [];
   const c = harvestConfigFromEnv({ FV_HARVEST: 'peut-être', FV_HARVEST_MAX_TAU: '45', FV_HARVEST_MIN_TAU: '10', FV_HARVEST_STABLE_SEC: '8', FV_HARVEST_MIN_ASK: '2' }, w);
-  assert.equal(c.enabled, true);
+  assert.equal(c.enabled, false, 'valeur non reconnue → désactivée');
   assert.equal(c.maxTauSec, 45);
   assert.equal(c.minTauSec, 10);
   assert.equal(c.stableSec, 8);
@@ -72,6 +75,7 @@ test('réglages : défauts, FV_HARVEST=false, bornes, incohérence min > max', (
   assert.equal(bad.maxTauSec, 30);
   assert.match(w2[0], /FV_HARVEST_MIN_TAU=40 > FV_HARVEST_MAX_TAU=20/);
   // Câblé dans la config du bot
-  assert.equal(loadBotConfig({}).config.harvest.enabled, true);
+  assert.equal(loadBotConfig({}).config.harvest.enabled, false);
+  assert.equal(loadBotConfig({ FV_HARVEST: 'true' }).config.harvest.enabled, true);
   assert.equal(loadBotConfig({ FV_HARVEST: 'off' }).config.harvest.enabled, false);
 });

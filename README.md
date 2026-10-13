@@ -213,7 +213,7 @@ par `npm run doctor`. Modèle complet et commenté : [`.env.example`](.env.examp
 | `FV_TAKER_FEE_RATE` | `0.07` | Barème crypto : frais = parts · taux · p · (1−p) (1,75 $ pour 100 parts à 0,50 $). |
 | `FV_BASIS_BPS` / `FV_STRIKE_NOISE_SEC` / `FV_TWAP_WINDOW_SEC` | `2` / `3` / `60` | Incertitudes (écart de flux, prix à battre) et fenêtre du règlement. `FV_TWAP_WINDOW_SEC=0` = ancien règlement : faux aujourd'hui, le doctor le signale. |
 | `FV_Z_SCALE` / `FV_BLEND_MODEL` / `FV_BLEND_MARKET` / `FV_TAILS` | `1` / `1` / `0` / `normal` | Calibration et mélange avec le carnet : **ne changer que sur suggestion du rapport**, validée hors échantillon. |
-| `FV_HARVEST` | `true` | Récolte de fin de round en papier (§5 bis). `false` pour la couper. Réglages : `FV_HARVEST_MAX_TAU` (30), `FV_HARVEST_MIN_TAU` (8), `FV_HARVEST_STABLE_SEC` (6), `FV_HARVEST_MIN_ASK` (0,99) — à ne changer que sur preuve (rapport section 1e). |
+| `FV_HARVEST` | `false` | Récolte de fin de round en papier (§5 bis), désactivée par défaut : `true` pour l'activer. Réglages : `FV_HARVEST_MAX_TAU` (30), `FV_HARVEST_MIN_TAU` (8), `FV_HARVEST_STABLE_SEC` (6), `FV_HARVEST_MIN_ASK` (0,99) — à ne changer que sur preuve (rapport section 1e). |
 | `FV_LATE_MEASURE` | `true` | Dernière minute des rounds (τ < 60 s) : P(Up) avec la part déjà acquise du TWAP (flux spot par seconde) et le carnet sont **mesurés** (journal `lt`/`pl`, rapport section 1d) — le bot n'y entre jamais. `false` pour économiser ces lectures de carnet. |
 | `FV_VOL_ESTIMATOR` | `cc` | Volatilité : `cc` clôture-à-clôture, `parkinson` (plus haut/plus bas : dispersion ~2× plus faible, mais biaisé par l'échantillonnage et le rebond bid/ask), `blend`. Les deux σ sont journalisés quoi qu'il arrive ; le rapport (section 1c) dit lequel prédit mieux **avant** de changer. |
 | `FV_POLL_SEC` / `FV_MOVE_BPS` / `FV_SPOT_STREAM` | `10` / `3` / `true` | Passage régulier, seuil de réaction aux mouvements du spot, flux temps réel. |
@@ -379,7 +379,7 @@ Un pari par round (`<conditionId>|late` au registre, `strategy: late`), jamais r
 le règlement officiel ; la profondeur réelle à 0,99 n'est pas connue pour tous les cas ; une
 perte coûte ~110 gains. Garde-fou propre (`~/.polymarket/fv-guard-late.json`) : arrêt si perte
 significative (t ≤ −2 sur ≥ 50 paris), alerte si la réussite tombe nettement sous 99,7 %.
-`FV_HARVEST=false` la coupe.
+Désactivée par défaut : `FV_HARVEST=true` l'active, `false` (ou l'absence du réglage) la coupe.
 
 ### Mesurer si ça marche (journal des décisions)
 

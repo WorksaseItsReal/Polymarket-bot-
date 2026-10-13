@@ -25,7 +25,7 @@ test('bot complet sur faux réseau : évalue, journalise, parie et règle, dashb
   const child = spawn(process.execPath, ['--import', 'tsx', '--import', './tests/fixtures/fake-live-net.ts', 'bot-with-dashboard.ts'], {
     env: {
       // DOTENV_CONFIG_PATH : le .env du serveur (FV_*, clés…) ne doit pas influencer le test
-      ...process.env, HOME: home, DOTENV_CONFIG_PATH: '/dev/null', DRY_RUN: 'true', PAPER_CAPITAL: '1000', FV_POLL_SEC: '5', FV_SPOT_STREAM: 'false',
+      ...process.env, HOME: home, DOTENV_CONFIG_PATH: '/dev/null', DRY_RUN: 'true', PAPER_CAPITAL: '1000', FV_HARVEST: 'true', FV_POLL_SEC: '5', FV_SPOT_STREAM: 'false',
       TELEGRAM_BOT_TOKEN: '123456789:' + 'A'.repeat(35), TELEGRAM_CHAT_ID: '42', FAKE_TELEGRAM_LOG: tgLog, FAKE_TELEGRAM_CMD: '0:/status|10:/rapport 1',
       DASHBOARD_PORT: String(port), POLYMARKET_PRIVATE_KEY: '',
       FAKE_TIME_SPEED: '20', FAKE_BOOK_LAG_SEC: '45',
@@ -107,7 +107,7 @@ test('clé mal saisie jamais affichée ; kill -9 détecté et signalé au lancem
     const port = 30_000 + Math.floor(Math.random() * 20_000);
     const child = spawn(process.execPath, ['--import', 'tsx', '--import', './tests/fixtures/fake-live-net.ts', 'bot-with-dashboard.ts'], {
       env: {
-        ...process.env, HOME: home, DOTENV_CONFIG_PATH: '/dev/null', DRY_RUN: 'true', PAPER_CAPITAL: '1000', FV_POLL_SEC: '5', FV_SPOT_STREAM: 'false',
+        ...process.env, HOME: home, DOTENV_CONFIG_PATH: '/dev/null', DRY_RUN: 'true', PAPER_CAPITAL: '1000', FV_HARVEST: 'true', FV_POLL_SEC: '5', FV_SPOT_STREAM: 'false',
         TELEGRAM_BOT_TOKEN: '123456789:' + 'A'.repeat(35), TELEGRAM_CHAT_ID: '42', FAKE_TELEGRAM_LOG: tgLog,
         DASHBOARD_PORT: String(port), POLYMARKET_PRIVATE_KEY: typoKey, FAKE_TIME_SPEED: '20',
       },
@@ -158,7 +158,7 @@ test('porte de risque câblée : registre à −26 % du plus haut → aucun pari
   saveLedger(join(home, '.polymarket', 'fv-ledger.json'), [lost]);
   const child = spawn(process.execPath, ['--import', 'tsx', '--import', './tests/fixtures/fake-live-net.ts', 'bot-with-dashboard.ts'], {
     env: {
-      ...process.env, HOME: home, DOTENV_CONFIG_PATH: '/dev/null', DRY_RUN: 'true', PAPER_CAPITAL: '1000', FV_POLL_SEC: '5', FV_SPOT_STREAM: 'false',
+      ...process.env, HOME: home, DOTENV_CONFIG_PATH: '/dev/null', DRY_RUN: 'true', PAPER_CAPITAL: '1000', FV_HARVEST: 'true', FV_POLL_SEC: '5', FV_SPOT_STREAM: 'false',
       TELEGRAM_BOT_TOKEN: '123456789:' + 'A'.repeat(35), TELEGRAM_CHAT_ID: '42', FAKE_TELEGRAM_LOG: tgLog,
       DASHBOARD_PORT: String(port), POLYMARKET_PRIVATE_KEY: '', FAKE_TIME_SPEED: '20', FAKE_BOOK_LAG_SEC: '45',
     },
@@ -228,7 +228,7 @@ test('flux spot temps réel (faux WebSocket Binance) : santé « connecté », s
   const t0 = Math.floor(sim0 / 1000) - 4000;
   const child = spawn(process.execPath, ['--import', 'tsx', '--import', './tests/fixtures/fake-live-net.ts', 'bot-with-dashboard.ts'], {
     env: {
-      ...process.env, HOME: home, DOTENV_CONFIG_PATH: '/dev/null', DRY_RUN: 'true', PAPER_CAPITAL: '1000', FV_POLL_SEC: '5',
+      ...process.env, HOME: home, DOTENV_CONFIG_PATH: '/dev/null', DRY_RUN: 'true', PAPER_CAPITAL: '1000', FV_HARVEST: 'true', FV_POLL_SEC: '5',
       FV_SPOT_STREAM: 'true', FAKE_SPOT_WS_PORT: String(wsPort), SPOT_STREAM_URL: `ws://127.0.0.1:${wsPort}/stream?streams=`,
       FAKE_SIM_START_MS: String(sim0), FAKE_T0_SEC: String(t0),
       TELEGRAM_BOT_TOKEN: '123456789:' + 'A'.repeat(35), TELEGRAM_CHAT_ID: '42', FAKE_TELEGRAM_LOG: tgLog,
