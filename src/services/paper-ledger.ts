@@ -24,10 +24,15 @@ import { clusteredMeanT, slotKey } from '../analysis/stats.js';
 
 export type LedgerSide = 'UP' | 'DOWN';
 export type LedgerStatus = 'open' | 'won' | 'lost' | 'sold';
+/** Stratégie d'un trade : 'fv' juste valeur (défaut, champ absent), 'late' récolte de fin de round. */
+export type StrategyKey = 'fv' | 'late';
 
 export interface LedgerTrade {
-  /** conditionId du marché (un seul trade par round). */
+  /** conditionId du marché (un seul trade par round et par stratégie : `<conditionId>|late`
+   *  pour la récolte de fin de round). */
   id: string;
+  /** 'late' = récolte de fin de round (late-harvest.ts) ; absent = stratégie juste valeur. */
+  strategy?: 'late';
   slug: string;
   coin: string;
   side: LedgerSide;
@@ -36,7 +41,8 @@ export interface LedgerTrade {
   /** Coût réel par part (VWAP + frais). */
   costPerShare: number;
   shares: number;
-  /** Probabilité du modèle pour le côté acheté, à l'entrée. */
+  /** Probabilité du modèle pour le côté acheté, à l'entrée. Récolte de fin de round : taux de
+   *  gain historique de la règle (HARVEST_EXPECTED_WIN), que la calibration vérifie. */
   modelProb: number;
   /** modelProb − costPerShare. */
   edge: number;
@@ -125,6 +131,24 @@ export function ledgerStatsShared(path: string): LedgerStats {
   if (!s) {
     s = computeStats(trades);
     statsMemo.set(trades, s);
+  }
+  return s;
+}
+
+export const strategyOf = (t: Pick<LedgerTrade, 'strategy'>): StrategyKey => (t.strategy === 'late' ? 'late' : 'fv');
+
+const stratMemo = new WeakMap<readonly LedgerTrade[], Map<StrategyKey, LedgerStats>>();
+
+/** Statistiques d'UNE stratégie (mêmes règles de cache que `ledgerStatsShared`). Les limites de
+ *  risque et le capital restent calculés sur l'ensemble du registre. */
+export function ledgerStatsSharedFor(path: string, key: StrategyKey): LedgerStats {
+  const trades = readLedgerShared(path) ?? [];
+  let m = stratMemo.get(trades);
+  if (!m) stratMemo.set(trades, (m = new Map()));
+  let s = m.get(key);
+  if (!s) {
+    s = computeStats(trades.filter(t => t && strategyOf(t) === key));
+    m.set(key, s);
   }
   return s;
 }

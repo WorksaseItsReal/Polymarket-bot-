@@ -165,3 +165,47 @@ test('correction glissante : ≥ 3 rounds précédents, 12 au plus, jamais le ro
   assert.notEqual(ka.get(slug(31)), kb.get(slug(31)), 'round 31 : correction avec celle du round 30');
   assert.equal(ka.get(slug(2)), undefined, 'moins de 3 rounds précédents : pas de prix corrigé');
 });
+
+// ---------------------------------------------------------------- 1e : récolte de fin de round
+
+test('récolte rejouée : premier relevé stable de la fenêtre, un pari par round ; paris pris (hv)', async () => {
+  const { harvestReplay, harvestTaken } = await import('../src/analysis/fv-analysis.ts');
+  const o = { minAsk: 0.99, maxAsk: 0.995, minTau: 8, maxTau: 30, stableSec: 6, feeRate: 0.07 };
+  const rec = (slot: number, tau: number, upAsk: number | null, downAsk: number | null, upWon: boolean, extra: Partial<ResolvedRecord> = {}) => ({
+    t: slot * 1000 + (300 - tau) * 1000, slug: `btc-updown-5m-${slot}`, coin: 'BTC', tau, spot: 1, strike: 1, sig: 1e-4, pUp: 0.5, lt: true,
+    upAsk, downAsk, upAskSz: 10, downAskSz: 10, src: 'x', act: 'hold', upWon, ...extra,
+  } as ResolvedRecord);
+  const S1 = 1_790_000_100;
+  const rounds = [
+    // stable (hs ≥ 6) à τ 28 : pari UP gagné ; un seul pari malgré le relevé suivant
+    [rec(S1, 36, 0.99, 0.02, true, { hs: 0 }), rec(S1, 28, 0.99, 0.02, true, { hs: 8 }), rec(S1, 20, 0.99, 0.02, true, { hs: 16 })],
+    // jamais stable assez longtemps : rien
+    [rec(S1 + 300, 25, 0.99, 0.02, true, { hs: 2 }), rec(S1 + 300, 17, 0.97, 0.04, true, { hs: undefined })],
+    // anciens journaux (sans hs) : relevé précédent ≤ 12 s bloqué du même côté → pari DOWN perdu
+    [rec(S1 + 600, 38, 0.02, 0.99, true), rec(S1 + 600, 29, 0.02, 0.99, true)],
+    // stable mais hors fenêtre (τ > 30 puis < 8) : rien
+    [rec(S1 + 900, 40, 0.99, 0.02, true, { hs: 20 }), rec(S1 + 900, 6, 0.99, 0.02, true, { hs: 54 })],
+  ];
+  const r = harvestReplay(rounds, o);
+  assert.equal(r.n, 2);
+  assert.equal(r.wins, 1);
+  const cost = 0.99 + 0.07 * 0.99 * 0.01;
+  assert.ok(Math.abs((r.evPerDollar as number) - ((1 / cost - 1) - 1) / 2) < 1e-12);
+  const taken = harvestTaken([rec(S1, 28, 0.99, 0.02, true, { hv: true, act: 'buy', side: 'UP' }), rec(S1 + 300, 20, 0.02, 0.99, true, { hv: true, act: 'buy', side: 'DOWN' }), rec(S1, 50, 0.6, 0.4, true, { act: 'buy', side: 'UP' })], 0.07);
+  assert.equal(taken.n, 2, 'seuls les paris de récolte (hv)');
+  assert.equal(taken.wins, 1);
+});
+
+test('résumé : ligne récolte et verdict (rentable / perd / pas concluant)', () => {
+  const line = (ev: number, t: number, n = 400, h1 = ev, h2 = ev) => ({ n, winRate: 0.997, ev, t, evH1: h1, evH2: h2 });
+  const good = { ...base, late: null, harvest: { enabled: true, taken: line(0.006, 3.1), replay: line(0.007, 4) } };
+  const s = renderJournalSummary(good);
+  wellFormed(s);
+  assert.match(s, /<b>Récolte fin de round<\/b> \(favori bloqué à 0,99, active en papier\) :/);
+  assert.match(s, /pris : 400 paris · 100 % gagnés · \+0,6 %\/\$ \(t \+3,1\)/);
+  assert.match(journalVerdict(good).text, /Récolte fin de round : rentable en papier \(\+0,6 %\/\$, t \+3,1, 400 paris/);
+  assert.match(journalVerdict({ ...good, harvest: { enabled: true, taken: line(-0.02, -2.4), replay: null } }).text, /PERD en papier[^\n]*FV_HARVEST=false/);
+  assert.match(journalVerdict({ ...good, harvest: { enabled: true, taken: line(0.002, 0.8), replay: null } }).text, /pas encore concluant/);
+  assert.equal(journalVerdict({ ...good, harvest: { enabled: true, taken: line(0.01, 1, 10), replay: null } }).text.includes('Récolte'), false, 'trop peu de paris : rien');
+  wellFormed(renderJournalSummary({ ...base, harvest: { enabled: false, taken: null, replay: null } }));
+});

@@ -14,7 +14,8 @@ import type { RiskVerdict } from './risk-gate.js';
 
 export interface CommandProviders {
   status(): StatusInfo;
-  summary(): { stats: LedgerStats; capital: number; shadow?: ShadowStats };
+  /** `stats` : juste valeur ; `late` : récolte de fin de round ; `total` : tout le registre (capital). */
+  summary(): { stats: LedgerStats; capital: number; shadow?: ShadowStats; late?: LedgerStats; total?: LedgerStats };
   risk(): { verdict: RiskVerdict; limits: RiskLimits; capital: number };
   positions(): { positions: PositionLike[]; nowMs: number; timeZone?: string };
   /** Lance un calcul long (rapport du journal, backtest) en arrière-plan ; renvoie l'accusé
@@ -49,7 +50,7 @@ export function answerCommand(text: string, p: CommandProviders, chatType: strin
       return msgStatus(p.status());
     case 'bilan': case 'summary': case 'resume': case 'résumé': {
       const s = p.summary();
-      return msgSummary(s.stats, s.capital, s.shadow);
+      return msgSummary(s.stats, s.capital, s.shadow, s.late, s.total);
     }
     case 'risque': case 'risk': case 'risques': {
       const r = p.risk();

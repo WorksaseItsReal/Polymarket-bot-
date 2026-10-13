@@ -22,7 +22,7 @@ import { isSpotCoin, type SpotCoin } from '../services/spot-price-service.js';
 import { MAX_VARIANCE_PCT } from '../services/stake-sizing.js';
 import { entryMinTauSec } from '../services/fair-value.js';
 import { getRoundMarketData } from '../services/round-market-data.js';
-import { fetchRoundOutcome, ledgerStatsShared, readLedgerShared, type LedgerStats, type LedgerTrade } from '../services/paper-ledger.js';
+import { fetchRoundOutcome, ledgerStatsShared, ledgerStatsSharedFor, readLedgerShared, type LedgerStats, type LedgerTrade } from '../services/paper-ledger.js';
 import { FairValueRunner, type ScannedMarket } from '../strategy/fair-value-runner.js';
 import { RoundDiscovery } from '../services/round-discovery.js';
 import { SpotStream } from '../services/spot-stream.js';
@@ -99,6 +99,9 @@ export async function main(env: Record<string, string | undefined> = process.env
   };
 
   const ledgerStats = (): LedgerStats => ledgerStatsShared(paths.ledger);
+  /** Juste valeur seule (garde-fou, critères « avant le réel ») et récolte de fin de round seule. */
+  const fvStats = (): LedgerStats => ledgerStatsSharedFor(paths.ledger, 'fv');
+  const lateStats = (): LedgerStats => ledgerStatsSharedFor(paths.ledger, 'late');
 
   // --- Rapports à la demande (/rapport, /backtest) : processus séparé, un à la fois ------
   const reports = new ReportRunner({ cwd: REPO_DIR, timeoutMs: 20 * 60_000, env: { ...process.env, ...env } });
@@ -246,7 +249,7 @@ export async function main(env: Record<string, string | undefined> = process.env
       risk: { ...risk, limits: { ...config.risk } },
       fairValue: {
         shadow: sh ? shadowLine(sh) : 'Modèle vs carnet : mesure non démarrée',
-        goLive: goLiveLine(st, sh),
+        goLive: goLiveLine(fvStats(), sh),
         shadowStats: sh ? { n: sh.n, tDiff: sh.tDiff } : null,
         openPositions: trades.filter(t => t.status === 'open').slice(-20).map(t => ({
           coin: t.coin, side: t.side, stake: t.stake, costPerShare: t.costPerShare, shares: t.shares, modelProb: t.modelProb, endMs: t.endMs, openedAt: t.openedAt,
@@ -315,7 +318,8 @@ export async function main(env: Record<string, string | undefined> = process.env
       return existing;
     }
     if (sessionStop) return sessionStop;
-    const v = evaluateGuard(ledgerStats());
+    // Juste valeur seule : les centaines de petits gains de la récolte masqueraient sa perte.
+    const v = evaluateGuard(fvStats());
     if (v.warn) {
       if (Date.now() - calibLoggedAt > 3_600_000) { calibLoggedAt = Date.now(); log('WARN', `⚠️ ${v.warn}`); }
       alertOnce('calibration', `${v.warn} — augmente FV_MIN_EDGE ou analyse le journal (scripts/analysis/fv-report.ts)`);
@@ -326,6 +330,31 @@ export async function main(env: Record<string, string | undefined> = process.env
       log('ERROR', `🛑 ARRÊT DE SÉCURITÉ : ${v.stop}. Les nouvelles entrées sont bloquées.`);
       notify(msgAlert(`ARRÊT DE SÉCURITÉ — ${v.stop}. Le bot n'ouvre plus de position (il continue d'observer). Pour reprendre : arrêter le bot, supprimer ~/.polymarket/fv-guard.json, puis redémarrer.`));
       return v.stop;
+    }
+    return null;
+  }
+  // Garde-fou PROPRE à la récolte de fin de round : son arrêt ne bloque qu'elle.
+  const harvestGuard = new PersistentGuard(paths.guardLate);
+  let harvestStop: string | null = null;
+  let harvestGuardLoggedAt = 0;
+  function harvestPerfGuard(): string | null {
+    const existing = harvestGuard.current();
+    if (existing) {
+      if (Date.now() - harvestGuardLoggedAt > 3_600_000) {
+        harvestGuardLoggedAt = Date.now();
+        log('WARN', `🛑 Récolte fin de round bloquée : ${existing}. Pour reprendre : supprimer ${paths.guardLate}`);
+      }
+      return existing;
+    }
+    if (harvestStop) return harvestStop;
+    const v = evaluateGuard(lateStats(), { minTradesCalibration: 100 });
+    if (v.warn) alertOnce('calibration-late', `récolte fin de round : ${v.warn} (attendu ≈ 99,7 % d'après l'historique) — si cela dure, couper FV_HARVEST`);
+    if (v.stop) {
+      harvestStop = `récolte fin de round : ${v.stop}`;
+      try { harvestGuard.trip(v.stop, Date.now()); } catch { /* blocage effectif pour cette session */ }
+      log('ERROR', `🛑 ARRÊT DE SÉCURITÉ de la récolte fin de round : ${v.stop}. La juste valeur continue.`);
+      notify(msgAlert(`ARRÊT DE SÉCURITÉ de la récolte fin de round — ${v.stop}. La stratégie juste valeur continue. Pour reprendre : arrêter le bot, supprimer ~/.polymarket/fv-guard-late.json, puis redémarrer.`));
+      return harvestStop;
     }
     return null;
   }
@@ -360,7 +389,7 @@ export async function main(env: Record<string, string | undefined> = process.env
           const now = Date.now();
           const risk = freshRisk();
           return {
-            uptimeSec: (now - startTime) / 1000, capital: config.capital, stats: ledgerStats(), risk,
+            uptimeSec: (now - startTime) / 1000, capital: config.capital, stats: ledgerStats(), fv: fvStats(), late: config.harvest.enabled ? lateStats() : undefined, risk,
             entryBlock: shuttingDown ? 'arrêt du bot en cours' : (clockBlock() ?? guard.current() ?? sessionStop),
             positions: openPositions(),
             lastFullPassAgoSec: runnerRef?.lastFullPassAt ? (now - runnerRef.lastFullPassAt) / 1000 : null,
@@ -369,7 +398,7 @@ export async function main(env: Record<string, string | undefined> = process.env
             shadow: shadow?.stats(),
           };
         },
-        summary: () => ({ stats: ledgerStats(), capital: config.capital, shadow: shadow?.stats() }),
+        summary: () => ({ stats: fvStats(), capital: config.capital, shadow: shadow?.stats(), late: config.harvest.enabled ? lateStats() : undefined, total: ledgerStats() }),
         risk: () => ({ verdict: freshRisk(), limits: config.risk, capital: config.capital }),
         positions: () => ({ positions: openPositions(), nowMs: Date.now(), timeZone: config.timeZone }),
         analysis: (kind, days) => startAnalysis(kind, days),
@@ -394,6 +423,7 @@ export async function main(env: Record<string, string | undefined> = process.env
         pollSec: config.pollMs / 1000, coins: [...config.coins], stats: ledgerStats(), warning: capWarn ?? undefined,
         zScale: config.fv.zScale, blendModel: config.fv.blendModel, blendMarket: config.fv.blendMarket,
         noiseK: config.fv.noiseEdgeK,
+        harvest: config.harvest.enabled ? { minTauSec: config.harvest.minTauSec, maxTauSec: config.harvest.maxTauSec, minAsk: config.harvest.minAsk } : undefined,
         restart: crashStart && (crashStart.brutal || crashStart.afterError) ? { brutal: crashStart.brutal, recentCrashes: crashStart.recentCrashes } : undefined,
       }));
     }
@@ -412,7 +442,7 @@ export async function main(env: Record<string, string | undefined> = process.env
       lastTradesKey = tradesKey;
       lastShadowN = sh?.n ?? 0;
       lastSentAt = Date.now();
-      notify(msgSummary(st, config.capital, sh));
+      notify(msgSummary(fvStats(), config.capital, sh, config.harvest.enabled ? lateStats() : undefined, st));
     }, config.summaryEveryMin * 60_000).unref?.();
   }
   async function setupTelegram(): Promise<void> {
@@ -494,6 +524,9 @@ export async function main(env: Record<string, string | undefined> = process.env
       lastEvals.set(r.coin, { coin: r.coin, t: r.t, tau: r.tau, pUp: r.pUp, upAsk: r.upAsk, downAsk: r.downAsk, act: r.act, side: r.side, reason });
     },
     entryBlock: () => (shuttingDown ? 'arrêt du bot en cours' : null) ?? clockBlock() ?? perfGuard(),
+    harvest: config.harvest,
+    // La récolte a son propre garde-fou : l'arrêt de la juste valeur ne la bloque pas (et inversement).
+    harvestBlock: () => (shuttingDown ? 'arrêt du bot en cours' : null) ?? clockBlock() ?? harvestPerfGuard(),
     onRiskStop: reason => {
       const streak = /pertes consécutives/.test(reason);
       alertOnce(streak ? 'risk-streak' : 'risk-stake-drawdown', streak

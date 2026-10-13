@@ -20,6 +20,14 @@ mesures ne sont pas favorables, **aucune hausse de mise ni passage en réel n'es
 > mesures antérieures (modèle à règlement ponctuel) ne comptent plus et « Modèle vs carnet »
 > est reparti de zéro.
 
+> **Récolte de fin de round (papier, depuis le 11 octobre 2026)** — seule piste mesurée sur de
+> **vrais carnets** Polymarket (6 590 rounds 5 min BTC/ETH, 7–18 août 2026, jeu de données
+> public) : quand le favori est **bloqué à 0,99** (plafond du pas de prix) depuis ≥ 6 s, entre
+> 30 et 8 s de la fin, il gagne 99,74 % du temps → **+0,72 % par pari** frais compris (t = 9,4),
+> positif sur chaque moitié de la période et sous les deux règles TWAP. Petits gains, perte rare
+> mais totale (une perte ≈ 110 gains) : à juger sur ses propres résultats papier (`/rapport`,
+> section 1e), avec son propre garde-fou. Détails §5 bis.
+
 > L'**ancienne** règle « favori dans [0,58 ; 0,65] », retirée, n'avait pas d'edge : 167 trades,
 > PnL moyen +0,07 € par trade, t = +1,25, IC 95 % contenant zéro
 > ([`docs/rebuild/strategy/EDGE.md`](docs/rebuild/strategy/EDGE.md)).
@@ -101,6 +109,10 @@ Puis :
   seulement si cette probabilité dépasse son **coût réel** (VWAP du carnet + frais taker) d'au
   moins `FV_MIN_EDGE` **plus une marge égale à `FV_NOISE_EDGE_K` fois notre propre bruit** (le
   carnet connaît le prix à battre exact, nous l'estimons). Sinon → **HOLD**.
+- **Récolte de fin de round** (`src/strategy/late-harvest.ts`, §5 bis) : favori bloqué à 0,99
+  depuis ≥ 6 s entre 30 et 8 s de la fin → achat papier au vrai carnet (latence, limite 0,995).
+  Statistiques, série de pertes et garde-fou séparés de la juste valeur ; pas de message Telegram
+  par gain (bilan), chaque perte annoncée.
 - **Mode** : **PAPIER**. Chaque pari est simulé sur le vrai carnet (latence, prix limite, VWAP,
   frais, profondeur) et réglé sur le vrai résultat. `DRY_RUN=false` est refusé au démarrage.
 - **Mesure** : chaque évaluation (pari ou abstention) est journalisée, et le modèle est comparé
@@ -179,6 +191,7 @@ par `npm run doctor`. Modèle complet et commenté : [`.env.example`](.env.examp
 | `FV_TAKER_FEE_RATE` | `0.07` | Barème crypto : frais = parts · taux · p · (1−p) (1,75 $ pour 100 parts à 0,50 $). |
 | `FV_BASIS_BPS` / `FV_STRIKE_NOISE_SEC` / `FV_TWAP_WINDOW_SEC` | `2` / `3` / `60` | Incertitudes (écart de flux, prix à battre) et fenêtre du règlement. `FV_TWAP_WINDOW_SEC=0` = ancien règlement : faux aujourd'hui, le doctor le signale. |
 | `FV_Z_SCALE` / `FV_BLEND_MODEL` / `FV_BLEND_MARKET` / `FV_TAILS` | `1` / `1` / `0` / `normal` | Calibration et mélange avec le carnet : **ne changer que sur suggestion du rapport**, validée hors échantillon. |
+| `FV_HARVEST` | `true` | Récolte de fin de round en papier (§5 bis). `false` pour la couper. Réglages : `FV_HARVEST_MAX_TAU` (30), `FV_HARVEST_MIN_TAU` (8), `FV_HARVEST_STABLE_SEC` (6), `FV_HARVEST_MIN_ASK` (0,99) — à ne changer que sur preuve (rapport section 1e). |
 | `FV_LATE_MEASURE` | `true` | Dernière minute des rounds (τ < 60 s) : P(Up) avec la part déjà acquise du TWAP (flux spot par seconde) et le carnet sont **mesurés** (journal `lt`/`pl`, rapport section 1d) — le bot n'y entre jamais. `false` pour économiser ces lectures de carnet. |
 | `FV_VOL_ESTIMATOR` | `cc` | Volatilité : `cc` clôture-à-clôture, `parkinson` (plus haut/plus bas : dispersion ~2× plus faible, mais biaisé par l'échantillonnage et le rebond bid/ask), `blend`. Les deux σ sont journalisés quoi qu'il arrive ; le rapport (section 1c) dit lequel prédit mieux **avant** de changer. |
 | `FV_POLL_SEC` / `FV_MOVE_BPS` / `FV_SPOT_STREAM` | `10` / `3` / `true` | Passage régulier, seuil de réaction aux mouvements du spot, flux temps réel. |
@@ -311,6 +324,40 @@ La boucle vit dans `src/strategy/fair-value-runner.ts` (testée sans réseau :
 juste le bot ne parie quasiment pas ; face à un carnet en retard de 10 s il gagne, avec une
 réussite égale à la probabilité annoncée (calibration). Cela valide la logique, **pas**
 l'existence d'un edge sur le vrai Polymarket.
+
+## 5 bis. Récolte de fin de round (papier)
+
+**Mesure qui l'a motivée** (`late-harvest.ts`, jeu de données public de carnets Polymarket à la
+seconde, 7–18 août 2026, 6 590 rounds 5 min BTC/ETH, issue = carnet final) :
+
+| Règle | Paris | Gagnés | Gain par pari (frais compris) |
+| ----- | ----- | ------ | ----------------------------- |
+| Favori à 0,99 **depuis ≥ 6 s**, τ 30→8 s, exécution 1 s après | 4 944 | 99,74 % | **+0,72 %** (t 9,4 ; moitiés +0,58 / +0,84) |
+| Même règle, contrôle toutes les 8 s (2 lectures consécutives) | 4 378 | 99,77 % | +0,72 % (t 9,9) |
+| Premier instant où le favori touche 0,99 (sans stabilité) | 5 373 | 99,13 % | +0,21 % (non significatif) |
+| Favori à 0,97–0,98 (prix libre) | — | — | ≈ 0 ou négatif |
+| Entrée avant τ = 30 s (fenêtre 60→8 s) | 5 591 | 99,16 % | +0,19 % (non significatif) |
+
+Pourquoi : le pas de prix (0,01) empêche le favori de coter au-delà de 0,99 alors qu'en fin de
+round TWAP sa vraie probabilité est plus haute ; un pic juste arrivé à 0,99 se retourne souvent,
+un favori qui y reste plusieurs secondes beaucoup plus rarement.
+
+Reproduire (ou refaire sur de nouveaux fichiers du jeu de données) :
+`npx tsx scripts/analysis/harvest-dataset.ts --download` (Node ≥ 22.15 ; fichiers dans
+`~/.polymarket/datasets/`) — même règle que le bot, avec moitiés, actifs et variantes de robustesse.
+
+**Règle du bot** : lecture des carnets toutes les 3 s à l'approche de la fenêtre ; même côté
+bloqué dans [0,99 ; 0,995[ sans interruption depuis `FV_HARVEST_STABLE_SEC` (6 s) ; τ entre
+`FV_HARVEST_MAX_TAU` (30) et `FV_HARVEST_MIN_TAU` (8) ; refus si le modèle « fin de round »
+(TWAP en partie acquis, flux temps réel) donne au favori moins de 90 % ; mise = `computeStake`
+(1 % du capital au plus) ; ordre limite 0,995 exécuté après `FV_FILL_DELAY_MS` sur le carnet relu.
+Un pari par round (`<conditionId>|late` au registre, `strategy: late`), jamais revendu.
+
+**Limites honnêtes** : 12 jours d'août, deux cryptos ; l'issue mesurée est le carnet final, pas
+le règlement officiel ; la profondeur réelle à 0,99 n'est pas connue pour tous les cas ; une
+perte coûte ~110 gains. Garde-fou propre (`~/.polymarket/fv-guard-late.json`) : arrêt si perte
+significative (t ≤ −2 sur ≥ 50 paris), alerte si la réussite tombe nettement sous 99,7 %.
+`FV_HARVEST=false` la coupe.
 
 ### Mesurer si ça marche (journal des décisions)
 

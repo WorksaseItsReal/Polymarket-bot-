@@ -101,6 +101,8 @@ export interface StartupInfo {
   blendMarket?: number;
   /** FV_NOISE_EDGE_K : marge en plus de minEdge selon l'incertitude du prix à battre. */
   noiseK?: number;
+  /** Récolte de fin de round activée (fenêtre en s) ; absent = désactivée. */
+  harvest?: { minTauSec: number; maxTauSec: number; minAsk: number };
   /** Relance après un arrêt anormal (sur erreur, ou brutal : kill -9, mémoire saturée). */
   restart?: { brutal: boolean; recentCrashes: number };
 }
@@ -130,6 +132,7 @@ export function msgStartup(i: StartupInfo): string {
     `Marchés : « Up or Down » 5 min · ${escapeHtml(i.coins.join(', '))}`,
     `Règle : pari seulement si la probabilité calculée ≥ ${pct(i.minProb)} ET dépasse le prix payé (frais inclus) d'au moins ${(i.minEdge * 100).toFixed(0)} pts`
       + (i.noiseK ? ', plus une marge quand le prix à battre (estimé) laisse un doute' : ''),
+    ...(i.harvest ? [`Récolte fin de round : favori bloqué à ${i.harvest.minAsk.toFixed(2).replace('.', ',')} entre ${i.harvest.maxTauSec} et ${i.harvest.minTauSec} s de la fin (papier ; gains dans le bilan, chaque perte annoncée)`] : []),
     `Capital papier : ${amount(i.capital)} · vérification toutes les ${i.pollSec} s`,
     ...(tuningLine(i) ? [tuningLine(i) as string] : []),
     i.stats.n || i.stats.open ? `Historique : ${balanceLine(i.stats)}` : 'Historique : aucun trade pour l\'instant',
@@ -172,15 +175,26 @@ export interface TradeClosedInfo {
   pnl: number;
   stats: LedgerStats;
   timeZone?: string;
+  /** 'late' : trade de la récolte de fin de round (bilan propre à cette stratégie). */
+  strategy?: 'late';
 }
 
 export function msgTradeClosed(i: TradeClosedInfo): string {
   const head = i.outcome === 'won' ? '✅ <b>GAGNÉ</b>' : i.outcome === 'lost' ? '❌ <b>PERDU</b>' : '💱 <b>REVENDU avant la fin</b>';
+  const late = i.strategy === 'late';
   return [
-    `${head} — ${escapeHtml(i.coin)} ${SIDE_LABEL[i.side]} · <b>${money(i.pnl)}</b>`,
-    `Round ${roundWindow(i.slotSec, i.timeZone)}`,
-    `Bilan : ${balanceLine(i.stats)}`,
+    `${head}${late ? ' (récolte fin de round)' : ''} — ${escapeHtml(i.coin)} ${SIDE_LABEL[i.side]} · <b>${money(i.pnl)}</b>`,
+    `Round ${roundWindow(i.slotSec, i.timeZone)}${late && i.outcome === 'lost' ? ' · favori à 0,99 retourné dans les dernières secondes (attendu ~0,3 % des paris)' : ''}`,
+    `Bilan${late ? ' récolte' : ''} : ${balanceLine(i.stats)}`,
   ].join('\n');
+}
+
+/** Une ligne de bilan pour la récolte de fin de round (papier), avec sa fiabilité. */
+export function harvestLine(stats: LedgerStats): string {
+  if (!stats.n && !stats.open) return 'Récolte fin de round : aucun pari encore (favori bloqué à 0,99 entre 30 et 8 s de la fin)';
+  const t = stats.tStat === null ? '' : ` · t ${stats.tStat.toFixed(1).replace('.', ',')}`;
+  const ev = stats.n ? ` · ${money(stats.pnl / stats.n, 3)}/pari` : '';
+  return `Récolte fin de round : ${balanceLine(stats)}${ev}${t}${stats.open ? ` · en cours ${stats.open}` : ''}`;
 }
 
 /** « Le modèle bat-il le carnet ? » en une ligne honnête. */
@@ -226,7 +240,7 @@ export function goLiveLine(stats: LedgerStats, shadow?: ShadowStats): string {
       : failed ? 'rester en papier ❌' : 'rester en papier, mesure en cours');
 }
 
-export function msgSummary(stats: LedgerStats, capital: number, shadow?: ShadowStats): string {
+export function msgSummary(stats: LedgerStats, capital: number, shadow?: ShadowStats, late?: LedgerStats, total?: LedgerStats): string {
   const expected = stats.avgModelProb === null || stats.calibWinRate === null
     ? ''
     : ` · côté choisi gagnant à l'issue du round : ${pct(stats.calibWinRate)} pour ${pct(stats.avgModelProb)} annoncés par le modèle`;
@@ -234,10 +248,11 @@ export function msgSummary(stats: LedgerStats, capital: number, shadow?: ShadowS
     '📊 <b>BILAN</b> — stratégie juste valeur (papier)',
     `Trades terminés : ${stats.n} (${stats.wins} ✅ / ${stats.losses} ❌) · en cours : ${stats.open}`,
     `Taux de réussite : ${stats.winRate === null ? '—' : pct(stats.winRate)}${expected}`,
-    `PnL : <b>${money(stats.pnl)}</b> · capital : ${amount(capital + stats.pnl)} · pire baisse : ${money(-stats.maxDrawdown)}`,
+    `PnL : <b>${money(stats.pnl)}</b> · capital : ${amount(capital + (total ?? stats).pnl)}${total && late ? ' (les deux stratégies)' : ''} · pire baisse : ${money(-stats.maxDrawdown)}`,
     `Fiabilité : ${reliability(stats)}`,
     ...(shadow ? [shadowLine(shadow)] : []),
     goLiveLine(stats, shadow),
+    ...(late ? [harvestLine(late)] : []),
   ].join('\n');
 }
 
@@ -284,6 +299,9 @@ export interface StatusInfo {
   spotStream: 'disabled' | 'live' | 'stale';
   consecutiveTickFailures: number;
   shadow?: ShadowStats;
+  /** Récolte de fin de round (si activée) ; `fv` : trades de la juste valeur seule (sinon `stats`). */
+  late?: LedgerStats;
+  fv?: LedgerStats;
 }
 
 function ago(sec: number | null): string {
@@ -298,13 +316,14 @@ export function msgStatus(i: StatusInfo): string {
     blocked ? `Entrées : ⏸️ bloquées — ${escapeHtml(blocked)}` : 'Entrées : ▶️ autorisées',
     `Capital : ${amount(i.capital + pnl)} (départ ${amount(i.capital)}) · PnL ${money(pnl)}`
       + (i.risk ? ` · jour ${money(i.risk.pnlToday)} · baisse ${pct(i.risk.drawdown, 1)}` : ''),
-    `Trades : ${balanceLine(i.stats)}`,
+    `Trades${i.fv ? ' juste valeur' : ''} : ${balanceLine(i.fv ?? i.stats)}`,
     `Positions ouvertes : ${i.positions.length}${i.positions.length ? ` (exposition ${amount(i.positions.reduce((a, p) => a + p.stake, 0))})` : ''}`,
     `Marchés : passage complet ${ago(i.lastFullPassAgoSec)} · rounds trouvés ${ago(i.lastMarketsFoundAgoSec)}`
       + (i.consecutiveTickFailures ? ` · ⚠️ ${plural(i.consecutiveTickFailures, 'passage')} en échec d'affilée` : ''),
     `Spot temps réel : ${i.spotStream === 'live' ? 'connecté' : i.spotStream === 'stale' ? '⚠️ figé (repli REST)' : 'désactivé (REST)'}`,
     ...(i.shadow ? [shadowLine(i.shadow)] : []),
-    'Commandes : /bilan /risque /positions /aide',
+    ...(i.late ? [harvestLine(i.late)] : []),
+    'Commandes : /bilan /risque /positions /rapport /aide',
   ].join('\n');
 }
 

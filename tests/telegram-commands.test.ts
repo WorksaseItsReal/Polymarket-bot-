@@ -122,3 +122,31 @@ test('/bilan, /aide, /start, inconnue, texte libre (privé = aide, groupe = sile
   assert.equal(answerCommand('salut', providers(), 'supergroup'), null, 'pas de réponse au bavardage d\'un groupe');
   assert.equal(answerCommand('salut', providers()), null, 'type de chat inconnu : silence');
 });
+
+test('récolte fin de round : lignes séparées dans /status et /bilan, capital sur tout le registre', async () => {
+  const { computeStats } = await import('../src/services/paper-ledger.ts');
+  const { harvestLine } = await import('../src/services/telegram-messages.ts');
+  const base = (over: Partial<LedgerTrade>): LedgerTrade => ({ ...openTrade, status: 'won', ...over });
+  const late = computeStats([
+    base({ id: 'a|late', strategy: 'late', stake: 10, shares: 10.094, pnl: 0.094, resolvedAt: new Date(NOW).toISOString() }),
+    base({ id: 'b|late', strategy: 'late', stake: 10, shares: 10.094, pnl: 0.094, resolvedAt: new Date(NOW + 1).toISOString() }),
+  ]);
+  const fv = computeStats([base({ id: 'c', pnl: 9.34, resolvedAt: new Date(NOW).toISOString() })]);
+  const total = { ...fv, pnl: fv.pnl + late.pnl };
+  assert.equal(harvestLine(computeStats([])), 'Récolte fin de round : aucun pari encore (favori bloqué à 0,99 entre 30 et 8 s de la fin)');
+  assert.match(harvestLine(late), /^Récolte fin de round : 2 trades · 2 ✅ \/ 0 ❌ \(100 %\) · PnL \+0,19 \$ · \+0,094 \$\/pari/);
+  const p = providers();
+  const withLate: CommandProviders = {
+    ...p,
+    status: () => ({ ...p.status(), stats: total, fv, late }),
+    summary: () => ({ stats: fv, capital: 250, late, total }),
+  };
+  const s = noJunk(answerCommand('/status', withLate));
+  assert.match(s, /Capital : 259,53 \$ \(départ 250,00 \$\) · PnL \+9,53 \$/, 'capital : les deux stratégies');
+  assert.match(s, /Trades juste valeur : 1 trade · 1 ✅/);
+  assert.match(s, /Récolte fin de round : 2 trades/);
+  const b = noJunk(answerCommand('/bilan', withLate));
+  assert.match(b, /Trades terminés : 1 \(1 ✅ \/ 0 ❌\)/, 'bilan de la juste valeur seule');
+  assert.match(b, /capital : 259,53 \$ \(les deux stratégies\)/);
+  assert.match(b, /Récolte fin de round : 2 trades/);
+});

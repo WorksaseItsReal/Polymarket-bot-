@@ -89,9 +89,12 @@ test('bot complet sur faux réseau : évalue, journalise, parie et règle, dashb
       const gains = trades.reduce((a, x) => a + Math.max(0, typeof x.pnl === 'number' ? x.pnl : 0), 0);
       assert.ok((t.stake as number) <= 0.01 * (1000 + gains) + 1e-9, `mise ${t.stake} > 1 % du capital`);
     }
-    assert.equal(tradesMsgs.filter(m => /NOUVEAU PARI/.test(m.text)).length, trades.length, 'un message par pari ouvert');
-    const closed = trades.filter(t => t.status !== 'open').length;
-    assert.equal(tradesMsgs.filter(m => /GAGNÉ|PERDU|REVENDU/.test(m.text)).length, closed, 'un message par pari réglé');
+    // Juste valeur : un message par pari ouvert et réglé. Récolte de fin de round : aucun message
+    // à l'ouverture ni pour un gain (des centaines par jour), un message par perte.
+    const fvTrades = trades.filter(t => t.strategy !== 'late');
+    assert.equal(tradesMsgs.filter(m => /NOUVEAU PARI/.test(m.text)).length, fvTrades.length, 'un message par pari ouvert (juste valeur)');
+    const closed = fvTrades.filter(t => t.status !== 'open').length + trades.filter(t => t.strategy === 'late' && t.status === 'lost').length;
+    assert.equal(tradesMsgs.filter(m => /GAGNÉ|PERDU|REVENDU/.test(m.text)).length, closed, 'un message par pari réglé (juste valeur) et par perte de récolte');
   }
 });
 
@@ -256,9 +259,19 @@ test('flux spot temps réel (faux WebSocket Binance) : santé « connecté », s
   assert.ok(lines.some(r => /\+ws$/.test(String(r.src))), 'spot pris sur le flux');
   const late = lines.filter(r => r.lt === true);
   assert.ok(late.length >= 1, `mesures fin de round attendues (τ < 60 s) : ${late.length}`);
-  assert.ok(late.every(r => typeof r.pl === 'number' && (r.pl as number) > 0 && (r.pl as number) < 1 && (r.kn as number) >= 0 && (r.kn as number) <= 60 && r.act === 'hold' && (r.tau as number) < 60), JSON.stringify(late[0]));
+  // Mesure fin de round : jamais d'achat, SAUF un pari de récolte (hv) entre 30 et 8 s de la fin.
+  const badLate = late.find(r => !(typeof r.pl === 'number' && (r.pl as number) > 0 && (r.pl as number) < 1 && (r.kn as number) >= 0 && (r.kn as number) <= 60 && (r.tau as number) < 60
+    && (r.act === 'hold' || (r.act === 'buy' && r.hv === true && (r.tau as number) <= 30 && (r.tau as number) >= 8))));
+  assert.equal(badLate, undefined, JSON.stringify(badLate));
+  const harvestBuys = late.filter(r => r.hv === true);
+  if (process.env.SHOW_HARVEST) console.log('récolte e2e :', harvestBuys.map(r => `${r.coin} τ${r.tau} ${r.side} ${r.upAsk}/${r.downAsk} hs${r.hs}`));
   const trades = existsSync(join(poly, 'fv-ledger.json')) ? (JSON.parse(readFileSync(join(poly, 'fv-ledger.json'), 'utf8')).trades as Array<{ openedAt: string; endMs: number }>) : [];
-  for (const t of trades) assert.ok(t.endMs - Date.parse(t.openedAt) >= 60_000, 'aucun pari ouvert dans la dernière minute');
+  // Juste valeur : jamais dans la dernière minute. Récolte de fin de round : seulement entre 30 et ~2 s de la fin.
+  for (const t of trades as Array<{ openedAt: string; endMs: number; strategy?: string }>) {
+    const tau = (t.endMs - Date.parse(t.openedAt)) / 1000;
+    if (t.strategy === 'late') assert.ok(tau <= 31 && tau >= 1.5, `récolte ouverte à τ ${tau} s`);
+    else assert.ok(tau >= 60, 'aucun pari juste valeur ouvert dans la dernière minute');
+  }
   assert.doesNotMatch(out, /TypeError|ReferenceError|Rejet de promesse non géré|Exception non rattrapée/, out.slice(-3000));
 
   // Rapport d'analyse sur ce journal : horloge placée après le dernier round, même marché.

@@ -41,6 +41,8 @@ export interface JournalSummary {
   strike: { rounds: number; withPs: number; compared: number; same: number; tOfficial: number | null; officialRounds: number } | null;
   zScale: { m: number; lo: number; hi: number; current: number } | null;
   buys: { n: number; wins: number } | null;
+  /** Récolte de fin de round : paris pris (papier) et règle rejouée sur le journal. */
+  harvest?: { enabled: boolean; taken: ReplayLine | null; replay: ReplayLine | null } | null;
 }
 
 export interface BacktestSummary {
@@ -93,7 +95,21 @@ export function solid(r: ReplayLine | null | undefined, tMin = 2): boolean {
 
 // ---------------------------------------------------------------- journal en direct
 
+/** Verdict de la récolte de fin de round (paris papier réellement pris), en une phrase ; '' si trop peu. */
+export function harvestNote(s: Pick<JournalSummary, 'harvest'>): string {
+  const h = s.harvest?.taken;
+  if (!h || h.n < 30) return '';
+  if (solid(h)) return ` Récolte fin de round : rentable en papier (${evFmt(h.ev)}, t ${tFmt(h.t)}, ${count(h.n, 'pari', 'paris')}, deux moitiés positives) — à confirmer sur ≥ 2 semaines.`;
+  if ((h.t ?? 0) <= -2) return ` Récolte fin de round : PERD en papier (${evFmt(h.ev)}, t ${tFmt(h.t)}) → la couper (FV_HARVEST=false).`;
+  return ` Récolte fin de round : ${count(h.n, 'pari', 'paris')}, ${evFmt(h.ev)} (t ${tFmt(h.t)}) — pas encore concluant.`;
+}
+
 export function journalVerdict(s: JournalSummary): Verdict {
+  const v = journalVerdictMain(s);
+  return { ...v, text: v.text + harvestNote(s) };
+}
+
+function journalVerdictMain(s: JournalSummary): Verdict {
   if (s.model.rounds < MIN_ROUNDS_VERDICT) {
     return { level: 'early', text: `⏳ Trop tôt : ${int(s.model.rounds)} rounds comparables, il en faut ≥ ${MIN_ROUNDS_VERDICT} (quelques heures à 5 cryptos). Rester en papier.` };
   }
@@ -129,6 +145,11 @@ export function renderJournalSummary(s: JournalSummary): string {
   if (s.late) {
     L.push('', `<b>Dernière minute</b> (mesurée, jamais jouée) : modèle vs carnet t ${tFmt(s.late.tModel)} (${int(s.late.rounds)} rounds)`);
     L.push(`   entrées hypothétiques : ${replayFmt(s.late)}`);
+  }
+  if (s.harvest && (s.harvest.enabled || s.harvest.taken?.n || s.harvest.replay?.n)) {
+    L.push('', `<b>Récolte fin de round</b> (favori bloqué à 0,99, ${s.harvest.enabled ? 'active en papier' : 'désactivée'}) :`);
+    L.push(`   pris : ${s.harvest.taken ? replayFmt(s.harvest.taken) : 'aucun pari'}`);
+    if (s.harvest.replay) L.push(`   règle rejouée sur le journal : ${replayFmt(s.harvest.replay)}`);
   }
   if (s.vol && s.vol.rounds) {
     const best = (s.vol.tPark ?? 0) <= -2 ? 'Parkinson meilleur' : (s.vol.tBlend ?? 0) <= -2 ? 'mélange meilleur' : 'garder le réglage';

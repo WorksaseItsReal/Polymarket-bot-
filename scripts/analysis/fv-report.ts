@@ -27,6 +27,8 @@ import {
   liveStrikeAvailability, strikeVsOfficial, thresholdGrid, type ResolvedRecord, type ScanParams, type ScanResult,
 } from '../../src/analysis/fv-analysis.js';
 import { renderJournalSummary, solid, T_BEST, type JournalSummary, type ReplayLine } from '../../src/analysis/report-summary.js';
+import { harvestReplay, harvestTaken } from '../../src/analysis/fv-analysis.js';
+import { harvestConfigFromEnv } from '../../src/strategy/late-harvest.js';
 
 function arg(name: string): string | undefined {
   const i = process.argv.indexOf(`--${name}`);
@@ -70,7 +72,7 @@ function slim(r: DecisionRecord): DecisionRecord {
     // un journal de 30 jours ≈ 1 million de lignes, chaque champ compte.
     t: r.t, slug: intern(r.slug), coin: intern(r.coin), tau: r.tau, spot: r.lt ? 0 : r.spot, strike: r.strike, sig: r.sig, pUp: r.pUp, pRaw: r.pRaw, zs: r.zs,
     ...(r.sc && r.sp && !r.lt ? { sc: r.sc, sp: r.sp } : {}), ...(r.tw ? { tw: r.tw } : {}),
-    ...(r.lt ? { lt: true as const, pl: r.pl ?? null, kn: r.kn } : {}), // mesures fin de round (section 1d)
+    ...(r.lt ? { lt: true as const, pl: r.pl ?? null, kn: r.kn, ...(r.hs !== undefined ? { hs: r.hs } : {}), ...(r.hv ? { hv: true as const } : {}) } : {}), // fin de round (1d, 1e)
     ...(r.ps ? { ps: r.ps } : {}), // prix à battre officiel lu en direct (section 0)
     upAsk: r.upAsk, downAsk: r.downAsk, upAskSz: r.upAskSz, downAskSz: null, upBid: r.upBid, src: '', act: r.act === 'buy' ? 'buy' : 'hold',
     // GARDER mv (exclusion des mesures) et tl (loi du modèle) : sans eux, le filtre des
@@ -282,6 +284,26 @@ async function main() {
       ? '   → un edge SEMBLE exister en fin de round (deux moitiés positives). Avant d\'y entrer : latence réelle de remplissage, Chainlink ≠ Binance, profondeur — à étudier, pas à activer.'
       : '   → rien de démontré en fin de round (ou pas assez de rounds).');
   }
+
+  // 1e. Récolte de fin de round (favori bloqué à 0,99) : paris pris et règle rejouée
+  const hcfg = harvestConfigFromEnv(process.env);
+  const ho = { minAsk: hcfg.minAsk, maxAsk: hcfg.maxAsk, minTau: hcfg.minTauSec, maxTau: hcfg.maxTauSec, stableSec: hcfg.stableSec, feeRate: cfg.takerFeeRate };
+  say(`\n1e) Récolte fin de round (favori bloqué à ≥ ${hcfg.minAsk} depuis ≥ ${hcfg.stableSec} s, τ ${hcfg.maxTauSec}→${hcfg.minTauSec} s) — ${hcfg.enabled ? 'ACTIVE en papier' : 'désactivée (FV_HARVEST=false)'}`);
+  const toLine = (f: (rs: ResolvedRecord[][]) => ScanResult, rs: ResolvedRecord[][]): ReplayLine | null => {
+    if (!rs.length) return null;
+    const all = f(rs);
+    if (!all.n) return null;
+    const [a, b] = halves(rs);
+    return { n: all.n, winRate: all.winRate, ev: all.evPerDollar, t: all.tStat, evH1: f(a).evPerDollar, evH2: f(b).evPerDollar };
+  };
+  const lateAll = rounds.map(l => l.filter(r => r.lt)).filter(l => l.length);
+  const hReplay = toLine(rs => harvestReplay(rs, ho), lateAll);
+  const hTaken = toLine(rs => harvestTaken(rs.flat(), cfg.takerFeeRate), rounds.map(l => l.filter(r => r.hv)).filter(l => l.length));
+  const hFmt = (l: ReplayLine | null) => (l ? `n=${l.n}  WR ${pct(l.winRate, 2)}  EV/$ ${num(l.ev, 4)}  t ${num(l.t, 1)}  | moitiés ${num(l.evH1, 4)} / ${num(l.evH2, 4)}` : 'aucun');
+  say(`   paris pris (papier, au meilleur ask de la décision) : ${hFmt(hTaken)}`);
+  say(`   règle rejouée sur les mesures de fin de round      : ${hFmt(hReplay)}`);
+  say('   Historique (carnets réels août 2026) : +0,72 %/pari, gagné 99,74 %. Un gain moyen bien plus bas ou un t ≤ −2 → couper FV_HARVEST.');
+  S.harvest = { enabled: hcfg.enabled, taken: hTaken, replay: hReplay };
 
   // 1b. Mélange modèle + carnet
   say('\n1b) Mélange modèle + carnet (le carnet contient-il une information que le modèle ignore ?)');

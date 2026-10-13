@@ -72,6 +72,10 @@ export interface DecisionRecord {
   lt?: true;
   pl?: number | null;
   kn?: number;
+  /** Récolte de fin de round : secondes depuis lesquelles le favori est bloqué à ≥ 0,99 (`hs`),
+   *  et pari de récolte pris sur cette mesure (`hv`, avec act 'buy', side, stake). */
+  hs?: number;
+  hv?: true;
   upAsk: number | null;
   downAsk: number | null;
   /** Taille (parts) au meilleur ask. */

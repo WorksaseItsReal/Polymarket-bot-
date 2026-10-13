@@ -15,6 +15,7 @@ import { STRATEGY_COINS, coinsFromEnv, type StrategyCoin } from '../strategy/fai
 import { isValidTimeZone } from '../services/telegram-messages.js';
 import { looksLikeBotToken, telegramConfigFromEnv } from '../services/telegram.js';
 import { parseHHMM } from './daily-report.js';
+import { harvestConfigFromEnv, type HarvestConfig } from '../strategy/late-harvest.js';
 
 export type Env = Record<string, string | undefined>;
 
@@ -46,6 +47,8 @@ export interface BotConfig {
   /** Capital papier de référence (USDC). */
   capital: number;
   fv: FairValueConfig;
+  /** Récolte de fin de round (papier) : favori bloqué à 0,99 (late-harvest.ts). */
+  harvest: HarvestConfig;
   /** Marge de revente anticipée (bid net − p_modèle). Défaut : FV_MIN_EDGE. */
   exitEdge: number;
   /** Passage régulier de la stratégie (ms). */
@@ -200,6 +203,7 @@ export function loadBotConfig(env: Env = process.env): { config: BotConfig; warn
     dryRun,
     capital,
     fv,
+    harvest: harvestConfigFromEnv(env, warnings),
     exitEdge: num(env, 'FV_EXIT_EDGE', fv.minEdge, 0, 0.5, warnings),
     pollMs: num(env, 'FV_POLL_SEC', 10, 5, 300, warnings) * 1000,
     moveBps: num(env, 'FV_MOVE_BPS', 3, 1, 50, warnings),
@@ -244,5 +248,7 @@ export function dataPaths(dataDir: string) {
     shadow: join(dataDir, 'fv-shadow.json'),
     runState: join(dataDir, 'run-state.json'),
     journalDir: join(dataDir, 'journal'),
+    /** Arrêt de sécurité propre à la récolte de fin de round. */
+    guardLate: join(dataDir, 'fv-guard-late.json'),
   };
 }

@@ -19,6 +19,7 @@
 import {
   binaryPayoff,
   decide,
+  effectiveCostPerShare,
   entryMinTauSec,
   blendNoiseFactor,
   blendWithMarket,
@@ -34,19 +35,23 @@ import {
 } from '../services/fair-value.js';
 import {
   ledgerStatsShared,
+  ledgerStatsSharedFor,
   loadLedger,
   readLedgerShared,
   recentLossStreak,
   saveLedger,
   settlePnl,
+  strategyOf,
   type LedgerStats,
   type LedgerTrade,
   type RoundOutcome,
+  type StrategyKey,
 } from '../services/paper-ledger.js';
 import type { DecisionRecord } from '../services/decision-journal.js';
 import type { RoundMarketData } from '../services/round-market-data.js';
 import { computeStake, MAX_VARIANCE_PCT } from '../services/stake-sizing.js';
 import { msgAlert, msgTradeClosed, msgTradeOpened } from '../services/telegram-messages.js';
+import { FavoriteStreaks, HARVEST_EXPECTED_WIN, harvestDecision, harvestSide, type HarvestConfig, type HarvestSide } from './late-harvest.js';
 
 export const STRATEGY_COINS = ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE'] as const;
 /** Sous ce τ, plus de mesure « fin de round » (lecture des carnets trop proche du règlement). */
@@ -136,7 +141,15 @@ export interface RunnerDeps {
   entryBlock?: () => string | null;
   /** La mise est tombée à 0 à cause d'un modérateur de risque (drawdown, série de pertes). */
   onRiskStop?: (reason: string) => void;
+  /** Récolte de fin de round (late-harvest.ts, papier). Absente ou désactivée = jamais. */
+  harvest?: HarvestConfig;
+  /** Blocages de la récolte (arrêt du bot, horloge, SON garde-fou de performance), ou null.
+   *  Absent : `entryBlock` s'applique aussi à la récolte. */
+  harvestBlock?: () => string | null;
 }
+
+/** Identifiant de registre d'un trade de récolte (distinct du trade juste valeur du même round). */
+export const harvestTradeId = (conditionId: string): string => `${conditionId}|late`;
 
 /** Fenêtre de la série de pertes : 8 pertes d'affilée = pause de 6 h, pas un arrêt définitif. */
 export const LOSS_STREAK_WINDOW_MS = 6 * 3_600_000;
@@ -184,6 +197,8 @@ export class FairValueRunner {
   lastMarketsFoundAt = 0;
   private lastPauseLog = -Infinity;
   private ledgerBrokenWarned = false;
+  /** Séries « favori bloqué à 0,99 » par marché (récolte de fin de round). */
+  private readonly streaks = new FavoriteStreaks();
 
   constructor(deps: RunnerDeps) {
     this.d = deps;
@@ -229,6 +244,11 @@ export class FairValueRunner {
 
   stats(): LedgerStats {
     return ledgerStatsShared(this.d.ledgerPath);
+  }
+
+  /** Statistiques d'une seule stratégie (messages, séries de pertes, garde-fous). */
+  statsFor(key: StrategyKey): LedgerStats {
+    return ledgerStatsSharedFor(this.d.ledgerPath, key);
   }
 
   /** Dernière ligne lisible par marché (même si le journal l'a tue par throttling). */
@@ -345,12 +365,18 @@ export class FairValueRunner {
       if (!saved || !closed) continue;
       this.unresolvedWarned.delete(t.id);
       this.lastResolveTry.delete(t.id);
-      const stats = this.stats();
-      this.d.log('TRADE', `[SIMULATION] ${won ? 'GAGNÉ' : 'PERDU'} ${t.coin} ${t.side} (${t.slug}) ${pnl >= 0 ? '+' : ''}$${pnl.toFixed(4)} — `
-        + `bilan ${stats.n} trades, WR ${stats.winRate === null ? '—' : (stats.winRate * 100).toFixed(1) + ' %'}, PnL $${stats.pnl.toFixed(2)}`);
-      this.d.notify(msgTradeClosed({
-        coin: t.coin, side: t.side, slotSec: t.slotSec ?? t.endMs / 1000 - 300, outcome: won ? 'won' : 'lost', pnl, stats, timeZone: this.d.timeZone,
-      }));
+      const late = strategyOf(t) === 'late';
+      const stats = this.statsFor(strategyOf(t));
+      this.d.log('TRADE', `[SIMULATION] ${won ? 'GAGNÉ' : 'PERDU'}${late ? ' (récolte fin de round)' : ''} ${t.coin} ${t.side} (${t.slug}) ${pnl >= 0 ? '+' : ''}$${pnl.toFixed(4)} — `
+        + `bilan ${late ? 'récolte' : 'juste valeur'} ${stats.n} trades, WR ${stats.winRate === null ? '—' : (stats.winRate * 100).toFixed(1) + ' %'}, PnL $${stats.pnl.toFixed(2)}`);
+      // Récolte : des centaines de petits gains par jour → aucun message par gain (bilan
+      // périodique), mais chaque perte est annoncée (rare, et c'est elle qui compte).
+      if (!late || !won) {
+        this.d.notify(msgTradeClosed({
+          coin: t.coin, side: t.side, slotSec: t.slotSec ?? t.endMs / 1000 - 300, outcome: won ? 'won' : 'lost', pnl, stats, timeZone: this.d.timeZone,
+          ...(late ? { strategy: 'late' as const } : {}),
+        }));
+      }
       this.d.onTradeClosed?.(closed);
     }
   }
@@ -367,7 +393,8 @@ export class FairValueRunner {
     const now = this.d.now();
     const minShares = this.d.minSellShares ?? 0;
     const candidates: Array<{ pos: LedgerTrade; floor: number; pHeld: number; noiseMargin: number }> = [];
-    for (const pos of (this.trades() ?? []).filter(t => t.status === 'open')) {
+    // Récolte de fin de round : tenue jusqu'au règlement (entrée à τ ≤ 30 s, jamais revendue).
+    for (const pos of (this.trades() ?? []).filter(t => t.status === 'open' && strategyOf(t) === 'fv')) {
       const tauSec = (pos.endMs - now) / 1000;
       // En fin de round le modèle n'est pas fiable : on garde jusqu'à la résolution.
       if (tauSec < entryMinTauSec(cfg) || !pos.tokenId || !pos.slotSec) continue;
@@ -430,7 +457,7 @@ export class FairValueRunner {
         if (!saved || !closed) continue;
         this.d.log('TRADE', `[SIMULATION] VENTE ${pos.coin} ${pos.side} @ VWAP $${exitPrice.toFixed(3)} (net frais ${netPerShare.toFixed(3)} ≥ p_modèle ${pHeld.toFixed(3)} + ${this.d.exitEdge}${noiseMargin > 5e-4 ? ` + ${noiseMargin.toFixed(3)} bruit` : ''}) `
           + `round ${pos.slug} — PnL réalisé ${profit >= 0 ? '+' : ''}$${profit.toFixed(4)}`);
-        this.d.notify(msgTradeClosed({ coin: pos.coin, side: pos.side, slotSec: pos.slotSec as number, outcome: 'sold', pnl: profit, stats: this.stats(), timeZone: this.d.timeZone }));
+        this.d.notify(msgTradeClosed({ coin: pos.coin, side: pos.side, slotSec: pos.slotSec as number, outcome: 'sold', pnl: profit, stats: this.statsFor('fv'), timeZone: this.d.timeZone }));
         this.d.onTradeClosed?.(closed);
       } catch {
         /* carnet indisponible : on garde la position */
@@ -453,22 +480,32 @@ export class FairValueRunner {
   }
 
   /**
-   * Dernière minute du round (τ < fenêtre TWAP) : MESURE seulement, jamais d'entrée. Une partie
-   * du TWAP de règlement est déjà acquise (prix Binance par seconde) : P(Up) « fin de round » et
-   * le carnet sont journalisés (lt, pl, kn) pour que le rapport (section 1d) dise si un edge s'y
-   * cache — avant d'envisager quoi que ce soit (latence réelle, Chainlink ≠ Binance).
+   * Dernière minute du round (τ < fenêtre TWAP). Deux usages, indépendants :
+   *  - MESURE (FV_LATE_MEASURE) : une partie du TWAP de règlement est déjà acquise (prix Binance
+   *    par seconde) ; P(Up) « fin de round » et le carnet sont journalisés (lt, pl, kn) pour le
+   *    rapport (section 1d). La stratégie juste valeur n'y entre jamais ;
+   *  - RÉCOLTE (FV_HARVEST, late-harvest.ts) : favori bloqué à ≥ 0,99 depuis ≥ 6 s entre 30 et
+   *    8 s de la fin → achat papier au vrai carnet, après la latence simulée.
+   * Lecture toutes les 8 s, toutes les 3 s à l'approche de la fenêtre de récolte.
    */
-  private async measureLate(market: ScannedMarket, slot: number, endMs: number): Promise<void> {
+  private async measureLate(market: ScannedMarket, slot: number, endMs: number, gateBlock: string | null = null): Promise<void> {
     const { cfg } = this.d;
+    const hv = this.d.harvest;
     const key = market.conditionId;
     const now0 = this.d.now();
-    if (now0 - (this.lateAt.get(key) ?? -Infinity) < 8000) return; // une mesure par marché toutes les 8 s
+    const tau0 = (endMs - now0) / 1000;
+    const harvestZone = !!hv?.enabled && !this.traded.has(harvestTradeId(key))
+      && tau0 <= hv.maxTauSec + hv.stableSec + hv.checkEveryMs / 1000 + 1 && tau0 >= hv.minTauSec;
+    const every = harvestZone ? (hv as HarvestConfig).checkEveryMs : 8000;
+    if (now0 - (this.lateAt.get(key) ?? -Infinity) < every) return; // pas de lecture plus serrée que nécessaire
     this.lateAt.set(key, now0);
     if (this.lateAt.size > 200) this.lateAt.clear();
     let rec: DecisionRecord | null = null;
     try {
       let data = await this.d.getRoundData(market.underlying, slot, now0);
-      if (!data?.twapPartial) return; // sans flux temps réel, rien à mesurer
+      if (!data) return;
+      const measure = cfg.lateMeasure !== false && !!data.twapPartial;
+      if (!measure && !harvestZone) return; // sans flux temps réel, rien à mesurer
       const [upBook, downBook] = await Promise.all([this.d.getBook(market.upTokenId), this.d.getBook(market.downTokenId)]);
       const now = this.d.now();
       const tauSec = (endMs - now) / 1000;
@@ -477,28 +514,45 @@ export class FairValueRunner {
         // Carnets lents : spot et part acquise relus à l'instant des carnets (sinon les secondes
         // d'attente seraient comptées comme « connues » : kn + τ ≠ W, probabilité trop sûre).
         const fresh = await this.d.getRoundData(market.underlying, slot, now);
-        if (!fresh?.twapPartial) return;
+        if (!fresh || (measure && !fresh.twapPartial)) return;
         data = fresh;
       }
-      const partial = data.twapPartial;
-      if (!partial) return;
+      const partial = data.twapPartial ?? null;
       const upBest = bestLevel(upBook.asks, 'ask');
       const downBest = bestLevel(downBook.asks, 'ask');
       const upBid = bestLevel(upBook.bids, 'bid');
       const downBid = bestLevel(downBook.bids, 'bid');
-      const pl = probUpLate({ spot: data.spot, strike: data.strike, sigmaPerSqrtSec: data.sigmaPerSqrtSec, tauSec, partialMean: partial.mean, knownSec: partial.knownSec }, cfg);
+      const pl = partial
+        ? probUpLate({ spot: data.spot, strike: data.strike, sigmaPerSqrtSec: data.sigmaPerSqrtSec, tauSec, partialMean: partial.mean, knownSec: partial.knownSec }, cfg)
+        : null;
       const pRaw = probUp({ spot: data.spot, strike: data.strike, sigmaPerSqrtSec: data.sigmaPerSqrtSec, tauSec }, cfg);
-      rec = {
+      // Série « favori bloqué » (observée même hors fenêtre de récolte : la stabilité se mesure avant).
+      let fav: HarvestSide | null = null;
+      let hs: number | undefined;
+      if (hv?.enabled) {
+        fav = harvestSide(upBest?.price ?? null, downBest?.price ?? null, hv);
+        this.streaks.observe(key, fav, now);
+        if (fav) hs = Math.round(this.streaks.stableSec(key, fav, now) * 10) / 10;
+      }
+      const base: DecisionRecord = {
         t: now, slug: market.slug, coin: market.underlying, tau: Math.round(tauSec * 10) / 10, spot: data.spot, strike: data.strike,
-        sig: data.sigmaPerSqrtSec, pUp: pRaw, pRaw, zs: cfg.zScale, lt: true, pl, kn: Math.round(partial.knownSec),
+        sig: data.sigmaPerSqrtSec, pUp: pRaw, pRaw, zs: cfg.zScale, lt: true, pl, kn: partial ? Math.round(partial.knownSec) : 0,
         ...(data.sigmaCcPerSqrtSec ? { sc: data.sigmaCcPerSqrtSec } : {}), ...(data.sigmaParkPerSqrtSec ? { sp: data.sigmaParkPerSqrtSec } : {}),
         ...(cfg.tails === 't4' ? { tl: 't4' as const } : {}), ...(cfg.twapWindowSec > 0 ? { tw: cfg.twapWindowSec } : {}),
+        ...(hs !== undefined ? { hs } : {}),
         upAsk: upBest?.price ?? null, downAsk: downBest?.price ?? null, upAskSz: upBest?.size ?? null, downAskSz: downBest?.size ?? null,
         upBid: upBid?.price ?? null, downBid: downBid?.price ?? null, upBidSz: upBid?.size ?? null, downBidSz: downBid?.size ?? null,
         src: data.source, act: 'hold',
       };
-      this.lastReason.set(key, `${market.underlying} fin de round (τ ${Math.round(tauSec)} s, TWAP acquis ${Math.round(partial.knownSec)} s) : `
-        + `P(hausse) fin de round ${pl === null ? '—' : pl.toFixed(3)} · asks hausse ${upBest ? upBest.price.toFixed(2) : '—'} / baisse ${downBest ? downBest.price.toFixed(2) : '—'} — mesure seulement, jamais d'entrée`);
+      if (measure) {
+        rec = base;
+        this.lastReason.set(key, `${market.underlying} fin de round (τ ${Math.round(tauSec)} s, TWAP acquis ${Math.round(partial!.knownSec)} s) : `
+          + `P(hausse) fin de round ${pl === null ? '—' : pl.toFixed(3)} · asks hausse ${upBest ? upBest.price.toFixed(2) : '—'} / baisse ${downBest ? downBest.price.toFixed(2) : '—'} — mesure seulement, jamais d'entrée`);
+      }
+      if (harvestZone) {
+        const trade = await this.tryHarvest(market, slot, endMs, { tauSec, fav, hs: hs ?? 0, pl, upBook, downBook, data, gateBlock });
+        if (trade) rec = { ...base, act: 'buy', side: trade.side, stake: trade.stake, hv: true };
+      }
     } catch {
       /* mesure silencieuse : ne doit jamais gêner la stratégie */
     } finally {
@@ -509,21 +563,129 @@ export class FairValueRunner {
     }
   }
 
+  /**
+   * Récolte de fin de round : décision (late-harvest.ts), mise, exécution papier après la latence
+   * sur le carnet RELU, avec un prix limite sous `maxAsk` ; registre écrit avant toute annonce.
+   * Aucun message Telegram à l'ouverture (des centaines par jour) : bilan périodique, et chaque
+   * perte annoncée au règlement. Renvoie le trade enregistré, ou null.
+   */
+  private async tryHarvest(
+    market: ScannedMarket, slot: number, endMs: number,
+    o: { tauSec: number; fav: HarvestSide | null; hs: number; pl: number | null; upBook: Book; downBook: Book; data: RoundMarketData; gateBlock: string | null },
+  ): Promise<LedgerTrade | null> {
+    const hv = this.d.harvest as HarvestConfig;
+    const { cfg } = this.d;
+    const id = harvestTradeId(market.conditionId);
+    if (this.traded.has(id)) return null;
+    const decision = harvestDecision({ tauSec: o.tauSec, side: o.fav, stableSec: o.hs, pModelUp: o.pl }, hv);
+    if (!decision.side) return null;
+    const side = decision.side;
+    const ctx = `${market.underlying} récolte fin de round : ${decision.reason}`;
+    const blockNow = (): string | null => (this.d.harvestBlock ? this.d.harvestBlock() : (this.d.entryBlock?.() ?? null));
+    const block = o.gateBlock ?? blockNow();
+    if (block) {
+      this.holdLog(id, `   ↳ ${ctx} → ignorée : entrées bloquées (${block})`);
+      return null;
+    }
+    const best = bestLevel((side === 'UP' ? o.upBook : o.downBook).asks, 'ask');
+    if (!best) return null;
+    const now = this.d.now();
+    const all = readLedgerShared(this.d.ledgerPath) ?? [];
+    const stats = this.stats();
+    const equity = this.d.capital() + stats.pnl;
+    const peak = this.d.capital() + stats.peakPnl;
+    const stakeRes = computeStake({
+      capital: equity,
+      entryPrice: effectiveCostPerShare(best.price, cfg.takerFeeRate),
+      bookProb: HARVEST_EXPECTED_WIN,
+      consecutiveLosses: recentLossStreak(all.filter(t => strategyOf(t) === 'late'), now, LOSS_STREAK_WINDOW_MS),
+      drawdownCurrent: peak > 0 ? stats.drawdownNow / peak : 0,
+      openExposureEur: stats.openExposure,
+      openPositions: stats.open,
+      maxConcurrentPositions: 10,
+    });
+    if (stakeRes.skipped || !(stakeRes.stake > 0)) {
+      this.holdLog(id, `   ↳ ${ctx} → PAS de mise : ${stakeRes.rationale}`);
+      if (stakeRes.bindingConstraint === 'drawdown' || stakeRes.bindingConstraint === 'série de pertes') this.d.onRiskStop?.(stakeRes.rationale);
+      return null;
+    }
+    const minOrder = this.d.minOrderUsd ?? 0;
+    if (stakeRes.stake < minOrder) {
+      this.holdLog(id, `   ↳ ${ctx} → PAS de mise : ${stakeRes.stake.toFixed(2)} $ < minimum Polymarket ${minOrder} $`);
+      return null;
+    }
+    const limit = hv.maxAsk - 1e-9;
+    const delay = this.d.fillDelayMs ?? 0;
+    const tokenId = side === 'UP' ? market.upTokenId : market.downTokenId;
+    let book = side === 'UP' ? o.upBook : o.downBook;
+    if (delay > 0) {
+      await (this.d.sleep ?? (ms => new Promise(r => setTimeout(r, ms))))(delay);
+      const lateBlock = blockNow();
+      if (lateBlock) {
+        this.holdLog(id, `   ↳ ${ctx} → PAS de mise : ${lateBlock}`);
+        return null;
+      }
+      book = await this.d.getBook(tokenId); // carnet à l'arrivée de l'ordre
+    }
+    const fillAt = this.d.now();
+    if ((endMs - fillAt) / 1000 < 2) {
+      this.holdLog(id, `   ↳ ${ctx} → PAS de mise : ordre arrivé trop près de la fin du round`);
+      return null;
+    }
+    const fill = estimateFill(book.asks, stakeRes.stake, limit, cfg.takerFeeRate);
+    if (!fill.complete || fill.avgPrice === null || fill.avgCost === null) {
+      this.holdLog(id, `   ↳ ${ctx} → PAS de mise : profondeur insuffisante pour $${stakeRes.stake.toFixed(2)} sous ${hv.maxAsk}`
+        + (delay > 0 ? ` (carnet relu ${delay} ms après la décision)` : ''));
+      return null;
+    }
+    const stake = stakeRes.stake;
+    const { shares, winProfit } = binaryPayoff(stake, fill.avgCost);
+    const trade: LedgerTrade = {
+      id, strategy: 'late', slug: market.slug, coin: market.underlying, side, stake, costPerShare: fill.avgCost, shares,
+      modelProb: HARVEST_EXPECTED_WIN, edge: HARVEST_EXPECTED_WIN - fill.avgCost, openedAt: new Date(fillAt).toISOString(), endMs,
+      status: 'open', pnl: null, tokenId, otherTokenId: side === 'UP' ? market.downTokenId : market.upTokenId, slotSec: slot,
+    };
+    const finalBlock = blockNow();
+    if (finalBlock) {
+      this.holdLog(id, `   ↳ ${ctx} → PAS de mise : ${finalBlock}`);
+      return null;
+    }
+    let pushed = false;
+    const saved = this.update(trades => {
+      if (!trades.some(t => t.id === trade.id)) {
+        trades.push(trade);
+        pushed = true;
+      }
+    });
+    if (saved) this.traded.add(id);
+    if (!saved || !pushed) return null;
+    const description = `🌾 ${ctx} → achat ${side} @ VWAP $${fill.avgPrice.toFixed(3)} + frais = $${fill.avgCost.toFixed(4)}/part, mise $${stake.toFixed(2)}`
+      + ` — gain $${winProfit.toFixed(4)} si ${side} / perte $${stake.toFixed(2)} sinon${o.pl === null ? '' : ` · P(modèle fin de round) ${(side === 'UP' ? o.pl : 1 - o.pl).toFixed(4)}`}`;
+    this.d.log('TRADE', `[SIMULATION] RÉCOLTE FIN DE ROUND ${market.underlying} ${side} @ $${fill.avgPrice.toFixed(3)} mise $${stake.toFixed(2)} τ ${Math.round(o.tauSec)} s (favori bloqué depuis ${o.hs.toFixed(0)} s) — ${market.slug}`);
+    this.lastReason.set(market.conditionId, description);
+    this.d.onTradeOpened?.({ trade, market, data: o.data, ask: fill.avgPrice, tauSec: (endMs - fillAt) / 1000, winProfit, description });
+    return trade;
+  }
+
   async enterNewTrades(coins?: readonly string[], gateBlock: string | null = null): Promise<void> {
     const { cfg } = this.d;
     await this.refreshMarkets();
+    this.streaks.prune(this.d.now());
+    const harvestOn = !!this.d.harvest?.enabled;
     for (const market of this.markets) {
       if (coins && !coins.includes(market.underlying)) continue;
-      if (this.traded.has(market.conditionId)) continue;
       const slot = slotOf(market) as number;
       const endMs = slot * 1000 + 300_000;
       const now = this.d.now();
       let tauSec = (endMs - now) / 1000;
-      // Dernière minute = fenêtre de moyenne (τ < W, jamais dans la fenêtre d'entrée qui commence à max(minTau, W)).
-      if (tauSec < Math.min(60, cfg.twapWindowSec) && tauSec >= LATE_MIN_TAU_SEC && cfg.lateMeasure !== false && cfg.twapWindowSec > 0) {
-        await this.measureLate(market, slot, endMs);
+      // Dernière minute = fenêtre de moyenne (τ < W, jamais dans la fenêtre d'entrée qui commence à
+      // max(minTau, W)) : mesure, et récolte de fin de round si activée — y compris sur un round
+      // déjà joué par la juste valeur (avant : ces rounds étaient exclus de la mesure, un biais).
+      if (tauSec < Math.min(60, cfg.twapWindowSec) && tauSec >= LATE_MIN_TAU_SEC && cfg.twapWindowSec > 0 && (cfg.lateMeasure !== false || harvestOn)) {
+        await this.measureLate(market, slot, endMs, gateBlock);
         continue;
       }
+      if (this.traded.has(market.conditionId)) continue;
       if (tauSec < entryMinTauSec(cfg) || tauSec > cfg.maxTauSec) continue; // aucun appel réseau hors fenêtre
       const coin = market.underlying;
       let rec: DecisionRecord | null = null; // évaluation journalisée (pari ou abstention)
@@ -608,7 +770,7 @@ export class FairValueRunner {
           // de moitié vers le prix par computeStake (λ = 0,5) — prudence voulue, même si elle se cumule
           // avec le mélange.
           bookProb: q.prob,
-          consecutiveLosses: recentLossStreak(readLedgerShared(this.d.ledgerPath) ?? [], now, LOSS_STREAK_WINDOW_MS),
+          consecutiveLosses: recentLossStreak((readLedgerShared(this.d.ledgerPath) ?? []).filter(t => strategyOf(t) === 'fv'), now, LOSS_STREAK_WINDOW_MS),
           drawdownCurrent: peakCapital > 0 ? stats.drawdownNow / peakCapital : 0,
           openExposureEur: stats.openExposure,
           openPositions: stats.open,

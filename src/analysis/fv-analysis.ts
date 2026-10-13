@@ -910,3 +910,72 @@ export function liveStrikeAvailability(
   delays.sort((a, b) => a - b);
   return { rounds: rounds.length, withPs, medianDelaySec: delays.length ? delays[Math.floor(delays.length / 2)] : null, compared, same };
 }
+
+export interface HarvestReplayOpts {
+  minAsk: number;
+  maxAsk: number;
+  minTau: number;
+  maxTau: number;
+  stableSec: number;
+  feeRate: number;
+}
+
+const pinnedSide = (r: Pick<DecisionRecord, 'upAsk' | 'downAsk'>, o: Pick<HarvestReplayOpts, 'minAsk' | 'maxAsk'>): 'UP' | 'DOWN' | null => {
+  const p = (a: number | null) => a !== null && a >= o.minAsk && a < o.maxAsk;
+  const up = p(r.upAsk);
+  const down = p(r.downAsk);
+  return up === down ? null : up ? 'UP' : 'DOWN';
+};
+
+/**
+ * Récolte de fin de round REJOUÉE sur les mesures de fin de round du journal (lt) : par round, le
+ * premier relevé de la fenêtre [minTau, maxTau] où le même favori est bloqué à ≥ minAsk depuis
+ * ≥ stableSec (champ `hs` du bot ; anciens journaux : relevé précédent, ≤ 12 s plus tôt, bloqué du
+ * même côté), acheté au meilleur ask journalisé, frais inclus. Un pari par round, t groupé par créneau.
+ */
+export function harvestReplay(rounds: ResolvedRecord[][], o: HarvestReplayOpts): ScanResult {
+  const pnls: Array<{ key: string; x: number; won: boolean }> = [];
+  for (const list of rounds) {
+    const late = list.filter(r => r.lt).sort((a, b) => a.t - b.t);
+    let prev: { side: 'UP' | 'DOWN'; t: number } | null = null;
+    for (const r of late) {
+      const side = pinnedSide(r, o);
+      const stable = side !== null && (typeof r.hs === 'number'
+        ? r.hs >= o.stableSec
+        : prev !== null && prev.side === side && r.t - prev.t <= 12_000);
+      if (side && stable && r.tau >= o.minTau && r.tau <= o.maxTau) {
+        const ask = (side === 'UP' ? r.upAsk : r.downAsk) as number;
+        const cost = effectiveCostPerShare(ask, o.feeRate);
+        const won = (side === 'UP') === r.upWon;
+        pnls.push({ key: slotKey(r.slug), x: won ? 1 / cost - 1 : -1, won });
+        break;
+      }
+      prev = side ? { side, t: r.t } : null;
+    }
+  }
+  return summarizePnls(pnls, o.minAsk);
+}
+
+/** Paris de récolte réellement pris (relevés `hv`), au meilleur ask de la décision, frais inclus. */
+export function harvestTaken(records: ResolvedRecord[], feeRate: number): ScanResult {
+  const pnls: Array<{ key: string; x: number; won: boolean }> = [];
+  for (const r of records) {
+    if (!r.hv || r.act !== 'buy' || !r.side) continue;
+    const ask = r.side === 'UP' ? r.upAsk : r.downAsk;
+    if (ask === null || !(ask > 0 && ask < 1)) continue;
+    const cost = effectiveCostPerShare(ask, feeRate);
+    const won = (r.side === 'UP') === r.upWon;
+    pnls.push({ key: slotKey(r.slug), x: won ? 1 / cost - 1 : -1, won });
+  }
+  return summarizePnls(pnls, 0);
+}
+
+function summarizePnls(pnls: Array<{ key: string; x: number; won: boolean }>, minEdge: number): ScanResult {
+  const n = pnls.length;
+  const total = pnls.reduce((a, p) => a + p.x, 0);
+  const wins = pnls.filter(p => p.won).length;
+  return {
+    minEdge, minProb: 0, n, wins, winRate: n ? wins / n : null, evPerDollar: n ? total / n : null, total,
+    tStat: clusteredMeanT(pnls.map(p => ({ key: p.key, x: p.x }))).t,
+  };
+}
