@@ -61,13 +61,29 @@ Sur le serveur, dans le dossier du bot, **une commande fait tout** (code `main`,
 interface, diagnostic, relance PM2 ; ne touche ni au `.env` ni aux données) :
 
 ```bash
-npm run upgrade                            # = bash scripts/update.sh [branche]
+npm run upgrade                            # = bash scripts/update.sh (sans argument : toujours main)
+```
+
+**Le serveur ne déploie que `main`.** PM2 exécute ce qui est extrait sur le disque : une branche
+de travail déployée, ou un `git checkout` manuel resté en place jusqu'à la mise à jour suivante,
+fait tourner du code non validé dont les résultats papier se mêlent au registre et au journal —
+on ne sait plus quel code a produit quelle mesure. Une branche se teste en local
+(`npm run check`, `npm run demo`), puis se fusionne dans `main` avant d'arriver sur le serveur.
+D'où : `npm run upgrade -- <branche>` est refusé (code 2, avant toute commande git), et le
+doctor affiche ❌ « Code déployé » si autre chose que `main` est extrait (⚠️ si HEAD est détaché).
+
+Vérifier ce qui tourne réellement sur le serveur :
+
+```bash
+pm2 describe polymarket-paperbot | grep -E 'exec cwd|script path'   # <dossier> exécuté par PM2
+git -C <dossier> rev-parse --abbrev-ref HEAD   # doit afficher : main
+git -C <dossier> log -1 --oneline              # commit déployé (à comparer avec le dernier commit de main sur GitHub)
 ```
 
 À la main, la même chose étape par étape :
 
 ```bash
-git fetch origin && git checkout main && git pull
+git fetch origin main && git checkout main && git pull --ff-only origin main
 npm install
 npm run check                              # types + tests (sans réseau) : doit finir sans échec
 (cd dashboard && npm install && npm run build)   # interface web (à refaire après chaque mise à jour)

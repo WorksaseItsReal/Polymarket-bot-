@@ -1,5 +1,5 @@
 /**
- * Diagnostic d'installation du bot (configuration, fichiers, réseau, Telegram).
+ * Diagnostic d'installation du bot (code déployé, configuration, fichiers, réseau, Telegram).
  *
  *   npm run doctor
  *
@@ -8,12 +8,15 @@
 import 'dotenv/config';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { configChecks, fileChecks, networkChecks, runtimeChecks, summarize, type Check } from '../src/services/doctor.js';
+import { fileURLToPath } from 'node:url';
+import { configChecks, fileChecks, gitDeployedCodeCheck, networkChecks, runtimeChecks, summarize, type Check } from '../src/services/doctor.js';
 import { TelegramClient, telegramConfigFromEnv } from '../src/services/telegram.js';
 
 async function main(): Promise<number> {
   const poly = join(process.env.HOME || homedir(), '.polymarket');
   const checks: Check[] = [...runtimeChecks(), ...configChecks(process.env), ...fileChecks(poly, process.cwd())];
+  // En tête : quel code tourne (branche et commit du dépôt qui contient ce script ; main seul).
+  checks.unshift(gitDeployedCodeCheck(fileURLToPath(new URL('..', import.meta.url))));
   console.log('Vérification du réseau (quelques secondes)…\n');
   checks.push(...await networkChecks((...a: Parameters<typeof fetch>) => fetch(...a), Date.now(), 6000, Date.now));
   const tg = telegramConfigFromEnv(process.env);

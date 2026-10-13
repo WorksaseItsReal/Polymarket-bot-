@@ -7,6 +7,7 @@
  * l'environnement, les chemins et `fetch` sont injectés.
  */
 
+import { execFileSync } from 'node:child_process';
 import { existsSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { entryMinTauSec } from './fair-value.js';
@@ -95,6 +96,53 @@ export function runtimeChecks(nodeVersion: string = process.versions.node): Chec
   return [okVersion
     ? ok('Node.js', `v${nodeVersion}`)
     : err('Node.js', `v${nodeVersion} : Node ≥ 20.6 requis (PM2 lance le bot par « node --import tsx »). Mettre Node à jour (22 LTS recommandé).`)];
+}
+
+/** Résultat d'une commande git : sa sortie (rognée), ou la raison de son échec, en clair. */
+export type GitOutput = { ok: true; out: string } | { ok: false; error: string };
+
+/**
+ * Code déployé : le serveur n'exécute QUE main (scripts/update.sh refuse toute autre branche).
+ * PM2 lance ce qui est extrait sur le disque : un `git checkout` manuel d'une autre branche
+ * reste en place jusqu'à la prochaine mise à jour, et ses résultats papier se mêlent à ceux de
+ * main. Fonction pure : reçoit les sorties de `git rev-parse --abbrev-ref HEAD` (« HEAD » si
+ * détaché) et de `git rev-parse --short HEAD`.
+ */
+export function deployedCodeCheck(branch: GitOutput, commit: GitOutput): Check {
+  const label = 'Code déployé';
+  if (!branch.ok || branch.out === '') {
+    return warn(label, `branche illisible (${branch.ok ? 'sortie vide' : branch.error}) : impossible de vérifier que c'est main qui tourne.`);
+  }
+  const at = commit.ok && commit.out ? ` @ ${commit.out}` : '';
+  if (branch.out === 'HEAD') {
+    return warn(label, `HEAD détaché${at} (aucune branche, retour arrière manuel ?) : le serveur doit exécuter main → npm run upgrade`);
+  }
+  if (branch.out !== 'main') {
+    return err(label, `branche ${branch.out}${at} extraite : le serveur ne déploie que main (PM2 exécute ce qui est sur le disque) → npm run upgrade`);
+  }
+  return ok(label, `main${at}`);
+}
+
+/** Lance `git -C repoDir …` avec un délai borné ; ne lève jamais (git absent, pas un dépôt, délai). */
+export function runGit(repoDir: string, args: string[], timeoutMs = 3000, gitBin = 'git'): GitOutput {
+  try {
+    const out = execFileSync(gitBin, ['-C', repoDir, ...args], { encoding: 'utf8', timeout: timeoutMs, stdio: ['ignore', 'pipe', 'pipe'] });
+    return { ok: true, out: out.trim() };
+  } catch (e) {
+    const x = e as NodeJS.ErrnoException & { stderr?: string | Buffer; signal?: string | null };
+    if (x.code === 'ENOENT') return { ok: false, error: 'git absent' };
+    if (x.code === 'ETIMEDOUT' || x.signal) return { ok: false, error: `git sans réponse en ${timeoutMs / 1000} s` };
+    const first = String(x.stderr ?? '').trim().split('\n')[0].replace(/^fatal:\s*/, '');
+    return { ok: false, error: /not a git repository/i.test(first) ? 'pas un dépôt git' : first || x.message };
+  }
+}
+
+/** Adaptateur : lit la branche et le commit du dépôt `repoDir`, puis `deployedCodeCheck`. */
+export function gitDeployedCodeCheck(repoDir: string, timeoutMs = 3000, gitBin = 'git'): Check {
+  return deployedCodeCheck(
+    runGit(repoDir, ['rev-parse', '--abbrev-ref', 'HEAD'], timeoutMs, gitBin),
+    runGit(repoDir, ['rev-parse', '--short', 'HEAD'], timeoutMs, gitBin),
+  );
 }
 
 /** Date de modification la plus récente sous `dir` (récursif, sans node_modules), 0 si absent. */

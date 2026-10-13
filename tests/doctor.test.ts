@@ -1,13 +1,14 @@
 /**
- * tests/doctor.test.ts — diagnostic d'installation (configuration, fichiers, réseau).
+ * tests/doctor.test.ts — diagnostic d'installation (configuration, fichiers, réseau, code déployé).
  * Exécution : `npx tsx --test tests/doctor.test.ts`
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { configChecks, dashboardBuildCheck, fileChecks, networkChecks, runtimeChecks, summarize } from '../src/services/doctor.ts';
+import { configChecks, dashboardBuildCheck, deployedCodeCheck, fileChecks, gitDeployedCodeCheck, networkChecks, runtimeChecks, summarize } from '../src/services/doctor.ts';
 
 const level = (cs: ReturnType<typeof configChecks>, label: string) => cs.find(c => c.label === label)?.level;
 
@@ -124,4 +125,52 @@ test('interface du dashboard : absente, périmée (sources plus récentes que la
   assert.equal(dashboardBuildCheck(repo).level, 'warn');
   utimesSync(join(repo, 'dashboard', 'dist', 'index.html'), Date.now() / 1000 + 5, Date.now() / 1000 + 5);
   assert.equal(dashboardBuildCheck(repo).level, 'ok');
+});
+
+test('code déployé : main seul (autre branche = erreur, HEAD détaché ou git indisponible = avertissement)', () => {
+  const out = (o: string) => ({ ok: true as const, out: o });
+  const fail = (error: string) => ({ ok: false as const, error });
+  const main = deployedCodeCheck(out('main'), out('abc1234'));
+  assert.equal(main.level, 'ok');
+  assert.equal(main.label, 'Code déployé');
+  assert.equal(main.detail, 'main @ abc1234');
+  const branch = deployedCodeCheck(out('feat/fair-value-strategy'), out('def5678'));
+  assert.equal(branch.level, 'error');
+  assert.match(branch.detail, /^branche feat\/fair-value-strategy @ def5678 extraite/);
+  assert.match(branch.detail, /ne déploie que main/);
+  assert.match(branch.detail, /npm run upgrade/, 'la commande de correction');
+  const detached = deployedCodeCheck(out('HEAD'), out('0a1b2c3'));
+  assert.equal(detached.level, 'warn');
+  assert.match(detached.detail, /^HEAD détaché @ 0a1b2c3/);
+  assert.match(detached.detail, /npm run upgrade/);
+  const absent = deployedCodeCheck(fail('git absent'), fail('git absent'));
+  assert.equal(absent.level, 'warn');
+  assert.match(absent.detail, /^branche illisible \(git absent\)/);
+  assert.equal(deployedCodeCheck(fail('pas un dépôt git'), fail('pas un dépôt git')).level, 'warn');
+  assert.equal(deployedCodeCheck(out(''), out('')).level, 'warn', 'sortie vide : illisible, pas « ok »');
+  assert.equal(deployedCodeCheck(out('main'), fail('x')).detail, 'main', 'commit illisible : la branche suffit');
+});
+
+test('code déployé (adaptateur git) : vraie branche lue ; git absent ou hors dépôt → avertissement, sans planter', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'doctor-git-'));
+  const absent = gitDeployedCodeCheck(dir, 3000, join(dir, 'pas-de-git'));
+  assert.equal(absent.level, 'warn');
+  assert.match(absent.detail, /git absent/);
+  const horsDepot = gitDeployedCodeCheck(dir);
+  assert.equal(horsDepot.level, 'warn', horsDepot.detail);
+  assert.match(horsDepot.detail, /^branche illisible/);
+
+  const git = (...args: string[]) => execFileSync('git', ['-C', dir, '-c', 'user.name=test', '-c', 'user.email=test@example.invalid', '-c', 'commit.gpgsign=false', ...args], { stdio: 'ignore' });
+  git('init', '-q', '-b', 'main');
+  git('commit', '-q', '--allow-empty', '-m', 'initial');
+  const main = gitDeployedCodeCheck(dir);
+  assert.equal(main.level, 'ok', main.detail);
+  assert.match(main.detail, /^main @ [0-9a-f]{7,}$/);
+  git('checkout', '-q', '-b', 'feat/x');
+  const feat = gitDeployedCodeCheck(dir);
+  assert.equal(feat.level, 'error');
+  assert.match(feat.detail, /^branche feat\/x @ [0-9a-f]{7,} extraite/);
+  git('checkout', '-q', '--detach');
+  assert.equal(gitDeployedCodeCheck(dir).level, 'warn');
+  assert.match(gitDeployedCodeCheck(dir).detail, /^HEAD détaché @ [0-9a-f]{7,}/);
 });
