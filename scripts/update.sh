@@ -9,7 +9,9 @@
 # teste en local (npm run check, npm run demo) ; tout argument est refusé (code 2) AVANT la
 # moindre commande git.
 #
-# Ne touche ni au .env ni aux données (~/.polymarket : registre, journal, historique).
+# Ne touche ni au .env ni aux données (~/.polymarket : registre, journal, historique). Avant de
+# relancer le bot, copie le registre dans ~/.polymarket/backups/ (scripts/lib/backup-ledger.sh :
+# le nouveau code peut le migrer au démarrage) ; sauvegarde impossible → bot NON relancé, code 1.
 set -euo pipefail
 # Tout le corps est dans main() : bash l'analyse en entier AVANT d'exécuter, donc le `git pull`
 # qui remplace ce fichier en cours de route ne peut pas le casser.
@@ -21,6 +23,10 @@ if [ "$#" -gt 0 ]; then
 fi
 cd "$(dirname "$0")/.."
 APP="polymarket-paperbot"
+# Chargée AVANT le pull, pour la même raison que main() : la version lue est celle du départ.
+. scripts/lib/backup-ledger.sh
+# Code qui a écrit le registre actuel : nomme la sauvegarde faite avant la relance.
+PREV="$(git rev-parse --short HEAD 2>/dev/null || echo inconnu)"
 
 echo "▶ Code : branche main"
 # Lockfiles réécrits par un ancien « npm install » : régénérables, ils bloquaient le pull.
@@ -51,6 +57,13 @@ echo "▶ Dashboard (interface)"
 echo "▶ Diagnostic"
 if ! npm run doctor; then
   echo "⚠️  Le doctor signale des erreurs (ci-dessus). Le bot est relancé quand même : corrige-les, puis « pm2 restart $APP »."
+fi
+
+# Juste avant la relance (état le plus récent) ; l'ancien processus tourne encore à ce stade.
+echo "▶ Sauvegarde du registre"
+if ! backup_ledger "$PREV"; then
+  echo "❌ Sauvegarde du registre impossible : le bot n'est PAS relancé sur le nouveau code (il pourrait migrer le registre). Corriger, puis « npm run upgrade »." >&2
+  exit 1
 fi
 
 if command -v pm2 >/dev/null 2>&1; then

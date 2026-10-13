@@ -80,6 +80,12 @@ git -C <dossier> rev-parse --abbrev-ref HEAD   # doit afficher : main
 git -C <dossier> log -1 --oneline              # commit déployé (à comparer avec le dernier commit de main sur GitHub)
 ```
 
+**Sauvegardes du registre** : avant de relancer le bot (le nouveau code peut migrer le registre
+au démarrage), `npm run upgrade` copie `fv-ledger.json`, `fv-ledger.jsonl` et `fv-guard*.json` dans
+`~/.polymarket/backups/ledger-<date UTC>-<commit>/` (les 10 plus récentes sont gardées).
+Sauvegarde impossible → bot non relancé (code 1). Restaurer : arrêter le bot, recopier les
+fichiers du dossier choisi dans `~/.polymarket/`, relancer.
+
 À la main, la même chose étape par étape :
 
 ```bash
