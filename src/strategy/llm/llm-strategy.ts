@@ -19,6 +19,7 @@ import type { RoundMarketData } from '../../services/round-market-data.js';
 import type { LedgerStore } from '../../services/ledger-store.js';
 import type { LedgerTrade } from '../../services/paper-ledger.js';
 import { evaluateRisk } from '../../bot/risk-gate.js';
+import { escapeHtml } from '../../services/telegram-messages.js';
 import type { RiskLimits } from '../../bot/config.js';
 import { MAX_VARIANCE_PCT } from '../../services/stake-sizing.js';
 import { bestLevel, slotOf, type Book, type ScannedMarket } from '../fair-value-runner.js';
@@ -127,7 +128,7 @@ export class LlmStrategy {
   private onPause(ev: PauseEvent | null): void {
     if (!ev) return;
     const until = new Date(ev.pausedUntil).toISOString().slice(11, 16);
-    this.d.notify(`⏸️ <b>llm en pause</b> jusqu'à ${until} UTC — ${ev.reason}`);
+    this.d.notify(`⏸️ <b>llm en pause</b> jusqu'à ${until} UTC — ${escapeHtml(ev.reason)}`);
     this.d.log('WARN', `llm en pause jusqu'à ${new Date(ev.pausedUntil).toISOString()} : ${ev.reason}`);
   }
 
@@ -241,7 +242,11 @@ export class LlmStrategy {
     }
     if (res.code !== 'ok' || !res.final) {
       const why = res.steps.find(s => s.code !== 'ok');
-      return abstain(res.code, why ? `${why.role} : ${why.outcome.ok ? why.code : why.outcome.detail}` : 'aucune décision');
+      const fin = res.final;
+      const detail = why ? `${why.role} : ${why.outcome.ok ? why.code : why.outcome.detail}`
+        : fin ? (res.code === 'veto' ? `veto : ${(fin.securite?.motifs ?? []).join(' ; ') || 'sans motif'}` : fin.raison)
+          : 'aucune décision';
+      return abstain(res.code, detail);
     }
     const f = res.final;
     if (f.action === 'abstention') return abstain(f.securite?.verdict === 'veto' ? 'veto' : 'abstention_agent', f.raison);
@@ -285,6 +290,6 @@ export class LlmStrategy {
     if (!opened) return abstain('deja_parie', 'round déjà au registre pour llm');
     rec.tradeId = tradeId;
     abstain('ok', `${side} @ ${g.fill.costPerShare.toFixed(4)}/part frais compris, mise ${g.fill.costUsd.toFixed(2)} $, P(Up) agents ${f.proba_estimee.toFixed(3)} vs formule ${fvDec.pUp === null ? '—' : fvDec.pUp.toFixed(3)}`);
-    d.notify(`🤖 <b>llm (papier)</b> — ${m.underlying} ${side} · mise ${g.fill.costUsd.toFixed(2)} $ à ${g.fill.vwap.toFixed(3)} (+ frais)\nP(Up) agents ${f.proba_estimee.toFixed(2)} · formule ${fvDec.pUp === null ? '—' : fvDec.pUp.toFixed(2)}\n${f.raison.slice(0, 200).replace(/</g, '&lt;')}`);
+    d.notify(`🤖 <b>llm (papier)</b> — ${m.underlying} ${side} · mise ${g.fill.costUsd.toFixed(2)} $ à ${g.fill.vwap.toFixed(3)} (+ frais)\nP(Up) agents ${f.proba_estimee.toFixed(2)} · formule ${fvDec.pUp === null ? '—' : fvDec.pUp.toFixed(2)}\n${escapeHtml(f.raison.slice(0, 200))}`);
   }
 }

@@ -11,12 +11,16 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { configChecks, fileChecks, gitDeployedCodeCheck, networkChecks, runtimeChecks, summarize, type Check } from '../src/services/doctor.js';
 import { TelegramClient, telegramConfigFromEnv } from '../src/services/telegram.js';
+import { llmChecks } from '../src/services/doctor-llm.js';
+import { readCliVersion } from '../src/bot/llm-setup.js';
 
 async function main(): Promise<number> {
   const poly = join(process.env.HOME || homedir(), '.polymarket');
   const checks: Check[] = [...runtimeChecks(), ...configChecks(process.env), ...fileChecks(poly, process.cwd())];
   // En tête : quel code tourne (branche et commit du dépôt qui contient ce script ; main seul).
   checks.unshift(gitDeployedCodeCheck(fileURLToPath(new URL('..', import.meta.url))));
+  // Stratégie llm (papier) : une ligne si désactivée ; sinon CLI figé, jeton (expiration), prompts, sonde.
+  checks.push(...llmChecks({ env: process.env, home: process.env.HOME || homedir(), repoDir: fileURLToPath(new URL('..', import.meta.url)), nowMs: Date.now(), readCliVersion }));
   console.log('Vérification du réseau (quelques secondes)…\n');
   checks.push(...await networkChecks((...a: Parameters<typeof fetch>) => fetch(...a), Date.now(), 6000, Date.now));
   const tg = telegramConfigFromEnv(process.env);
