@@ -7,8 +7,10 @@
  * `/backtest` les calculent sur le serveur et envoient ce résumé (≤ 4 096 caractères).
  *
  * Fonctions PURES : les chiffres viennent des scripts (fv-report.ts, historical-backtest.ts).
- * HTML Telegram : seuls <b> et des nombres sont émis (aucun texte externe).
+ * HTML Telegram : seuls <b> et des nombres sont émis (aucun texte externe ; le nom de campagne
+ * llm est réduit à [A-Za-z0-9._-]).
  */
+import { STOP_RULE, type StopLook, type StopVerdict } from '../strategy/llm/stop-rule.js';
 
 export interface ReplayLine {
   n: number;
@@ -43,6 +45,30 @@ export interface JournalSummary {
   buys: { n: number; wins: number } | null;
   /** Récolte de fin de round : paris pris (papier) et règle rejouée sur le journal. */
   harvest?: { enabled: boolean; taken: ReplayLine | null; replay: ReplayLine | null } | null;
+  /** Stratégie llm (papier) contre la formule : absent sans décision llm sur la période (résumé inchangé). */
+  llm?: LlmSummary | null;
+}
+
+/**
+ * Stratégie llm contre la formule évaluée au MÊME instantané et exécutée par le même modèle
+ * (llm-report.ts) : campagne la plus récente.
+ */
+export interface LlmSummary {
+  /** Campagne (version du CLI + version des prompts). */
+  campaign: string;
+  /** Décisions de la campagne sur la période (abstentions comprises). */
+  attempts: number;
+  /** Décisions appariées réglées sur la période (P(Up) formule valide). */
+  paired: number;
+  /** Paris réglés de chaque côté parmi elles, et gain moyen pour 1 $ par pari (frais compris). */
+  llmBets: number;
+  formulaBets: number;
+  llmGainPerBet: number | null;
+  formulaGainPerBet: number | null;
+  /** Brier sur les paires où les deux P(Up) sont valides. */
+  brier: { n: number; llm: number | null; formula: number | null };
+  /** Règle d'arrêt pré-enregistrée (stop-rule.ts), sur TOUTE la campagne. */
+  stop: { n: number; look: StopLook; verdict: StopVerdict; deltaBrier: number | null; zBrier: number | null; deltaGain: number | null; zGain: number | null };
 }
 
 export interface BacktestSummary {
@@ -124,12 +150,40 @@ function journalVerdictMain(s: JournalSummary): Verdict {
   return { level: 'none', text: '⏳ Pas d\'edge démontré : rester en papier et laisser tourner.' };
 }
 
+// ---------------------------------------------------------------- stratégie llm (papier)
+
+/** Nom de campagne réduit à [A-Za-z0-9._-] : texte venu du journal, jamais de HTML. */
+const campaignFmt = (s: string) => s.replace(/[^A-Za-z0-9._-]/g, '?').slice(0, 48) || '?';
+const lookFmt = (l: StopLook) => (l === 'final' ? `final (${int(STOP_RULE.nFinal)})` : `intermédiaire (${int(STOP_RULE.nIntermediaire)})`);
+
+const STOP_FMT: Readonly<Record<StopVerdict, (st: LlmSummary['stop']) => string>> = {
+  insuffisant: st => `⏳ insuffisant (${int(st.n)}/${int(STOP_RULE.nIntermediaire)} décisions appariées)`,
+  non_concluant: st => `🔎 non concluant au regard ${lookFmt(st.look)} → prolonger (${int(st.n)}/${int(STOP_RULE.nFinal)})`,
+  succes: st => `✅ succès au regard ${lookFmt(st.look)} : llm meilleur que la formule (papier seulement)`,
+  echec: st => `❌ échec au regard ${lookFmt(st.look)} : garder la formule`,
+};
+
+/** Lignes llm du résumé : paris et gains contre la formule, Brier apparié, règle d'arrêt. */
+export function llmSummaryLines(l: LlmSummary): string[] {
+  const st = l.stop;
+  const b4 = (x: number | null) => (x === null ? '—' : dec(x, 4));
+  return [
+    `<b>llm vs formule</b> (papier, même instantané · campagne ${campaignFmt(l.campaign)}) : ${count(l.attempts, 'décision', 'décisions')}`,
+    `   paris réglés : llm ${int(l.llmBets)} (${evFmt(l.llmGainPerBet)} par pari) · formule ${int(l.formulaBets)} (${evFmt(l.formulaGainPerBet)} par pari)`
+      + ` · sur ${count(l.paired, 'décision appariée', 'décisions appariées')}`,
+    `   Brier apparié : llm ${b4(l.brier.llm)} vs formule ${b4(l.brier.formula)} (${count(l.brier.n, 'paire', 'paires')}, plus bas = meilleur)`,
+    `   Règle d'arrêt (toute la campagne) : ${STOP_FMT[st.verdict](st)} · ΔBrier ${st.deltaBrier === null ? '—' : signed(st.deltaBrier, 4)} (z ${tFmt(st.zBrier)})`
+      + ` · ΔGain ${evFmt(st.deltaGain)} par décision (z ${tFmt(st.zGain)})`,
+  ];
+}
+
 export function renderJournalSummary(s: JournalSummary): string {
   const L: string[] = [];
   L.push(`📊 <b>Rapport edge — ${int(s.days)} dernier${s.days >= 2 ? 's' : ''} jour${s.days >= 2 ? 's' : ''}</b>`);
   L.push(`${count(s.rounds, 'round réglé', 'rounds réglés')} · ${count(s.evaluations, 'évaluation', 'évaluations')}${s.lateMeasures ? ` (+ ${int(s.lateMeasures)} fin de round)` : ''}`);
   if (!s.rounds) {
     L.push('', 'Aucun round réglé dans le journal pour cette période : laisser tourner le bot (journal FV_JOURNAL activé).');
+    if (s.llm) L.push('', ...llmSummaryLines(s.llm));
     return L.join('\n');
   }
   const m = s.model;
@@ -167,6 +221,7 @@ export function renderJournalSummary(s: JournalSummary): string {
     L.push(`<b>Calibration</b> : FV_Z_SCALE optimal ${dec(z.m, 2)} (IC95 ${dec(z.lo, 2)}–${dec(z.hi, 2)}), actuel ${dec(z.current, 2)}${inside ? ' ✓' : ' → à revoir'}`);
   }
   if (s.buys && s.buys.n) L.push(`<b>Paris papier pris</b> : ${int(s.buys.n)}, gagnés ${pctFmt(s.buys.wins / s.buys.n)}`);
+  if (s.llm) L.push('', ...llmSummaryLines(s.llm));
   L.push('', `<b>Verdict</b> : ${journalVerdict(s).text}`);
   return L.join('\n');
 }

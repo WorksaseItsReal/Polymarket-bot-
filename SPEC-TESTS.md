@@ -297,6 +297,13 @@ chaque round + alerte Telegram au changement. Le processus CLI est lancé avec l
 désactivées.
 **L-8.2b** Jeton enregistré sans date connue → considéré « expire bientôt » (expiration
 inconnue), utilisable mais signalé.
+**L-8.6 Diagnostic** (`npm run doctor`) : llm désactivée → une seule ligne OK ; demandée
+mais indisponible (configuration refusée, L-1.1c) → erreur ; activée → une ligne par point :
+binaire du CLI à la version figée (OK, ou erreur avec la commande d'installation de cette
+version) ; mise à jour automatique du CLI non coupée → avertissement ; jeton : OK avec la date
+d'expiration calculée et les jours restants, avertissement à 30 jours ou moins avec la commande
+de renouvellement, erreur s'il est absent, lisible par d'autres ou expiré ; version des prompts ;
+sonde réelle absente ou en échec pour la campagne en place → avertissement (« /llm on » refusé).
 **L-8.5** Chaque décision enregistre la version du CLI et la version des prompts ; une
 nouvelle valeur de l'une ou l'autre ouvre une **nouvelle campagne**, distinguée dans le
 rapport.
@@ -323,6 +330,8 @@ lignes de décision ne le sont jamais.
 moyen ± intervalle de confiance (groupé par créneau de 5 min), Brier et table de
 calibration de la proba llm, taux d'abstention par motif, taux de veto, latence p50 / p95 /
 max, désaccords llm/formule sur les mêmes rounds (qui avait raison), par campagne.
+(Section 5 de `scripts/analysis/fv-report.ts`, calculs purs dans `src/analysis/llm-report.ts` ;
+résumé `/rapport` : `llmSummaryLines` de `src/analysis/report-summary.ts`.)
 **L-10.2 Paires** : un round compte si llm a produit une P(Up) valide, que la formule avait
 une P(Up) au même instantané, et que l'issue est connue. Les échecs techniques sont exclus
 du Brier mais comptent pour un gain nul, et leur taux est publié.
@@ -344,6 +353,4 @@ calculé à la main.
 
 ## Reporté (non spécifié ici)
 
-Rejeu llm sur historique anonymisé ; commande de retour arrière vers un commit de main ;
-section comparative llm / formule / récolte dans `/rapport` (les données nécessaires sont
-enregistrées, cf. L-9 et L-10.2–L-10.4).
+Rejeu llm sur historique anonymisé ; commande de retour arrière vers un commit de main.

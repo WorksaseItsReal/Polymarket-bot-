@@ -2,21 +2,26 @@
  * Rapport d'analyse du journal des décisions (stratégie juste valeur).
  *
  *   npx tsx scripts/analysis/fv-report.ts [--dir ~/.polymarket/journal] [--days 7] [--json out.json] [--summary]
+ *                                         [--llm-decisions ~/.polymarket/llm/decisions.jsonl]
  *
  * 1. lit les évaluations journalisées (decisions-*.jsonl) ;
  * 2. règle chaque round via Gamma `events?slug=` (cache ~/.polymarket/outcomes-cache.json) ;
  * 3. répond, dans l'ordre : le modèle bat-il le marché (Brier) ? est-il calibré ?
  *    quels seuils auraient rapporté, et est-ce stable sur les deux moitiés ?
+ * 4. compare enfin (section 5) formule / récolte / llm : trades réglés du registre par stratégie,
+ *    puis décisions de la stratégie llm par campagne (llm-report.ts), avec le verdict de la règle
+ *    d'arrêt pré-enregistrée.
  *
  * `--summary` : seulement le résumé Telegram (HTML) avec le verdict — c'est ce que la
  * commande /rapport du bot exécute.
  *
- * Lecture seule sur le journal ; écrit uniquement le cache des résultats.
+ * Lecture seule sur le journal, le registre et les décisions llm ; écrit uniquement le cache des résultats.
  */
 import 'dotenv/config';
-import { existsSync, readdirSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { createReadStream, existsSync, readdirSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { createInterface } from 'node:readline';
 import { JOURNAL_FILE_RE, type DecisionRecord } from '../../src/services/decision-journal.js';
 import { gunzipSync } from 'node:zlib';
 import { fetchRoundOutcome } from '../../src/services/paper-ledger.js';
@@ -29,6 +34,11 @@ import {
 import { renderJournalSummary, solid, T_BEST, type JournalSummary, type ReplayLine } from '../../src/analysis/report-summary.js';
 import { harvestReplay, harvestTaken } from '../../src/analysis/fv-analysis.js';
 import { harvestConfigFromEnv } from '../../src/strategy/late-harvest.js';
+import { readLedgerShared } from '../../src/services/ledger-store.js';
+import { llmPaths } from '../../src/strategy/llm/llm-config.js';
+import {
+  ledgerByStrategy, ledgerSectionLines, llmReport, llmRoundsToResolve, llmSectionLines, llmSummaryOf, slimLlmDecision, type LlmDecisionLite,
+} from '../../src/analysis/llm-report.js';
 
 function arg(name: string): string | undefined {
   const i = process.argv.indexOf(`--${name}`);
@@ -54,6 +64,9 @@ function replayLine(rounds: ResolvedRecord[][], minEdge: number, minProb: number
 const CACHE = join(POLY, 'outcomes-cache.json');
 /** Prix à battre / final publiés par Polymarket (eventMetadata), lus avec le résultat. */
 const PRICES_CACHE = join(POLY, 'round-prices-cache.json');
+/** Registre papier (section 5a) et décisions de la stratégie llm (5b). */
+const LEDGER = join(POLY, 'fv-ledger.jsonl');
+const LLM_DECISIONS = arg('llm-decisions') ?? llmPaths(POLY).decisions;
 const cfg = fairValueConfigFromEnv(process.env);
 
 const pct = (x: number | null, d = 1) => (x === null ? '—' : `${(x * 100).toFixed(d)} %`);
@@ -122,6 +135,36 @@ function readJournal(): DecisionRecord[] {
   return out;
 }
 
+/**
+ * Décisions de la stratégie llm, TOUTES (la règle d'arrêt juge la campagne entière ; la fenêtre
+ * --days est appliquée ensuite). Fichier absent : aucune décision (stratégie jamais lancée).
+ * Lu ligne à ligne : plusieurs ko par décision, des centaines de Mo sur un an.
+ */
+async function readLlmDecisions(): Promise<{ all: LlmDecisionLite[]; error: string | null }> {
+  const all: LlmDecisionLite[] = [];
+  if (!existsSync(LLM_DECISIONS)) return { all, error: null };
+  let bad = 0;
+  let error: string | null = null;
+  const why = (err: unknown) => (err as NodeJS.ErrnoException)?.code ?? String((err as Error)?.message ?? err).slice(0, 120);
+  try {
+    const input = createReadStream(LLM_DECISIONS, { encoding: 'utf8' });
+    const lines = createInterface({ input, crlfDelay: Infinity });
+    // Fichier illisible (droits, dossier…) : la section le dit, le reste du rapport continue.
+    input.on('error', err => { error ??= why(err); lines.close(); });
+    for await (const line of lines) {
+      if (!line.trim()) continue;
+      let d: LlmDecisionLite | null = null;
+      try { d = slimLlmDecision(JSON.parse(line)); } catch { /* ligne illisible */ }
+      if (d) all.push(d);
+      else bad++;
+    }
+  } catch (err) {
+    error ??= why(err);
+  }
+  if (bad) console.error(`(${bad} lignes illisibles ignorées dans ${LLM_DECISIONS})`);
+  return { all, error };
+}
+
 async function resolveAll(slugs: string[]): Promise<{ outcomes: Map<string, boolean>; prices: Record<string, [number | null, number | null]> }> {
   const readJson = <T>(f: string, d: T): T => (existsSync(f) ? (() => { try { return JSON.parse(readFileSync(f, 'utf8')) as T; } catch { return d; } })() : d);
   const cache = readJson<Record<string, boolean>>(CACHE, {});
@@ -152,7 +195,12 @@ async function main() {
     console.error(`(journal volumineux : ${records.length} évaluations — en cas de manque de mémoire, réduire --days`
       + ' ou lancer avec NODE_OPTIONS=--max-old-space-size=2048)');
   }
-  const { outcomes, prices } = await resolveAll([...new Set(records.map(r => r.slug))]);
+  // Décisions llm (section 5) : leurs rounds sont réglés avec ceux du journal (même cache).
+  const since = Date.now() - DAYS * 86_400_000;
+  const llm = await readLlmDecisions();
+  const slugs = new Set(records.map(r => r.slug));
+  for (const s of llmRoundsToResolve(llm.all, since)) slugs.add(s);
+  const { outcomes, prices } = await resolveAll([...slugs]);
   // Issue ajoutée EN PLACE (objets fraîchement lus, propres à ce script) : pas de copie.
   const resolved: ResolvedRecord[] = [];
   for (const r of records) {
@@ -183,7 +231,21 @@ async function main() {
     current: { minEdge: cfg.minEdge, minProb: cfg.minProb, n: 0, winRate: null, ev: null, t: null, evH1: null, evH2: null },
     best: null, late: null, vol: null, strike: null, zScale: null, buys: null,
   };
+  // 5. Comparatif formule / récolte / llm : le résumé llm est rempli ici (absent sans décision :
+  // résumé inchangé) ; la section complète s'imprime en fin de rapport, ou seule si aucun round
+  // du journal n'est réglé.
+  const llmRep = llm.error ? null : llmReport(llm.all, since, outcomes);
+  if (llmRep) S.llm = llmSummaryOf(llmRep);
+  const comparison = (): void => {
+    if (SUMMARY) return;
+    say('\n5) Comparatif formule / récolte / llm (papier)');
+    const trades = readLedgerShared(LEDGER);
+    for (const l of ledgerSectionLines(trades && ledgerByStrategy(trades, since), DAYS)) say(l);
+    if (llm.error) say(`llm : décisions illisibles (${llm.error}) — ${LLM_DECISIONS}`);
+    else for (const l of llmSectionLines(llmRep, DAYS, LLM_DECISIONS)) say(l);
+  };
   if (!rounds.length) {
+    comparison();
     if (SUMMARY) console.log(renderJournalSummary(S));
     return;
   }
@@ -413,6 +475,8 @@ async function main() {
     say(`\n4) Paris réellement pris : ${buys.length}, gagnés ${wins} (${pct(wins / buys.length)})`);
     S.buys = { n: buys.length, wins };
   }
+
+  comparison();
 
   const out = arg('json');
   if (out) {

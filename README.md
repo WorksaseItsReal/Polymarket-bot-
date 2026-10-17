@@ -248,7 +248,7 @@ Tout vit dans **`~/.polymarket/`** (`/root/.polymarket/`) :
 
 ```bash
 npx tsx scripts/analysis/ledger.ts          # bilan + derniers trades du registre (--export-json : ancien format)
-npx tsx scripts/analysis/fv-report.ts --days 7   # le modèle a-t-il un edge ? (sections 0 à 4)
+npx tsx scripts/analysis/fv-report.ts --days 7   # le modèle a-t-il un edge ? (sections 0 à 5)
 ```
 
 ### 4.1 Telegram (intégré au bot)
@@ -422,6 +422,12 @@ par round toutes les 10 s, avec probabilité, bruit, asks, meilleurs bids, fenê
 2. **Est-il calibré ?** (« 70 % » gagne-t-il ~70 % du temps ?), `FV_Z_SCALE` suggéré avec IC.
 3. **Quels seuils auraient rapporté**, sur chaque moitié, et selon la marge de bruit `k`.
 4. Paris réellement pris.
+5. **Comparatif formule / récolte / llm** (papier) : trades réglés du registre par stratégie (taux
+   de gain, gain par 1 $ misé avec IC 95 % groupé par créneau, PnL), puis décisions llm
+   (`~/.polymarket/llm/decisions.jsonl`, autre fichier : `--llm-decisions`) par campagne :
+   abstentions par motif, veto, échecs techniques, latence, Brier et gains **appariés** contre la
+   formule au même instantané, calibration, désaccords, et verdict de la règle d'arrêt
+   pré-enregistrée (jugée sur toute la campagne). `/rapport` en reprend 4 lignes.
 
 Les évaluations d'un autre modèle (fenêtre TWAP différente) sont ignorées. Backtest rapide sur
 l'historique (prix par minute, indicatif) : `npx tsx scripts/analysis/historical-backtest.ts --days 3`.
